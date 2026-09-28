@@ -1,0 +1,30 @@
+[project]
+name = "rover-intent"
+version = "0.1.0"
+description = "Body, voice and EEG intent -> a 6-axis rover arm. Nemotron on Nebius Token Factory for language."
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.10"
+dependencies = [
+  "numpy>=1.26",
+  "pydantic>=2.6",
+  "pyyaml>=6",
+  "openai>=1.40",
+]
+
+[project.optional-dependencies]
+# laptop side: camera + mic
+laptop = ["mediapipe>=0.10", "opencv-python>=4.9", "faster-whisper>=1.0", "sounddevice>=0.4"]
+# EEG motor-imagery training + live decoding
+eeg = ["mne>=1.7", "moabb>=1.1", "pyriemann>=0.6", "scikit-learn>=1.4", "brainflow>=5.12"]
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/rover_intent"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

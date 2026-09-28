@@ -1,0 +1,51 @@
+# rover-intent default config. PLACEHOLDER values are marked; replace as hardware facts come in.
+
+arm:
+  urdf: assets/rover2026/rover2026.urdf
+  tip_link: a6_EE_holder
+  tcp_offset: [0.15, 0.0, 0.0]        # PLACEHOLDER: gripper TCP along +x of the tool face; measure the real claw
+  home: [3.98, -1.31, 0.86, 0.0, 2.12, 2.31]  # sim: TCP top-down at (0.45, 0, 0.45). PLACEHOLDER for the real arm
+  # PLACEHOLDER motor limits (same as the v4 sim work) until the datasheets arrive
+  max_vel: [0.8, 0.8, 0.8, 1.5, 1.5, 1.5]   # rad/s
+  max_acc: [2.0, 2.0, 2.0, 4.0, 4.0, 4.0]   # rad/s^2
+
+safety:
+  workspace_min: [-0.2, -0.8, 0.05]   # m, base frame; keep the TCP above the table
+  workspace_max: [1.0, 0.8, 1.0]
+  watchdog_s: 0.25
+
+loop:
+  hz: 50
+  backend: mock                        # mock | isaac | real
+
+net:                                   # laptop -> VM over the tailnet
+  listen_port: 47100
+  isaac_host: 127.0.0.1
+  isaac_cmd_port: 47110
+  isaac_state_port: 47111
+
+body:
+  # MediaPipe world axes (x right, y down, z toward camera) -> arm base (x forward, y left, z up)
+  axes: [[0, 0, -1], [-1, 0, 0], [0, -1, 0]]
+  scale: 1.3
+  origin: [0.45, 0.0, 0.45]
+  alpha: 0.3
+
+nemotron:
+  base_url: https://api.tokenfactory.nebius.com/v1/
+  api_key_env: NEBIUS_API_KEY
+  model: nvidia/nemotron-3-super-120b-a12b   # check the Token Factory catalog for the exact id / a cheaper Nano
+
+eeg:
+  p_on: 0.7      # p_grasp above this -> close (after hold_s)
+  p_off: 0.3     # below this -> open
+  hold_s: 0.5
+
+assist:
+  radius: 0.08
+  gain: 0.6
+
+scene:                                 # PLACEHOLDER positions until ArUco/detection is in
+  cup:    {pos: [0.55, 0.15, 0.10], height: 0.10}
+  bottle: {pos: [0.55, -0.15, 0.12], height: 0.22}
+  bowl:   {pos: [0.70, 0.00, 0.06], height: 0.06}
