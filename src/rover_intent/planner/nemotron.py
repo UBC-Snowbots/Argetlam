@@ -60,10 +60,16 @@ class IntentParser:
 _STOP = re.compile(r"\b(stop|freeze|halt|hold on|wait|whoa|emergency|abort)\b")
 
 
+_RESET = re.compile(r"\b(reset|restart|start over)\b")
+
+
 def urgent_stop(text: str) -> Intent | None:
-    """Local, instant: anything that sounds like 'stop' stops, before (and instead of) any LLM call."""
-    if _STOP.search(text.lower()):
+    """Local, instant commands, checked before (and instead of) any LLM call: stop, then reset."""
+    t = text.lower()
+    if _STOP.search(t):
         return Intent(action=Action.stop, say="Stopping.")
+    if _RESET.search(t):
+        return Intent(action=Action.reset, say="Resetting.")
     return None
 
 

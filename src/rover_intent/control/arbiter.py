@@ -49,6 +49,9 @@ class Arbiter:
         a = intent.action
         if a == Action.stop:
             self.mode, self._plan, self._wp_since, self._wp_started = Mode.HOLD, [], None, None
+        elif a == Action.reset:
+            self.mode, self._plan, self._wp_since, self._wp_started = Mode.HOLD, [], None, None
+            self.gripper, self.held, self._eeg_since = 0.0, None, None
         elif a == Action.follow:
             self.mode, self._plan = Mode.FOLLOW, []
         elif a == Action.grasp:

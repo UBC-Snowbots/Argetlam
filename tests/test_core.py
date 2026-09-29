@@ -104,6 +104,22 @@ def test_stop_words_never_reach_the_llm(text, monkeypatch):
     assert p.parse(text, ["cup"]).action == Action.stop
 
 
+@pytest.mark.parametrize("text", ["reset", "Restart the table please", "let's start over"])
+def test_reset_is_local(text):
+    p = IntentParser("any", "http://unused")
+    p.client = object()
+    assert p.parse(text, ["cup"]).action == Action.reset
+
+
+def test_reset_clears_arbiter_and_pick_while_holding_is_refused():
+    a = Arbiter(Scene(SCENE))
+    a.held, a.gripper = "block", 1.0
+    a.on_intent(Intent(action=Action.pick, object="cup"))
+    assert a.mode == Mode.HOLD and "already holding the block" in a.last_say  # no mid-air drop
+    a.on_intent(Intent(action=Action.reset))
+    assert (a.mode, a.held, a.gripper) == (Mode.HOLD, None, 0.0)
+
+
 def test_fallback_word_boundaries():
     # 'block' must not be found inside 'blocked', nor 'cup' inside 'cupboard'
     assert fallback_parse("the cupboard is blocked", ["cup", "block"]).action == Action.unknown

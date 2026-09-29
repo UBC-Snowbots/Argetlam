@@ -7,7 +7,7 @@
 Then, in .venv:  python -m rover_intent.app --backend isaac
 
 Protocol (rover_intent.robot.backends.IsaacArm):
-  rx :47110  {"q": [6 arm joint targets, rad], "g": 0..1 gripper close}
+  rx :47110  {"q": [6 arm joint targets, rad], "g": 0..1 gripper close}   or   {"reset": true}
   tx :47111  {"q": [6 measured arm joints], "objects": {name: [x, y, z_bottom]}}
 Until the first command arrives the arm holds the config's home pose.
 
@@ -104,14 +104,26 @@ for name, o in cfg["scene"].items():
 heights = {n: cfg["scene"][n]["height"] for n in objects}
 
 sim.reset()
-# sim.reset() does NOT move the articulation to init_state: it spawns at all-zero joints and the PD then swings it
-# ~4 rad to home at full speed. Write the default pose explicitly.
-q0 = robot.data.default_joint_pos.torch.clone()
-robot.write_joint_position_to_sim_index(position=q0)
-robot.write_joint_velocity_to_sim_index(velocity=torch.zeros_like(q0))
-robot.set_joint_position_target_index(target=q0)
-robot.write_data_to_sim()
-robot.update(0.0)
+
+
+def reset_scene():
+    """Arm to home (teleport, zero velocity), gripper open, every object back to its start pose.
+    Also needed at start-up: sim.reset() does NOT apply init_state (the arm would spawn at all-zero joints
+    and swing ~4 rad to home at full speed)."""
+    q0 = robot.data.default_joint_pos.torch.clone()
+    robot.write_joint_position_to_sim_index(position=q0)
+    robot.write_joint_velocity_to_sim_index(velocity=torch.zeros_like(q0))
+    robot.set_joint_position_target_index(target=q0)
+    robot.write_data_to_sim()
+    robot.update(0.0)
+    for o in objects.values():
+        o.write_root_pose_to_sim_index(root_pose=o.data.default_root_pose.torch.clone())
+        o.write_root_velocity_to_sim_index(root_velocity=torch.zeros_like(o.data.default_root_vel.torch))
+        o.reset()
+        o.update(0.0)
+
+
+reset_scene()
 arm_ids = robot.find_joints(ARM_JOINTS, preserve_order=True)[0]
 finger_ids = robot.find_joints(FINGER_JOINTS, preserve_order=True)[0]
 dev = sim.device
@@ -126,7 +138,7 @@ state_addr = ("127.0.0.1", net["isaac_state_port"])
 print(f"[bridge] ready: cmd :{net['isaac_cmd_port']}  state -> :{net['isaac_state_port']}", flush=True)
 
 dt = sim.get_physics_dt()
-t_sim, n_cmd, last_log = 0.0, 0, 0.0
+t_sim, n_cmd, last_log, n_resets = 0.0, 0, 0.0, 0
 wall0, n_step = time.time(), 0
 prof = {"step_r": [0.0, 0], "step_n": [0.0, 0], "io": [0.0, 0]}
 while app.is_running():
@@ -136,6 +148,13 @@ while app.is_running():
             msg = json.loads(rx.recv(65536))
         except BlockingIOError:
             break
+        if msg.get("reset"):
+            reset_scene()
+            q_target[0] = torch.tensor(home, dtype=torch.float32, device=dev)
+            g_target[:] = 0.0
+            n_resets += 1
+            print(f"[bridge] RESET #{n_resets} at t={t_sim:.1f}s", flush=True)
+            continue
         q_target[0] = torch.tensor(msg["q"], dtype=torch.float32, device=dev)
         g_target[:] = float(msg.get("g", 0.0)) * STROKE
         n_cmd += 1

@@ -40,6 +40,8 @@ def plan(intent: Intent, scene: Scene, held: str | None) -> list[Waypoint]:
     """`held` = name of the object in the gripper (None if empty)."""
     up = np.array([0, 0, 1.0])
     if intent.action == Action.pick:
+        if held is not None:
+            raise SkillError(f"already holding the {held}; say 'let go' or 'put it beside ...' first")
         o = _obj(scene, intent.object)
         p = o.pos.copy()
         return [Waypoint(_transit(p), 0, "above-object"), Waypoint(p + APPROACH * up, 0, "pre-grasp"),

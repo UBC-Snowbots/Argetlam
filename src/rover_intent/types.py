@@ -16,6 +16,7 @@ class Action(str, Enum):
     home = "home"
     stop = "stop"
     follow = "follow"      # hand control back to body mirroring
+    reset = "reset"        # arm home, gripper open, objects back to their start poses (sim)
     unknown = "unknown"
 
 

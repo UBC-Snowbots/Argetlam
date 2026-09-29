@@ -65,25 +65,32 @@ def run(cfg: dict, backend: str, seconds: float | None = None):
     log.info("backend=%s nemotron=%s objects=%s", backend, "online" if parser.online else "OFFLINE fallback",
              scene.names())
     descriptions = {n: o.get("desc", "") for n, o in cfg["scene"].items()}
+    home = np.array(cfg["arm"]["home"], float)
+    body_target, body_t = None, 0.0
+    q_cmd = robot.read_joints()  # commanded trajectory state (the drives track it; see WINDUP)
+    T_des = arm.fk(q_cmd)
     pool, pending = ThreadPoolExecutor(max_workers=1), []
 
     def finish(text, addr, intent, latency):
         log.info("heard %r -> %s (%.1fs)", text, intent.model_dump(exclude_none=True), latency)
-        if intent.action == Action.stop:  # a slow cloud result must not restart the arm after a stop
+        if intent.action in (Action.stop, Action.reset):  # a slow cloud result must not restart the arm
             for p_text, p_addr, _, fut in pending:
                 fut.cancel()
                 rx.reply(p_addr, {"kind": "reply", "text": p_text, "say": "Cancelled by stop.", "mode": "hold"})
             pending.clear()
         arbiter.on_intent(intent)
+        if intent.action == Action.reset:
+            nonlocal q_cmd, T_des, body_target
+            robot.reset(home)
+            safety.reset()
+            retarget.reset()
+            q_cmd, T_des, body_target = home.copy(), arm.fk(home), None
         if arbiter.last_say and arbiter.last_say != intent.say:
             log.info("arbiter: %s", arbiter.last_say)
         rx.reply(addr, {"kind": "reply", "text": text, "latency_s": round(latency, 2),
                         "intent": intent.model_dump(mode="json", exclude_none=True),
                         "say": arbiter.last_say or intent.say, "mode": arbiter.mode.value})
 
-    body_target, body_t = None, 0.0
-    q_cmd = robot.read_joints()  # commanded trajectory state (the drives track it; see WINDUP)
-    T_des = arm.fk(q_cmd)
     t_end = None if seconds is None else time.time() + seconds
     next_status = 0.0
     while t_end is None or time.time() < t_end:

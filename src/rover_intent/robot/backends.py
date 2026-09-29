@@ -20,6 +20,10 @@ class ArmBackend(abc.ABC):
     @abc.abstractmethod
     def command(self, q: np.ndarray, gripper: float) -> None: ...
 
+    def reset(self, q_home) -> None:
+        """Put the arm at q_home with the gripper open (sim: also restore the objects)."""
+        raise NotImplementedError
+
     def close(self) -> None:
         pass
 
@@ -36,10 +40,13 @@ class MockArm(ArmBackend):
         self.q = np.array(q, float)
         self.gripper = float(gripper)
 
+    def reset(self, q_home):
+        self.q, self.gripper = np.array(q_home, float), 0.0
+
 
 class IsaacArm(ArmBackend):
     """Joint targets -> Isaac over UDP; state <- Isaac.
-    cmd:   {"q": [6], "g": 0..1}
+    cmd:   {"q": [6], "g": 0..1}   or   {"reset": true}
     state: {"q": [6], "objects": {name: [x, y, z_bottom]}}   (objects: sim ground truth, stands in for perception)
     """
 
@@ -65,6 +72,11 @@ class IsaacArm(ArmBackend):
 
     def command(self, q, gripper):
         self.tx.sendto(json.dumps({"q": list(map(float, q)), "g": float(gripper)}).encode(), self.addr)
+
+    def reset(self, q_home):
+        """The bridge teleports the arm home and restores the objects; then we adopt home as the state."""
+        self.tx.sendto(json.dumps({"reset": True}).encode(), self.addr)
+        self.q = np.array(q_home, float)
 
 
 class RealArm(ArmBackend):
