@@ -25,37 +25,48 @@ class Waypoint:
     pos: np.ndarray
     gripper: float  # 0 open .. 1 closed
     label: str
+    obj: str | None = None  # object the waypoint acts on (for close/open bookkeeping)
+    dwell: float = 0.0      # s to wait at the waypoint (let the fingers close/open)
+
+GRIP_DWELL = 0.8
 
 
 class SkillError(ValueError):
     pass
 
 
-def plan(intent: Intent, scene: Scene, holding: bool) -> list[Waypoint]:
+def plan(intent: Intent, scene: Scene, held: str | None) -> list[Waypoint]:
+    """`held` = name of the object in the gripper (None if empty)."""
     up = np.array([0, 0, 1.0])
     if intent.action == Action.pick:
         o = _obj(scene, intent.object)
-        return [Waypoint(o.pos + APPROACH * up, 0, "pre-grasp"), Waypoint(o.pos, 0, "grasp-pos"),
-                Waypoint(o.pos, 1, "close"), Waypoint(o.pos + LIFT * up, 1, "lift")]
+        p = o.pos.copy()
+        return [Waypoint(p + APPROACH * up, 0, "pre-grasp"), Waypoint(p, 0, "grasp-pos"),
+                Waypoint(p, 1, "close", o.name, GRIP_DWELL), Waypoint(p + LIFT * up, 1, "lift")]
     if intent.action == Action.place:
-        if not holding:
+        if held is None:
             raise SkillError("not holding anything")
-        return _place(intent, scene)
+        return _place(intent, scene, _obj(scene, held))
     if intent.action == Action.move:
-        pick = plan(Intent(action=Action.pick, object=intent.object), scene, holding)
-        return pick + _place(intent, scene)
+        if held is not None:
+            raise SkillError(f"already holding the {held}")
+        pick = plan(Intent(action=Action.pick, object=intent.object), scene, None)
+        return pick + _place(intent, scene, _obj(scene, intent.object))
     raise SkillError(f"no motion skill for {intent.action.value}")
 
 
-def _place(intent: Intent, scene: Scene) -> list[Waypoint]:
+def _place(intent: Intent, scene: Scene, obj) -> list[Waypoint]:
+    """Release `obj` so it ends up in `relation` to the reference. Assumes both stand on the same surface."""
     up = np.array([0, 0, 1.0])
     ref = _obj(scene, intent.reference)
     if intent.relation in ("on", "into"):
-        goal = ref.pos + (ref.height + 0.02) * up
+        # objects stand on z=0, so obj.pos[2] is the grasp height above its own bottom
+        goal = np.array([ref.pos[0], ref.pos[1], ref.height + obj.pos[2] + 0.01])
     else:
         goal = ref.pos + np.array(_OFFSETS.get(intent.relation or "beside", _OFFSETS["beside"]))
+        goal[2] = obj.pos[2]  # same support surface: release at the object's own grasp height
     return [Waypoint(goal + LIFT * up, 1, "pre-place"), Waypoint(goal, 1, "place-pos"),
-            Waypoint(goal, 0, "open"), Waypoint(goal + APPROACH * up, 0, "retreat")]
+            Waypoint(goal, 0, "open", obj.name, GRIP_DWELL), Waypoint(goal + APPROACH * up, 0, "retreat")]
 
 
 def _obj(scene: Scene, name: str | None):

@@ -25,7 +25,7 @@ Only the language decision goes to the cloud; the control loop is local.
 | # | Milestone | Done when |
 |---|---|---|
 | 0 | Scaffold | ✅ tests pass; mock loop runs follow → EEG grasp → voice move (2026-09-28) |
-| 1 | **Sim arm + gripper** | isaac_bridge.py: rover2026 + gripper in Isaac, driven by the app over UDP; physical cup grasp |
+| 1 | **Sim arm + gripper** | ✅ 2026-09-28: isaac_bridge.py + 2F-85-sized gripper; voice 'move X beside Y' does physical grasps (placed within 1–8 mm) |
 | 2 | **Body mirroring in sim** | laptop webcam drives the sim arm smoothly (latency, jitter measured) |
 | 3 | **Voice** | Token Factory key in; "move the cup beside the bottle" works in sim from speech |
 | 4 | **EEG offline** | EEGMMIDB clench-vs-rest decoder: within-subject and leave-subjects-out numbers reported |

@@ -29,6 +29,7 @@ from .types import BodyPose, EEGState, Utterance
 
 log = logging.getLogger("rover_intent")
 ROOT = Path(__file__).resolve().parents[2]
+WINDUP = 0.25  # rad: max gap between the commanded and the measured joint positions
 
 
 def build(cfg: dict, backend: str):
@@ -62,7 +63,8 @@ def run(cfg: dict, backend: str, seconds: float | None = None):
     log.info("backend=%s nemotron=%s objects=%s", backend, "online" if parser.online else "OFFLINE fallback",
              scene.names())
     body_target, body_t = None, 0.0
-    T_des = arm.fk(robot.read_joints())
+    q_cmd = robot.read_joints()  # commanded trajectory state (the drives track it; see WINDUP)
+    T_des = arm.fk(q_cmd)
     t_end = None if seconds is None else time.time() + seconds
     next_status = 0.0
     while t_end is None or time.time() < t_end:
@@ -77,13 +79,18 @@ def run(cfg: dict, backend: str, seconds: float | None = None):
             elif isinstance(msg, EEGState):
                 arbiter.on_eeg(msg.p_grasp, t0)
         q = robot.read_joints()
+        if hasattr(robot, "objects"):
+            for name, bottom in robot.objects.items():
+                scene.update_from_bottom(name, bottom)
         tcp = arm.fk(q)[:3, 3]
         p, grip = arbiter.target(tcp, body_target if t0 - body_t < 0.5 else None)
         if p is not None:
             T_des[:3, 3] = safety.clip_workspace(p)
         input_age = 0.0 if arbiter.mode == Mode.AUTO or p is None else t0 - body_t
-        q_des = arm.ik_step(q, T_des)
-        robot.command(safety.step(q, q_des, dt, input_age), grip)
+        q_des = arm.ik_step(q_cmd, T_des)
+        q_cmd = safety.step(q_cmd, q_des, dt, input_age)
+        q_cmd = np.clip(q_cmd, q - WINDUP, q + WINDUP)  # anti-windup: never run far ahead of the real joints
+        robot.command(q_cmd, grip)
         if t0 >= next_status:
             next_status = t0 + 1.0
             log.info("mode=%s tcp=%s grip=%.0f%s", arbiter.mode.value, np.round(tcp, 3), grip,

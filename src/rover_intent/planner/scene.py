@@ -15,11 +15,12 @@ class SceneObject:
     name: str
     pos: np.ndarray            # grasp point, base frame (m)
     height: float = 0.10       # for place-on offsets
+    grasp_z: float = 0.0       # grasp point height above the object's bottom (from the config pos, objects on z=0)
 
 
 class Scene:
     def __init__(self, objects: dict[str, dict]):
-        self.objects = {n: SceneObject(n, np.array(o["pos"], float), o.get("height", 0.10))
+        self.objects = {n: SceneObject(n, np.array(o["pos"], float), o.get("height", 0.10), o["pos"][2])
                         for n, o in objects.items()}
 
     def names(self) -> list[str]:
@@ -33,6 +34,12 @@ class Scene:
             self.objects[name].pos = np.asarray(pos, float)
         else:
             self.objects[name] = SceneObject(name, np.asarray(pos, float))
+
+    def update_from_bottom(self, name: str, bottom) -> None:
+        """Perception update (sim ground truth now, ArUco later): the object's bottom-centre position."""
+        o = self.objects.get(name)
+        if o is not None:
+            o.pos = np.asarray(bottom, float) + np.array([0, 0, o.grasp_z])
 
     def nearest(self, p: np.ndarray, within: float) -> SceneObject | None:
         best = min(self.objects.values(), key=lambda o: np.linalg.norm(o.pos - p), default=None)

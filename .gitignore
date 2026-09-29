@@ -8,3 +8,4 @@ data/
 *.mp4
 logs/
 .pytest_cache/
+assets/rover2026/usd/

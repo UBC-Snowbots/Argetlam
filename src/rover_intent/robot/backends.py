@@ -38,7 +38,10 @@ class MockArm(ArmBackend):
 
 
 class IsaacArm(ArmBackend):
-    """Joint targets -> Isaac over UDP; joint states <- Isaac. Protocol: {"q": [...], "g": float}."""
+    """Joint targets -> Isaac over UDP; state <- Isaac.
+    cmd:   {"q": [6], "g": 0..1}
+    state: {"q": [6], "objects": {name: [x, y, z_bottom]}}   (objects: sim ground truth, stands in for perception)
+    """
 
     def __init__(self, host: str, cmd_port: int, state_port: int, q0):
         self.addr = (host, cmd_port)
@@ -47,13 +50,18 @@ class IsaacArm(ArmBackend):
         self.rx.bind(("0.0.0.0", state_port))
         self.rx.setblocking(False)
         self.q = np.array(q0, float)
+        self.objects: dict[str, list[float]] = {}
+        self.connected = False
 
     def read_joints(self):
         while True:
             try:
-                self.q = np.array(json.loads(self.rx.recv(65536))["q"], float)
+                msg = json.loads(self.rx.recv(65536))
             except BlockingIOError:
                 return self.q.copy()
+            self.q = np.array(msg["q"], float)
+            self.objects = msg.get("objects", self.objects)
+            self.connected = True
 
     def command(self, q, gripper):
         self.tx.sendto(json.dumps({"q": list(map(float, q)), "g": float(gripper)}).encode(), self.addr)

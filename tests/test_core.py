@@ -99,11 +99,30 @@ def test_fallback_parser(text, action, obj, rel, ref):
 
 def test_skills_move_plan():
     wps = plan(Intent(action=Action.move, object="cup", relation="beside", reference="bottle"),
-               Scene(SCENE), holding=False)
+               Scene(SCENE), held=None)
     assert [w.label for w in wps][:4] == ["pre-grasp", "grasp-pos", "close", "lift"]
     assert wps[-2].label == "open" and wps[-2].gripper == 0
+    # released beside the bottle at the cup's own grasp height, not the bottle's
+    assert np.isclose(wps[-2].pos[2], SCENE["cup"]["pos"][2])
+    assert np.allclose(wps[-2].pos[:2], np.array(SCENE["bottle"]["pos"][:2]) + [0, 0.12])
+
+
+def test_arbiter_dwells_and_tracks_held_object():
+    a = Arbiter(Scene(SCENE), waypoint_tol=0.01)
+    a.on_intent(Intent(action=Action.pick, object="cup"))
+    cup = np.array(SCENE["cup"]["pos"])
+    a.target(cup + [0, 0, 0.10], None, now=0.0)       # at pre-grasp -> advances
+    a.target(cup, None, now=0.1)                      # at grasp-pos -> advances
+    p, g = a.target(cup, None, now=0.2)               # at close: gripper closes, dwell starts
+    assert g == 1.0 and a.held is None
+    p, _ = a.target(cup, None, now=0.5)
+    assert np.allclose(p, cup)                        # still waiting for the fingers
+    a.target(cup, None, now=1.1)                      # dwell over
+    assert a.held == "cup"
+    p, _ = a.target(cup, None, now=1.2)
+    assert p[2] > cup[2]                              # lifting
     with pytest.raises(SkillError):
-        plan(Intent(action=Action.pick, object="banana"), Scene(SCENE), holding=False)
+        plan(Intent(action=Action.pick, object="banana"), Scene(SCENE), held=None)
 
 
 def test_arbiter_eeg_hysteresis_and_dwell():

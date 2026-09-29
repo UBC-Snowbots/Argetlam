@@ -1,16 +1,16 @@
 # rover-intent default config. PLACEHOLDER values are marked; replace as hardware facts come in.
 
 arm:
-  urdf: assets/rover2026/rover2026.urdf
+  urdf: assets/rover2026/rover2026_gripper.urdf
   tip_link: a6_EE_holder
-  tcp_offset: [0.15, 0.0, 0.0]        # PLACEHOLDER: gripper TCP along +x of the tool face; measure the real claw
+  tcp_offset: [0.145, 0.0, 0.0]       # sim gripper pad centre (sim/make_gripper_urdf.py). PLACEHOLDER for the real claw
   home: [3.98, -1.31, 0.86, 0.0, 2.12, 2.31]  # sim: TCP top-down at (0.45, 0, 0.45). PLACEHOLDER for the real arm
   # PLACEHOLDER motor limits (same as the v4 sim work) until the datasheets arrive
   max_vel: [0.8, 0.8, 0.8, 1.5, 1.5, 1.5]   # rad/s
   max_acc: [2.0, 2.0, 2.0, 4.0, 4.0, 4.0]   # rad/s^2
 
 safety:
-  workspace_min: [-0.2, -0.8, 0.05]   # m, base frame; keep the TCP above the table
+  workspace_min: [-0.2, -0.8, 0.03]   # m, base frame; TCP floor (fingertips reach ~2 cm below the TCP)
   workspace_max: [1.0, 0.8, 1.0]
   watchdog_s: 0.25
 
@@ -45,7 +45,7 @@ assist:
   radius: 0.08
   gain: 0.6
 
-scene:                                 # PLACEHOLDER positions until ArUco/detection is in
-  cup:    {pos: [0.55, 0.15, 0.10], height: 0.10}
-  bottle: {pos: [0.55, -0.15, 0.12], height: 0.22}
-  bowl:   {pos: [0.70, 0.00, 0.06], height: 0.06}
+scene:  # pos = grasp point (TCP target), objects stand on z=0. PLACEHOLDER positions until ArUco/detection.
+  cup:    {pos: [0.55, 0.15, 0.055], height: 0.09, radius: 0.035, mass: 0.15, shape: cylinder}
+  bottle: {pos: [0.55, -0.15, 0.11], height: 0.22, radius: 0.035, mass: 0.50, shape: cylinder}
+  block:  {pos: [0.70, 0.00, 0.035], height: 0.05, radius: 0.025, mass: 0.10, shape: box}

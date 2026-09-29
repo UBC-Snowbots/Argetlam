@@ -31,11 +31,13 @@ class Arbiter:
         self.scene = scene
         self.mode = Mode.HOLD
         self.gripper = 0.0
+        self.held: str | None = None  # object believed to be in the gripper (set by skills)
         self.eeg_on, self.eeg_off, self.eeg_hold_s = eeg_on, eeg_off, eeg_hold_s
         self.assist_radius, self.assist_gain = assist_radius, assist_gain
         self.waypoint_tol = waypoint_tol
         self._plan: list[Waypoint] = []
         self._eeg_since: float | None = None
+        self._wp_since: float | None = None
         self.last_say = ""
 
     # --- inputs -------------------------------------------------------------------
@@ -43,16 +45,16 @@ class Arbiter:
         self.last_say = intent.say
         a = intent.action
         if a == Action.stop:
-            self.mode, self._plan = Mode.HOLD, []
+            self.mode, self._plan, self._wp_since = Mode.HOLD, [], None
         elif a == Action.follow:
             self.mode, self._plan = Mode.FOLLOW, []
         elif a == Action.grasp:
             self.gripper = 1.0
         elif a == Action.release:
-            self.gripper = 0.0
+            self.gripper, self.held = 0.0, None
         elif a in (Action.pick, Action.place, Action.move):
             try:
-                self._plan = plan(intent, self.scene, holding=self.gripper > 0.5)
+                self._plan = plan(intent, self.scene, held=self.held)
                 self.mode = Mode.AUTO
             except SkillError as e:
                 self.last_say = f"Can't do that: {e}"
@@ -73,16 +75,26 @@ class Arbiter:
             self.gripper, self._eeg_since = want, None
 
     # --- output -------------------------------------------------------------------
-    def target(self, tcp_now: np.ndarray, body_target: np.ndarray | None) -> tuple[np.ndarray | None, float]:
+    def target(self, tcp_now: np.ndarray, body_target: np.ndarray | None,
+               now: float | None = None) -> tuple[np.ndarray | None, float]:
         """Returns (TCP position target or None = hold, gripper command)."""
         if self.mode == Mode.AUTO:
             if not self._plan:
                 self.mode = Mode.HOLD
                 return None, self.gripper
+            now = time.time() if now is None else now
             wp = self._plan[0]
             if np.linalg.norm(tcp_now - wp.pos) < self.waypoint_tol:
                 self.gripper = wp.gripper
-                self._plan.pop(0)
+                if self._wp_since is None:
+                    self._wp_since = now
+                if now - self._wp_since >= wp.dwell:
+                    if wp.label == "close":
+                        self.held = wp.obj
+                    elif wp.label == "open":
+                        self.held = None
+                    self._plan.pop(0)
+                    self._wp_since = None
             return wp.pos, self.gripper
         if self.mode == Mode.FOLLOW and body_target is not None:
             return self._assist(body_target), self.gripper
