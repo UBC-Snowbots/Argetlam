@@ -6,7 +6,7 @@ import pytest
 from rover_intent.control.arbiter import Arbiter, Mode
 from rover_intent.control.kinematics import ArmModel, rot_err
 from rover_intent.control.safety import SafetyLayer
-from rover_intent.planner.nemotron import fallback_parse
+from rover_intent.planner.nemotron import IntentParser, fallback_parse, urgent_stop
 from rover_intent.planner.scene import Scene
 from rover_intent.planner.skills import SkillError, plan
 from rover_intent.types import Action, Intent
@@ -88,7 +88,6 @@ def test_workspace_clip(arm):
     ("move the cup beside the bottle", Action.move, "cup", "beside", "bottle"),
     ("put the cup next to the bottle", Action.move, "cup", "beside", "bottle"),
     ("pick up the cup", Action.pick, "cup", None, None),
-    ("stop!", Action.stop, None, None, None),
     ("let go", Action.release, None, None, None),
     ("follow me", Action.follow, None, None, None),
 ])
@@ -97,10 +96,27 @@ def test_fallback_parser(text, action, obj, rel, ref):
     assert (i.action, i.object, i.relation, i.reference) == (action, obj, rel, ref)
 
 
+@pytest.mark.parametrize("text", ["stop!", "whoa whoa hold on", "WAIT", "emergency", "freeze"])
+def test_stop_words_never_reach_the_llm(text, monkeypatch):
+    assert urgent_stop(text).action == Action.stop
+    p = IntentParser("any", "http://unused")
+    p.client = object()  # an 'online' parser whose client would crash if called
+    assert p.parse(text, ["cup"]).action == Action.stop
+
+
+def test_fallback_word_boundaries():
+    # 'block' must not be found inside 'blocked', nor 'cup' inside 'cupboard'
+    assert fallback_parse("the cupboard is blocked", ["cup", "block"]).action == Action.unknown
+
+
 def test_skills_move_plan():
     wps = plan(Intent(action=Action.move, object="cup", relation="beside", reference="bottle"),
                Scene(SCENE), held=None)
-    assert [w.label for w in wps][:4] == ["pre-grasp", "grasp-pos", "close", "lift"]
+    assert [w.label for w in wps][:5] == ["above-object", "pre-grasp", "grasp-pos", "close", "lift"]
+    # every move between objects happens at the transit height, above the tallest object
+    for w in wps:
+        if w.label in ("above-object", "lift", "above-goal", "retreat"):
+            assert w.pos[2] >= 0.30
     assert wps[-2].label == "open" and wps[-2].gripper == 0
     # released beside the bottle at the cup's own grasp height, not the bottle's
     assert np.isclose(wps[-2].pos[2], SCENE["cup"]["pos"][2])
@@ -111,7 +127,8 @@ def test_arbiter_dwells_and_tracks_held_object():
     a = Arbiter(Scene(SCENE), waypoint_tol=0.01)
     a.on_intent(Intent(action=Action.pick, object="cup"))
     cup = np.array(SCENE["cup"]["pos"])
-    a.target(cup + [0, 0, 0.10], None, now=0.0)       # at pre-grasp -> advances
+    a.target(np.array([*cup[:2], 0.30]), None, now=0.0)  # above the object -> advances
+    a.target(cup + [0, 0, 0.10], None, now=0.05)      # at pre-grasp -> advances
     a.target(cup, None, now=0.1)                      # at grasp-pos -> advances
     p, g = a.target(cup, None, now=0.2)               # at close: gripper closes, dwell starts
     assert g == 1.0 and a.held is None
@@ -135,6 +152,16 @@ def test_arbiter_eeg_hysteresis_and_dwell():
     assert a.gripper == 1.0
     a.on_eeg(0.1, now=1.0); a.on_eeg(0.9, now=1.2); a.on_eeg(0.1, now=1.3)
     assert a.gripper == 1.0          # flicker does not release
+
+
+def test_arbiter_waypoint_timeout_holds():
+    a = Arbiter(Scene(SCENE), waypoint_timeout=8.0)
+    a.on_intent(Intent(action=Action.pick, object="cup"))
+    far = np.array([0.0, 0.0, 1.0])  # e.g. blocked by an obstacle, never gets there
+    assert a.target(far, None, now=0.0)[0] is not None
+    assert a.target(far, None, now=7.9)[0] is not None
+    p, _ = a.target(far, None, now=8.1)
+    assert p is None and a.mode == Mode.HOLD and "Couldn't reach" in a.last_say
 
 
 def test_arbiter_stop_beats_auto():

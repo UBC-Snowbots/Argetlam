@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import time
 from pathlib import Path
 
@@ -62,6 +63,7 @@ def run(cfg: dict, backend: str, seconds: float | None = None):
     dt = 1.0 / cfg["loop"]["hz"]
     log.info("backend=%s nemotron=%s objects=%s", backend, "online" if parser.online else "OFFLINE fallback",
              scene.names())
+    descriptions = {n: o.get("desc", "") for n, o in cfg["scene"].items()}
     body_target, body_t = None, 0.0
     q_cmd = robot.read_joints()  # commanded trajectory state (the drives track it; see WINDUP)
     T_des = arm.fk(q_cmd)
@@ -73,9 +75,11 @@ def run(cfg: dict, backend: str, seconds: float | None = None):
             if isinstance(msg, BodyPose) and msg.visible:
                 body_target, body_t = retarget(msg), t0
             elif isinstance(msg, Utterance):
-                intent = parser.parse(msg.text, scene.names())
+                intent = parser.parse(msg.text, scene.names(), descriptions)
                 log.info("heard %r -> %s", msg.text, intent.model_dump(exclude_none=True))
                 arbiter.on_intent(intent)
+                if arbiter.last_say and arbiter.last_say != intent.say:
+                    log.info("arbiter: %s", arbiter.last_say)
             elif isinstance(msg, EEGState):
                 arbiter.on_eeg(msg.p_grasp, t0)
         q = robot.read_joints()
@@ -83,7 +87,10 @@ def run(cfg: dict, backend: str, seconds: float | None = None):
             for name, bottom in robot.objects.items():
                 scene.update_from_bottom(name, bottom)
         tcp = arm.fk(q)[:3, 3]
+        said = arbiter.last_say
         p, grip = arbiter.target(tcp, body_target if t0 - body_t < 0.5 else None)
+        if arbiter.last_say != said:
+            log.info("arbiter: %s", arbiter.last_say)
         if p is not None:
             T_des[:3, 3] = safety.clip_workspace(p)
         input_age = 0.0 if arbiter.mode == Mode.AUTO or p is None else t0 - body_t
@@ -98,12 +105,22 @@ def run(cfg: dict, backend: str, seconds: float | None = None):
         time.sleep(max(0.0, dt - (time.time() - t0)))
 
 
+def load_dotenv(path: Path) -> None:
+    """Minimal .env loader (KEY=VALUE lines); real environment variables win."""
+    if path.exists():
+        for line in path.read_text().splitlines():
+            k, sep, v = line.strip().partition("=")
+            if sep and k and not k.startswith("#"):
+                os.environ.setdefault(k, v)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", default=str(ROOT / "configs/default.yaml"))
     ap.add_argument("--backend", default=None, choices=["mock", "isaac", "real"])
     ap.add_argument("--seconds", type=float, default=None)
     args = ap.parse_args()
+    load_dotenv(ROOT / ".env")
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     cfg = yaml.safe_load(open(args.config))
     run(cfg, args.backend or cfg["loop"]["backend"], args.seconds)

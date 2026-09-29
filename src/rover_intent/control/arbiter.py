@@ -27,7 +27,8 @@ class Mode(str, Enum):
 
 class Arbiter:
     def __init__(self, scene: Scene, eeg_on: float = 0.7, eeg_off: float = 0.3, eeg_hold_s: float = 0.5,
-                 assist_radius: float = 0.08, assist_gain: float = 0.6, waypoint_tol: float = 0.01):
+                 assist_radius: float = 0.08, assist_gain: float = 0.6, waypoint_tol: float = 0.01,
+                 waypoint_timeout: float = 8.0):
         self.scene = scene
         self.mode = Mode.HOLD
         self.gripper = 0.0
@@ -35,6 +36,8 @@ class Arbiter:
         self.eeg_on, self.eeg_off, self.eeg_hold_s = eeg_on, eeg_off, eeg_hold_s
         self.assist_radius, self.assist_gain = assist_radius, assist_gain
         self.waypoint_tol = waypoint_tol
+        self.waypoint_timeout = waypoint_timeout  # s: give up (HOLD) if a waypoint can't be reached, e.g. blocked
+        self._wp_started: float | None = None
         self._plan: list[Waypoint] = []
         self._eeg_since: float | None = None
         self._wp_since: float | None = None
@@ -45,7 +48,7 @@ class Arbiter:
         self.last_say = intent.say
         a = intent.action
         if a == Action.stop:
-            self.mode, self._plan, self._wp_since = Mode.HOLD, [], None
+            self.mode, self._plan, self._wp_since, self._wp_started = Mode.HOLD, [], None, None
         elif a == Action.follow:
             self.mode, self._plan = Mode.FOLLOW, []
         elif a == Action.grasp:
@@ -55,6 +58,7 @@ class Arbiter:
         elif a in (Action.pick, Action.place, Action.move):
             try:
                 self._plan = plan(intent, self.scene, held=self.held)
+                self._wp_since = self._wp_started = None
                 self.mode = Mode.AUTO
             except SkillError as e:
                 self.last_say = f"Can't do that: {e}"
@@ -84,6 +88,12 @@ class Arbiter:
                 return None, self.gripper
             now = time.time() if now is None else now
             wp = self._plan[0]
+            if self._wp_started is None:
+                self._wp_started = now
+            if self._wp_since is None and now - self._wp_started > self.waypoint_timeout:
+                self.last_say = f"Couldn't reach {wp.label}; holding."
+                self.mode, self._plan, self._wp_started = Mode.HOLD, [], None
+                return None, self.gripper
             if np.linalg.norm(tcp_now - wp.pos) < self.waypoint_tol:
                 self.gripper = wp.gripper
                 if self._wp_since is None:
@@ -94,7 +104,7 @@ class Arbiter:
                     elif wp.label == "open":
                         self.held = None
                     self._plan.pop(0)
-                    self._wp_since = None
+                    self._wp_since = self._wp_started = None
             return wp.pos, self.gripper
         if self.mode == Mode.FOLLOW and body_target is not None:
             return self._assist(body_target), self.gripper

@@ -34,7 +34,8 @@ body:
 nemotron:
   base_url: https://api.tokenfactory.nebius.com/v1/
   api_key_env: NEBIUS_API_KEY
-  model: nvidia/nemotron-3-super-120b-a12b   # check the Token Factory catalog for the exact id / a cheaper Nano
+  # 2026-09-28 on 7 test phrases: Nano 7/7, Super 5/7 (heard "whoa hold on" as grasp); 1.4-3.9 s per call
+  model: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B
 
 eeg:
   p_on: 0.7      # p_grasp above this -> close (after hold_s)
@@ -46,6 +47,6 @@ assist:
   gain: 0.6
 
 scene:  # pos = grasp point (TCP target), objects stand on z=0. PLACEHOLDER positions until ArUco/detection.
-  cup:    {pos: [0.55, 0.15, 0.055], height: 0.09, radius: 0.035, mass: 0.15, shape: cylinder}
-  bottle: {pos: [0.55, -0.15, 0.11], height: 0.22, radius: 0.035, mass: 0.50, shape: cylinder}
-  block:  {pos: [0.70, 0.00, 0.035], height: 0.05, radius: 0.025, mass: 0.10, shape: box}
+  cup:    {pos: [0.55, 0.15, 0.055], height: 0.09, radius: 0.035, mass: 0.15, shape: cylinder, desc: "short red cup"}
+  bottle: {pos: [0.55, -0.15, 0.11], height: 0.22, radius: 0.035, mass: 0.50, shape: cylinder, desc: "tall blue bottle"}
+  block:  {pos: [0.70, 0.00, 0.035], height: 0.05, radius: 0.025, mass: 0.10, shape: box, desc: "small yellow cube"}

@@ -1,6 +1,7 @@
 """Natural language -> Intent via NVIDIA Nemotron on Nebius Token Factory (OpenAI-compatible API).
 
 Only the *decision* goes to the cloud. Motion (IK, safety, the control loop) stays local.
+Stop words never wait for the cloud (a Token Factory call takes 1.4-3.9 s): `urgent_stop()` checks them locally first.
 Without NEBIUS_API_KEY, `parse()` falls back to a tiny keyword parser so the loop still runs offline.
 """
 from __future__ import annotations
@@ -12,10 +13,11 @@ import re
 from ..types import Action, Intent
 
 SYSTEM = """You turn spoken commands for a 6-axis robot arm with a gripper into JSON.
-Known objects in the scene: {objects}.
-Rules: use only known object names (map synonyms, e.g. 'mug' -> 'cup'). If the user wants something
-moved next to/onto/into something, use action "move" with object, relation and reference.
-"grab/pick up X" -> "pick". "let go/drop it/open" -> "release". "close/hold" -> "grasp".
+Known objects in the scene (name: description): {objects}.
+Rules: use only known object names (map synonyms and descriptions, e.g. 'mug' -> 'cup'). If the user wants
+something moved relative to something, use action "move" with object, relation and reference.
+"next to/beside/by" -> "beside"; use left_of/right_of only if the user says left or right.
+"grab/pick up X" -> "pick". "let go/drop it/open" -> "release". "close/grip" -> "grasp".
 "stop/freeze/halt" -> "stop". "follow me/mirror me/take over" -> "follow". Otherwise "unknown".
 Put a short confirmation (<= 8 words) in "say"."""
 
@@ -33,13 +35,18 @@ class IntentParser:
     def online(self) -> bool:
         return self.client is not None
 
-    def parse(self, text: str, objects: list[str]) -> Intent:
+    def parse(self, text: str, objects: list[str], descriptions: dict[str, str] | None = None) -> Intent:
+        stop = urgent_stop(text)
+        if stop is not None:
+            return stop
         if not self.online:
             return fallback_parse(text, objects)
+        desc = descriptions or {}
+        listing = "; ".join(f"{o}: {desc[o]}" if desc.get(o) else o for o in objects)
         resp = self.client.chat.completions.create(
             model=self.model,
             temperature=0,
-            messages=[{"role": "system", "content": SYSTEM.format(objects=", ".join(objects))},
+            messages=[{"role": "system", "content": SYSTEM.format(objects=listing)},
                       {"role": "user", "content": text}],
             response_format={"type": "json_schema",
                              "json_schema": {"name": "intent", "schema": Intent.model_json_schema()}},
@@ -50,16 +57,24 @@ class IntentParser:
             return Intent(action=Action.unknown, say="Sorry, I didn't get that.")
 
 
+_STOP = re.compile(r"\b(stop|freeze|halt|hold on|wait|whoa|emergency|abort)\b")
+
+
+def urgent_stop(text: str) -> Intent | None:
+    """Local, instant: anything that sounds like 'stop' stops, before (and instead of) any LLM call."""
+    if _STOP.search(text.lower()):
+        return Intent(action=Action.stop, say="Stopping.")
+    return None
+
+
 _REL = {"beside": "beside", "next to": "beside", "left of": "left_of", "right of": "right_of",
         "in front of": "in_front_of", "behind": "behind", "on": "on", "onto": "on", "into": "into", "in": "into"}
 
 
 def fallback_parse(text: str, objects: list[str]) -> Intent:
     t = text.lower()
-    found = sorted(((t.find(o), o) for o in objects if o in t))
+    found = sorted((m.start(), o) for o in objects for m in [re.search(rf"\b{re.escape(o)}\b", t)] if m)
     names = [o for _, o in found]
-    if re.search(r"\b(stop|freeze|halt)\b", t):
-        return Intent(action=Action.stop, say="Stopping.")
     if re.search(r"\b(follow|mirror|take over)\b", t):
         return Intent(action=Action.follow, say="Following you.")
     if re.search(r"\b(release|let go|drop|open)\b", t):
@@ -72,6 +87,6 @@ def fallback_parse(text: str, objects: list[str]) -> Intent:
                           say=f"Moving the {names[0]}.")
     if re.search(r"\b(pick|grab|take|get)\b", t) and names:
         return Intent(action=Action.pick, object=names[0], say=f"Picking up the {names[0]}.")
-    if re.search(r"\b(close|hold|grip)\b", t):
+    if re.search(r"\b(close|grip)\b", t):
         return Intent(action=Action.grasp, say="Closing.")
     return Intent(action=Action.unknown, say="Sorry, I didn't get that.")

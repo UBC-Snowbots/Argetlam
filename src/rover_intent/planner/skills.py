@@ -12,6 +12,7 @@ import numpy as np
 from ..types import Action, Intent
 from .scene import Scene
 
+TRANSIT_Z = 0.30  # m: travel height between objects (tallest object 0.22 + fingertips 0.02 below the TCP + margin)
 APPROACH = 0.10   # m above the grasp point
 LIFT = 0.12
 BESIDE = 0.12     # m offset for beside/left/right/front/behind
@@ -41,8 +42,9 @@ def plan(intent: Intent, scene: Scene, held: str | None) -> list[Waypoint]:
     if intent.action == Action.pick:
         o = _obj(scene, intent.object)
         p = o.pos.copy()
-        return [Waypoint(p + APPROACH * up, 0, "pre-grasp"), Waypoint(p, 0, "grasp-pos"),
-                Waypoint(p, 1, "close", o.name, GRIP_DWELL), Waypoint(p + LIFT * up, 1, "lift")]
+        return [Waypoint(_transit(p), 0, "above-object"), Waypoint(p + APPROACH * up, 0, "pre-grasp"),
+                Waypoint(p, 0, "grasp-pos"), Waypoint(p, 1, "close", o.name, GRIP_DWELL),
+                Waypoint(_transit(p), 1, "lift")]
     if intent.action == Action.place:
         if held is None:
             raise SkillError("not holding anything")
@@ -65,8 +67,14 @@ def _place(intent: Intent, scene: Scene, obj) -> list[Waypoint]:
     else:
         goal = ref.pos + np.array(_OFFSETS.get(intent.relation or "beside", _OFFSETS["beside"]))
         goal[2] = obj.pos[2]  # same support surface: release at the object's own grasp height
-    return [Waypoint(goal + LIFT * up, 1, "pre-place"), Waypoint(goal, 1, "place-pos"),
-            Waypoint(goal, 0, "open", obj.name, GRIP_DWELL), Waypoint(goal + APPROACH * up, 0, "retreat")]
+    return [Waypoint(_transit(goal), 1, "above-goal"), Waypoint(goal + LIFT * up, 1, "pre-place"),
+            Waypoint(goal, 1, "place-pos"), Waypoint(goal, 0, "open", obj.name, GRIP_DWELL),
+            Waypoint(_transit(goal), 0, "retreat")]
+
+
+def _transit(p: np.ndarray) -> np.ndarray:
+    """Same xy, raised to the travel height (never lowered)."""
+    return np.array([p[0], p[1], max(p[2], TRANSIT_Z)])
 
 
 def _obj(scene: Scene, name: str | None):

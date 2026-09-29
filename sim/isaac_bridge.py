@@ -104,6 +104,14 @@ for name, o in cfg["scene"].items():
 heights = {n: cfg["scene"][n]["height"] for n in objects}
 
 sim.reset()
+# sim.reset() does NOT move the articulation to init_state: it spawns at all-zero joints and the PD then swings it
+# ~4 rad to home at full speed. Write the default pose explicitly.
+q0 = robot.data.default_joint_pos.torch.clone()
+robot.write_joint_position_to_sim_index(position=q0)
+robot.write_joint_velocity_to_sim_index(velocity=torch.zeros_like(q0))
+robot.set_joint_position_target_index(target=q0)
+robot.write_data_to_sim()
+robot.update(0.0)
 arm_ids = robot.find_joints(ARM_JOINTS, preserve_order=True)[0]
 finger_ids = robot.find_joints(FINGER_JOINTS, preserve_order=True)[0]
 dev = sim.device
