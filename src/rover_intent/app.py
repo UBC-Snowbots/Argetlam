@@ -13,6 +13,7 @@ import argparse
 import logging
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
@@ -22,11 +23,11 @@ from .body.retarget import Retargeter
 from .control.arbiter import Arbiter, Mode
 from .control.kinematics import ArmModel
 from .control.safety import SafetyLayer
-from .planner.nemotron import IntentParser
+from .planner.nemotron import IntentParser, urgent_stop
 from .planner.scene import Scene
 from .robot.backends import IsaacArm, MockArm, RealArm
 from .transport.udp import Receiver
-from .types import BodyPose, EEGState, Utterance
+from .types import Action, BodyPose, EEGState, Intent, Utterance
 
 log = logging.getLogger("rover_intent")
 ROOT = Path(__file__).resolve().parents[2]
@@ -64,6 +65,22 @@ def run(cfg: dict, backend: str, seconds: float | None = None):
     log.info("backend=%s nemotron=%s objects=%s", backend, "online" if parser.online else "OFFLINE fallback",
              scene.names())
     descriptions = {n: o.get("desc", "") for n, o in cfg["scene"].items()}
+    pool, pending = ThreadPoolExecutor(max_workers=1), []
+
+    def finish(text, addr, intent, latency):
+        log.info("heard %r -> %s (%.1fs)", text, intent.model_dump(exclude_none=True), latency)
+        if intent.action == Action.stop:  # a slow cloud result must not restart the arm after a stop
+            for p_text, p_addr, _, fut in pending:
+                fut.cancel()
+                rx.reply(p_addr, {"kind": "reply", "text": p_text, "say": "Cancelled by stop.", "mode": "hold"})
+            pending.clear()
+        arbiter.on_intent(intent)
+        if arbiter.last_say and arbiter.last_say != intent.say:
+            log.info("arbiter: %s", arbiter.last_say)
+        rx.reply(addr, {"kind": "reply", "text": text, "latency_s": round(latency, 2),
+                        "intent": intent.model_dump(mode="json", exclude_none=True),
+                        "say": arbiter.last_say or intent.say, "mode": arbiter.mode.value})
+
     body_target, body_t = None, 0.0
     q_cmd = robot.read_joints()  # commanded trajectory state (the drives track it; see WINDUP)
     T_des = arm.fk(q_cmd)
@@ -71,17 +88,27 @@ def run(cfg: dict, backend: str, seconds: float | None = None):
     next_status = 0.0
     while t_end is None or time.time() < t_end:
         t0 = time.time()
-        for _, msg in rx.poll():
+        for _, msg, addr in rx.poll():
             if isinstance(msg, BodyPose) and msg.visible:
                 body_target, body_t = retarget(msg), t0
             elif isinstance(msg, Utterance):
-                intent = parser.parse(msg.text, scene.names(), descriptions)
-                log.info("heard %r -> %s", msg.text, intent.model_dump(exclude_none=True))
-                arbiter.on_intent(intent)
-                if arbiter.last_say and arbiter.last_say != intent.say:
-                    log.info("arbiter: %s", arbiter.last_say)
+                stop = urgent_stop(msg.text)
+                if stop is not None:  # handled in this tick; never queued behind a cloud call
+                    finish(msg.text, addr, stop, 0.0)
+                else:  # Nemotron takes seconds: run it off the control loop
+                    pending.append((msg.text, addr, time.time(),
+                                    pool.submit(parser.parse, msg.text, scene.names(), descriptions)))
             elif isinstance(msg, EEGState):
                 arbiter.on_eeg(msg.p_grasp, t0)
+        for item in [x for x in pending if x[3].done()]:
+            pending.remove(item)
+            text, addr, t_sub, fut = item
+            try:
+                intent = fut.result()
+            except Exception as e:  # network/API error: say so, don't move
+                log.warning("nemotron failed: %s", e)
+                intent = Intent(action=Action.unknown, say="Language service error.")
+            finish(text, addr, intent, time.time() - t_sub)
         q = robot.read_joints()
         if hasattr(robot, "objects"):
             for name, bottom in robot.objects.items():
@@ -93,6 +120,8 @@ def run(cfg: dict, backend: str, seconds: float | None = None):
             log.info("arbiter: %s", arbiter.last_say)
         if p is not None:
             T_des[:3, 3] = safety.clip_workspace(p)
+        else:  # HOLD = stop here: aim at the current commanded pose, the safety layer brakes at max decel
+            T_des = arm.fk(q_cmd)
         input_age = 0.0 if arbiter.mode == Mode.AUTO or p is None else t0 - body_t
         q_des = arm.ik_step(q_cmd, T_des)
         q_cmd = safety.step(q_cmd, q_des, dt, input_age)

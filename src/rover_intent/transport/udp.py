@@ -25,7 +25,7 @@ class Sender:
 
 
 class Receiver:
-    """Non-blocking. `poll()` drains the socket and returns every message received since the last poll."""
+    """Non-blocking. `poll()` drains the socket and returns (t, msg, sender_addr) for every message since the last poll."""
 
     def __init__(self, port: int, host: str = "0.0.0.0"):
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -36,10 +36,14 @@ class Receiver:
         out = []
         while True:
             try:
-                data, _ = self.sock.recvfrom(65536)
+                data, addr = self.sock.recvfrom(65536)
             except BlockingIOError:
                 return out
             try:
-                out.append((time.time(), _MSG.validate_python(json.loads(data))))
+                out.append((time.time(), _MSG.validate_python(json.loads(data)), addr))
             except Exception:
                 pass  # drop malformed packets
+
+    def reply(self, addr, payload: dict) -> None:
+        """Answer a sender on the port it sent from (the laptop client listens there)."""
+        self.sock.sendto(json.dumps(payload).encode(), addr)
