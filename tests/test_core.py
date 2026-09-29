@@ -207,3 +207,32 @@ def test_arbiter_shared_autonomy_pulls_toward_object():
     hand = np.array([0.55, 0.15, 0.14])  # 4 cm above the cup
     p, _ = a.target(np.zeros(3), hand)
     assert np.linalg.norm(p - SCENE["cup"]["pos"]) < np.linalg.norm(hand - SCENE["cup"]["pos"])
+
+
+def test_retarget_is_relative_after_engage():
+    from rover_intent.body.retarget import Retargeter
+    from rover_intent.types import BodyPose
+    axes = [[0, 0, -1], [-1, 0, 0], [0, -1, 0]]
+    r = Retargeter(axes, scale=1.0, origin=[0.45, 0, 0.45], alpha=1.0)
+    r.engage([0.5, 0.1, 0.3])
+    pose = lambda w: BodyPose(t=0, wrist=w, shoulder=(0, 0, 0))
+    assert np.allclose(r(pose((0.0, 0.5, 0.0))), [0.5, 0.1, 0.3])       # first sample = neutral: no jump
+    assert np.allclose(r(pose((0.0, 0.4, -0.1))), [0.6, 0.1, 0.4])      # hand 10 cm up + 10 cm toward camera
+
+
+def test_hand_grip_only_in_follow_with_hysteresis():
+    a = Arbiter(Scene(SCENE))
+    a.on_hand(0.1)
+    assert a.gripper == 0.0            # not following: ignored
+    a.on_intent(Intent(action=Action.follow))
+    a.on_hand(0.1); assert a.gripper == 1.0
+    a.on_hand(0.5); assert a.gripper == 1.0   # dead band keeps it closed
+    a.on_hand(0.8); assert a.gripper == 0.0
+
+
+def test_app_and_laptop_scripts_compile():
+    import py_compile
+    root = Path(__file__).resolve().parents[1]
+    import rover_intent.app  # noqa: F401
+    for f in ["laptop/voice_client.py", "laptop/body_client.py", "sim/isaac_bridge.py"]:
+        py_compile.compile(str(root / f), doraise=True)

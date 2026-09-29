@@ -26,8 +26,8 @@ Only the language decision goes to the cloud; the control loop is local.
 |---|---|---|
 | 0 | Scaffold | ✅ tests pass; mock loop runs follow → EEG grasp → voice move (2026-09-28) |
 | 1 | **Sim arm + gripper** | ✅ 2026-09-28: isaac_bridge.py + 2F-85-sized gripper; voice 'move X beside Y' does physical grasps (placed within 1–8 mm) |
-| 2 | **Body mirroring in sim** | laptop webcam drives the sim arm smoothly (latency, jitter measured) |
-| 3 | **Voice** | 🟡 text→Nemotron→sim works (2026-09-28); live mic (laptop Whisper) still to do |
+| 2 | **Body mirroring in sim** | 🟡 sim side verified with a fake wrist; laptop webcam run pending |
+| 3 | **Voice** | ✅ 2026-09-28: live mic → laptop Whisper → Nemotron → sim; reset/stop local |
 | 4 | **EEG offline** | EEGMMIDB clench-vs-rest decoder: within-subject and leave-subjects-out numbers reported |
 | 5 | **Real arm revived** | control path known, RealArm backend, joint limits/speeds measured, e-stop hardware |
 | 6 | **Real arm mirroring + voice** | ≥1 min of the real arm following + voice command on camera |

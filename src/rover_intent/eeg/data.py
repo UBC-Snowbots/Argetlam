@@ -21,7 +21,7 @@ def load_subject(subject: int, channels=MOTOR_8, runs=IMAGERY_RUNS, sfreq: float
     from mne.datasets import eegbci
 
     mne.set_log_level("WARNING")
-    files = eegbci.load_data(subject, runs)
+    files = eegbci.load_data(subject, runs, update_path=True)  # non-interactive (tsp jobs have no stdin)
     raw = mne.concatenate_raws([mne.io.read_raw_edf(f, preload=True) for f in files])
     eegbci.standardize(raw)
     raw.pick(channels)

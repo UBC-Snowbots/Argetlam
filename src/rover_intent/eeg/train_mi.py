@@ -52,9 +52,15 @@ def main():
     subs = parse_range(args.subjects)
     pipes = pipelines()
 
-    data, within = {}, {k: [] for k in pipes}
-    for s in subs:
-        X, y = balance(*load_subject(s))
+    data, within, skipped = {}, {k: [] for k in pipes}, []
+    for s in list(subs):
+        try:
+            X, y = balance(*load_subject(s))
+        except Exception as e:  # a few EEGMMIDB subjects have odd runs; skip, don't crash the sweep
+            print(f"subject {s}: SKIPPED ({type(e).__name__}: {e})", flush=True)
+            skipped.append(s)
+            subs.remove(s)
+            continue
         data[s] = (X, y)
         for k, make in pipes.items():
             within[k].append(cross_val_score(make(), X, y, cv=5).mean())
@@ -71,10 +77,14 @@ def main():
             loso[k] += [m.score(*data[s]) for s in f]
 
     report = {k: {"within_subject_cv": float(np.mean(within[k])), "within_std": float(np.std(within[k])),
+                  "subjects_within_ge_0.70": f"{int(np.sum(np.array(within[k]) >= 0.70))}/{len(subs)}",
                   "leave_subjects_out": float(np.mean(loso[k])), "loso_std": float(np.std(loso[k]))}
               for k in pipes}
+    report["n_subjects"], report["skipped"] = len(subs), skipped
     print(json.dumps(report, indent=2))
 
+    Path(args.out).with_suffix(".json").parent.mkdir(parents=True, exist_ok=True)
+    Path(args.out).with_suffix(".json").write_text(json.dumps(report, indent=2))
     import joblib
     Xall = np.concatenate([d[0] for d in data.values()]); yall = np.concatenate([d[1] for d in data.values()])
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)

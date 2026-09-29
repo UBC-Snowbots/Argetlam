@@ -66,12 +66,14 @@ def run(cfg: dict, backend: str, seconds: float | None = None):
              scene.names())
     descriptions = {n: o.get("desc", "") for n, o in cfg["scene"].items()}
     home = np.array(cfg["arm"]["home"], float)
+    grip_from_hand = cfg["body"].get("grip_from_hand", False)
     body_target, body_t = None, 0.0
     q_cmd = robot.read_joints()  # commanded trajectory state (the drives track it; see WINDUP)
     T_des = arm.fk(q_cmd)
     pool, pending = ThreadPoolExecutor(max_workers=1), []
 
     def finish(text, addr, intent, latency):
+        nonlocal q_cmd, T_des, body_target
         log.info("heard %r -> %s (%.1fs)", text, intent.model_dump(exclude_none=True), latency)
         if intent.action in (Action.stop, Action.reset):  # a slow cloud result must not restart the arm
             for p_text, p_addr, _, fut in pending:
@@ -79,8 +81,10 @@ def run(cfg: dict, backend: str, seconds: float | None = None):
                 rx.reply(p_addr, {"kind": "reply", "text": p_text, "say": "Cancelled by stop.", "mode": "hold"})
             pending.clear()
         arbiter.on_intent(intent)
+        if intent.action == Action.follow:  # clutch in: the arm stays put, your next wrist pose is neutral
+            retarget.engage(arm.fk(q_cmd)[:3, 3])
+            body_target = None
         if intent.action == Action.reset:
-            nonlocal q_cmd, T_des, body_target
             robot.reset(home)
             safety.reset()
             retarget.reset()
@@ -97,7 +101,10 @@ def run(cfg: dict, backend: str, seconds: float | None = None):
         t0 = time.time()
         for _, msg, addr in rx.poll():
             if isinstance(msg, BodyPose) and msg.visible:
-                body_target, body_t = retarget(msg), t0
+                if arbiter.mode == Mode.FOLLOW:
+                    body_target, body_t = retarget(msg), t0
+                    if grip_from_hand:
+                        arbiter.on_hand(msg.hand_open)
             elif isinstance(msg, Utterance):
                 stop = urgent_stop(msg.text)
                 if stop is not None:  # handled in this tick; never queued behind a cloud call

@@ -81,6 +81,15 @@ class Arbiter:
         elif now - self._eeg_since >= self.eeg_hold_s:
             self.gripper, self._eeg_since = want, None
 
+    def on_hand(self, hand_open: float, close_below: float = 0.35, open_above: float = 0.6) -> None:
+        """Stand-in for EEG (config body.grip_from_hand): fist closes the gripper, open hand opens it."""
+        if self.mode != Mode.FOLLOW:
+            return
+        if hand_open < close_below:
+            self.gripper = 1.0
+        elif hand_open > open_above:
+            self.gripper = 0.0
+
     # --- output -------------------------------------------------------------------
     def target(self, tcp_now: np.ndarray, body_target: np.ndarray | None,
                now: float | None = None) -> tuple[np.ndarray | None, float]:
