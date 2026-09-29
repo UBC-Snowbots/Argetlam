@@ -13,8 +13,8 @@ from isaacsim.asset.importer.urdf import URDFImporter, URDFImporterConfig  # noq
 from pxr import Usd  # noqa: E402
 
 HOME = os.path.expanduser("~")
-SRC = f"{HOME}/rover2026_import/rover2026_ee.urdf"
-OUT_DIR = f"{HOME}/rover2026_import/ee_usd"
+SRC = f"{HOME}/projects/ubc-rover-arm/isaac/rover2026_import/rover2026_ee.urdf"
+OUT_DIR = f"{HOME}/projects/ubc-rover-arm/isaac/rover2026_import/ee_usd"
 os.makedirs(OUT_DIR, exist_ok=True)
 out = []
 try:

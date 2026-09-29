@@ -1,6 +1,6 @@
 """URDF -> USD for the arm + gripper (Isaac Sim 6.0.1 importer API). Headless, ~1 min.
 
-    tsp gpu-run bash -c 'cd ~/rover-intent && OMNI_KIT_ACCEPT_EULA=YES ~/isaacenv6/bin/python sim/import_gripper.py > logs/import_gripper.log 2>&1'
+    tsp gpu-run bash -c 'cd ~/projects/ubc-rover-arm/rover-intent && OMNI_KIT_ACCEPT_EULA=YES ~/projects/ubc-rover-arm/isaac/isaacenv6/bin/python sim/import_gripper.py > logs/import_gripper.log 2>&1'
 
 Output: assets/rover2026/usd/rover2026_gripper/rover2026_gripper.usda (links are nested prims).
 Checks a6_rotation is NOT locked and the finger joints exist; writes a report to logs/import_gripper.out.

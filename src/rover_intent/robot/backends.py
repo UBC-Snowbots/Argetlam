@@ -1,7 +1,7 @@
 """Arm backends. The control loop only talks to this interface.
 
 - MockArm:   perfect position tracking in-process. Works today; used by tests and the dry-run loop.
-- IsaacArm:  sends joint targets over UDP to sim/isaac_bridge.py running in ~/isaacenv6. (TODO)
+- IsaacArm:  sends joint targets over UDP to sim/isaac_bridge.py running in ~/projects/ubc-rover-arm/isaac/isaacenv6. (TODO)
 - RealArm:   the team's old arm. Control path unknown until the arm is revived; see docs/REAL_ARM.md.
 """
 from __future__ import annotations

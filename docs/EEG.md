@@ -14,5 +14,5 @@ Plan: prove it offline on public data first, then ask a lab for a headset.
 
 Run training through tsp (downloads ~2 GB for 109 subjects; start with 1-20):
 ```
-tsp bash -c 'cd ~/rover-intent && .venv/bin/python -m rover_intent.eeg.train_mi --subjects 1-20 > logs/mi_1-20.log 2>&1'
+tsp bash -c 'cd ~/projects/ubc-rover-arm/rover-intent && .venv/bin/python -m rover_intent.eeg.train_mi --subjects 1-20 > logs/mi_1-20.log 2>&1'
 ```

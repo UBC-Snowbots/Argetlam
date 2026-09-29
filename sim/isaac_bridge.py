@@ -1,9 +1,9 @@
 """Isaac Sim side of the IsaacArm backend: rover2026 + gripper + cup/bottle/block, driven over UDP.
 
     # GUI on :0 (watch via Moonlight):
-    DISPLAY=:0 OMNI_KIT_ACCEPT_EULA=YES ~/isaacenv6/bin/python sim/isaac_bridge.py --viz kit
+    DISPLAY=:0 OMNI_KIT_ACCEPT_EULA=YES ~/projects/ubc-rover-arm/isaac/isaacenv6/bin/python sim/isaac_bridge.py --viz kit
     # headless:
-    OMNI_KIT_ACCEPT_EULA=YES ~/isaacenv6/bin/python sim/isaac_bridge.py --headless
+    OMNI_KIT_ACCEPT_EULA=YES ~/projects/ubc-rover-arm/isaac/isaacenv6/bin/python sim/isaac_bridge.py --headless
 Then, in .venv:  python -m rover_intent.app --backend isaac
 
 Protocol (rover_intent.robot.backends.IsaacArm):

@@ -10,8 +10,8 @@ import os
 import xml.etree.ElementTree as ET
 
 HOME = os.path.expanduser("~")
-SRC = f"{HOME}/rover2026_import/rover2026.urdf"
-DST = f"{HOME}/rover2026_import/rover2026_ee.urdf"
+SRC = f"{HOME}/projects/ubc-rover-arm/isaac/rover2026_import/rover2026.urdf"
+DST = f"{HOME}/projects/ubc-rover-arm/isaac/rover2026_import/rover2026_ee.urdf"
 
 FACE = 0.0            # holder origin -> tool face (m), along +x
 PLATE_T, PLATE_R = 0.004, 0.030
