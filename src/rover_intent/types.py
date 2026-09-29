@@ -17,6 +17,7 @@ class Action(str, Enum):
     stop = "stop"
     follow = "follow"      # hand control back to body mirroring
     reset = "reset"        # arm home, gripper open, objects back to their start poses (sim)
+    clarify = "clarify"    # ambiguous / mismatched description: ask the user (question in `say`), don't move
     unknown = "unknown"
 
 

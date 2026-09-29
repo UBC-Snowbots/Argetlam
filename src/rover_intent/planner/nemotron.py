@@ -12,14 +12,13 @@ import re
 
 from ..types import Action, Intent
 
-SYSTEM = """You turn spoken commands for a 6-axis robot arm with a gripper into JSON.
-Known objects in the scene (name: description): {objects}.
-Rules: use only known object names (map synonyms and descriptions, e.g. 'mug' -> 'cup'). If the user wants
-something moved relative to something, use action "move" with object, relation and reference.
-"next to/beside/by" -> "beside"; use left_of/right_of only if the user says left or right.
-"grab/pick up X" -> "pick". "let go/drop it/open" -> "release". "close/grip" -> "grasp".
-"stop/freeze/halt" -> "stop". "follow me/mirror me/take over" -> "follow". Otherwise "unknown".
-Put a short confirmation (<= 8 words) in "say"."""
+SYSTEM = """You control a 6-axis robot arm with a two-finger gripper, standing at a table.
+Objects on the table (name: description): {objects}.
+Turn what the user says into one JSON command. Actions:
+pick (grasp and lift an object), place (put the held object relative to a reference), move (pick + place),
+grasp (close the gripper), release (open it), home, stop, follow (mirror the user's arm), reset,
+clarify (you are not sure what the user means: ask them in "say", and nothing moves), unknown (not a robot command).
+Use your own judgement. "say" is spoken back to the user; keep it short."""
 
 
 class IntentParser:

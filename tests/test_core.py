@@ -120,6 +120,19 @@ def test_reset_clears_arbiter_and_pick_while_holding_is_refused():
     assert (a.mode, a.held, a.gripper) == (Mode.HOLD, None, 0.0)
 
 
+def test_object_not_in_scene_never_moves():
+    # Nemotron may name anything; the skill layer only moves for objects it can see
+    a = Arbiter(Scene(SCENE))
+    a.on_intent(Intent(action=Action.pick, object="sender", say="Picking up the sender."))
+    assert a.mode == Mode.HOLD and "unknown object 'sender'" in a.last_say
+
+
+def test_clarify_does_not_move():
+    a = Arbiter(Scene(SCENE))
+    a.on_intent(Intent(action=Action.clarify, say="Which one, the cup or the block?"))
+    assert a.mode == Mode.HOLD and a.last_say == "Which one, the cup or the block?"
+
+
 def test_fallback_word_boundaries():
     # 'block' must not be found inside 'blocked', nor 'cup' inside 'cupboard'
     assert fallback_parse("the cupboard is blocked", ["cup", "block"]).action == Action.unknown

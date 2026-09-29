@@ -9,6 +9,7 @@ from __future__ import annotations
 import abc
 import json
 import socket
+import time
 
 import numpy as np
 
@@ -59,6 +60,7 @@ class IsaacArm(ArmBackend):
         self.q = np.array(q0, float)
         self.objects: dict[str, list[float]] = {}
         self.connected = False
+        self._ignore_until = 0.0
 
     def read_joints(self):
         while True:
@@ -66,6 +68,8 @@ class IsaacArm(ArmBackend):
                 msg = json.loads(self.rx.recv(65536))
             except BlockingIOError:
                 return self.q.copy()
+            if time.time() < self._ignore_until:
+                continue  # pre-reset states still in flight: drop them
             self.q = np.array(msg["q"], float)
             self.objects = msg.get("objects", self.objects)
             self.connected = True
@@ -77,6 +81,7 @@ class IsaacArm(ArmBackend):
         """The bridge teleports the arm home and restores the objects; then we adopt home as the state."""
         self.tx.sendto(json.dumps({"reset": True}).encode(), self.addr)
         self.q = np.array(q_home, float)
+        self._ignore_until = time.time() + 0.3  # the bridge resets within one physics step (~8 ms)
 
 
 class RealArm(ArmBackend):
