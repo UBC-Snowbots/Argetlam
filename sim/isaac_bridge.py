@@ -31,8 +31,8 @@ parser.add_argument("--config", default=str(ROOT / "configs/default.yaml"))
 parser.add_argument("--realtime", type=float, default=1.0, help="1 = real time; 0 = as fast as possible")
 parser.add_argument("--exit_after", type=float, default=0.0, help="quit after N sim seconds (0 = run forever)")
 parser.add_argument("--dt", type=float, default=1 / 120, help="physics step (s)")
-parser.add_argument("--view", default="operator",
-                    help="camera: operator | high | top | shoulder | side | front. Live: UDP {\"view\": \"top\"} to the cmd port")
+parser.add_argument("--view", default="behind",
+                    help="camera: behind | operator | high | top | shoulder | side | front. Live: UDP {\"view\": \"top\"}")
 parser.add_argument("--render_every", type=int, default=4, help="render once per N physics steps (4 -> 30 fps)")
 AppLauncher.add_app_launcher_args(parser)
 # One arm: CPU PhysX is far cheaper per step than the GPU pipeline (measured: GUI 1.19x vs 0.22x real time).
@@ -65,7 +65,10 @@ sim = sim_utils.SimulationContext(sim_utils.SimulationCfg(
 ))
 # operator (default, Pranav 2026-09-30): eye level, behind and to the right of the arm, like standing at its shoulder;
 # whole arm + gripper + objects stay in view during grasps. Your right = screen right (except front/side).
-VIEWS = {"operator": ((-0.9, -0.6, 0.7), (0.58, 0.0, 0.18)),
+# behind (default, 2026-09-30): straight behind the base, looking the way you face the webcam -> hand right =
+# gripper right on screen; table, box, objects and gripper visible at home and mid-grasp.
+VIEWS = {"behind": ((-0.75, -0.1, 1.0), (0.62, 0.0, 0.15)),
+         "operator": ((-0.9, -0.6, 0.7), (0.58, 0.0, 0.18)),
          "high": ((-0.35, 0.0, 1.75), (0.65, 0.0, 0.0)),
          "top": ((0.58, 0.0, 1.9), (0.6, 0.0, 0.0)),
          "shoulder": ((-0.85, 0.2, 1.55), (0.6, -0.05, 0.05)),
@@ -132,19 +135,37 @@ for name, o in cfg["scene"].items():
         init_state=RigidObjectCfg.InitialStateCfg(pos=(x, y, table_top + h / 2 + 0.001))))
 heights = {n: cfg["scene"][n]["height"] for n in objects}
 
-# Ghost marker: where the gripper is being steered (green) / can't go (red). Visual only, no physics.
+# Sync cues (visual only): ghost at the target + a line from the gripper to it.
+# ok = green (tracking), clamped = amber (out of reach, clamped), lost = red (tracking lost), calib = blue (hold still)
+GHOST_STATES = ["ok", "clamped", "lost", "calib"]
+_C = {"ok": (0.1, 0.9, 0.3), "clamped": (1.0, 0.65, 0.0), "lost": (0.95, 0.1, 0.1), "calib": (0.2, 0.5, 1.0)}
 ghost = VisualizationMarkers(VisualizationMarkersCfg(prim_path="/Visuals/ghost", markers={
-    "ok": sim_utils.SphereCfg(radius=0.03, visual_material=sim_utils.PreviewSurfaceCfg(
-        diffuse_color=(0.1, 0.9, 0.3), emissive_color=(0.05, 0.4, 0.1), opacity=0.55)),
-    "bad": sim_utils.SphereCfg(radius=0.03, visual_material=sim_utils.PreviewSurfaceCfg(
-        diffuse_color=(0.95, 0.15, 0.1), emissive_color=(0.5, 0.05, 0.02), opacity=0.55))}))
-ghost_pos, ghost_bad, ghost_shown = None, False, None
+    k: sim_utils.SphereCfg(radius=0.03, visual_material=sim_utils.PreviewSurfaceCfg(
+        diffuse_color=_C[k], emissive_color=tuple(0.45 * c for c in _C[k]), opacity=0.55)) for k in GHOST_STATES}))
+line = VisualizationMarkers(VisualizationMarkersCfg(prim_path="/Visuals/ghost_line", markers={
+    k: sim_utils.CylinderCfg(radius=0.004, height=1.0, axis="Z", visual_material=sim_utils.PreviewSurfaceCfg(
+        diffuse_color=_C[k], emissive_color=tuple(0.45 * c for c in _C[k]), opacity=0.7)) for k in GHOST_STATES}))
+ghost_pos, ghost_state, ghost_shown = None, None, None
+ghost.set_visibility(False)  # markers are created visible at the origin: hide until there is a target
+line.set_visibility(False)
 
-# Faint box = the region the controller lets the gripper go (safety workspace, IK-checked reachable top-down).
+
+def quat_z_to(d):
+    """(x, y, z, w) quaternion rotating +Z onto unit vector d."""
+    z = np.array([0.0, 0.0, 1.0])
+    c = float(np.dot(z, d))
+    if c < -0.999999:
+        return np.array([1.0, 0.0, 0.0, 0.0])
+    ax = np.cross(z, d)
+    q = np.array([ax[0], ax[1], ax[2], 1.0 + c])
+    return q / np.linalg.norm(q)
+
+# Reach box = the region the controller lets the gripper go (safety workspace, IK-checked reachable top-down),
+# drawn as a thin WIREFRAME: a translucent solid renders as frosted glass in RTX real-time and hides the objects.
 ws_lo, ws_hi = np.array(cfg["safety"]["workspace_min"]), np.array(cfg["safety"]["workspace_max"])
 reach_box = VisualizationMarkers(VisualizationMarkersCfg(prim_path="/Visuals/reach_box", markers={
-    "box": sim_utils.CuboidCfg(size=tuple((ws_hi - ws_lo).tolist()), visual_material=sim_utils.PreviewSurfaceCfg(
-        diffuse_color=(0.3, 0.6, 1.0), opacity=0.08))}))
+    "edge": sim_utils.CylinderCfg(radius=0.0025, height=1.0, axis="Z", visual_material=sim_utils.PreviewSurfaceCfg(
+        diffuse_color=(0.35, 0.65, 1.0), emissive_color=(0.1, 0.25, 0.5)))}))
 
 sim.reset()
 
@@ -167,9 +188,15 @@ def reset_scene():
 
 
 reset_scene()
-reach_box.visualize(translations=np.array([(ws_lo + ws_hi) / 2], dtype=np.float32))
+_corners = [np.array([x, y, z]) for x in (ws_lo[0], ws_hi[0]) for y in (ws_lo[1], ws_hi[1]) for z in (ws_lo[2], ws_hi[2])]
+_edges = [(a, b) for i, a in enumerate(_corners) for b in _corners[i + 1:] if np.count_nonzero(a != b) == 1]
+reach_box.visualize(translations=np.array([(a + b) / 2 for a, b in _edges], dtype=np.float32),
+                    orientations=np.array([quat_z_to((b - a) / np.linalg.norm(b - a)) for a, b in _edges], dtype=np.float32),
+                    scales=np.array([[1.0, 1.0, np.linalg.norm(b - a)] for a, b in _edges], dtype=np.float32),
+                    marker_indices=[0] * len(_edges))
 arm_ids = robot.find_joints(ARM_JOINTS, preserve_order=True)[0]
 finger_ids = robot.find_joints(FINGER_JOINTS, preserve_order=True)[0]
+tcp_body = robot.find_bodies("tcp")[0][0]
 dev = sim.device
 q_target = torch.tensor([home], dtype=torch.float32, device=dev)
 g_target = torch.zeros(1, 2, device=dev)
@@ -208,19 +235,34 @@ while app.is_running():
             continue
         q_target[0] = torch.tensor(msg["q"], dtype=torch.float32, device=dev)
         g_target[:] = float(msg.get("g", 0.0)) * STROKE
-        ghost_pos, ghost_bad = msg.get("ghost"), bool(msg.get("ghost_bad", False))
+        ghost_pos = msg.get("ghost")
+        ghost_state = msg.get("ghost_state") or ("clamped" if msg.get("ghost_bad") else "ok")
         n_cmd += 1
     robot.set_joint_position_target_index(target=q_target, joint_ids=arm_ids)
     robot.set_joint_position_target_index(target=g_target, joint_ids=finger_ids)
     robot.write_data_to_sim()
-    state = (tuple(round(v, 3) for v in ghost_pos), ghost_bad) if ghost_pos else None
-    if state != ghost_shown:  # only touch the marker when it changes
+    tcp_now = robot.data.body_pos_w.torch[0, tcp_body].cpu().numpy() if ghost_pos else None
+    state = ((tuple(round(v, 3) for v in ghost_pos), ghost_state, tuple(np.round(tcp_now, 3)))
+             if ghost_pos else None)
+    if state != ghost_shown:  # only touch the markers when something changed
         ghost_shown = state
         if state is None:
             ghost.set_visibility(False)
+            line.set_visibility(False)
         else:
+            idx = GHOST_STATES.index(ghost_state) if ghost_state in GHOST_STATES else 0
+            gp = np.asarray(ghost_pos, float)
             ghost.set_visibility(True)
-            ghost.visualize(translations=np.array([ghost_pos], dtype=np.float32), marker_indices=[1 if ghost_bad else 0])
+            ghost.visualize(translations=np.array([gp], dtype=np.float32), marker_indices=[idx])
+            d = gp - tcp_now
+            length = float(np.linalg.norm(d))
+            if length > 0.01:
+                line.set_visibility(True)
+                line.visualize(translations=np.array([(gp + tcp_now) / 2], dtype=np.float32),
+                               orientations=np.array([quat_z_to(d / length)], dtype=np.float32),
+                               scales=np.array([[1.0, 1.0, length]], dtype=np.float32), marker_indices=[idx])
+            else:
+                line.set_visibility(False)
     n_step += 1
     rend = n_step % args.render_every == 0
     ts = time.time()

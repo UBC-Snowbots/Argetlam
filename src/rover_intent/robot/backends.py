@@ -19,7 +19,8 @@ class ArmBackend(abc.ABC):
     def read_joints(self) -> np.ndarray: ...
 
     @abc.abstractmethod
-    def command(self, q: np.ndarray, gripper: float, ghost=None, ghost_bad: bool = False) -> None: ...
+    def command(self, q: np.ndarray, gripper: float, ghost=None, ghost_bad: bool = False,
+                ghost_state: str | None = None) -> None: ...
 
     def reset(self, q_home) -> None:
         """Put the arm at q_home with the gripper open (sim: also restore the objects)."""
@@ -37,7 +38,7 @@ class MockArm(ArmBackend):
     def read_joints(self):
         return self.q.copy()
 
-    def command(self, q, gripper, ghost=None, ghost_bad=False):
+    def command(self, q, gripper, ghost=None, ghost_bad=False, ghost_state=None):
         self.q = np.array(q, float)
         self.gripper = float(gripper)
 
@@ -74,10 +75,11 @@ class IsaacArm(ArmBackend):
             self.objects = msg.get("objects", self.objects)
             self.connected = True
 
-    def command(self, q, gripper, ghost=None, ghost_bad=False):
+    def command(self, q, gripper, ghost=None, ghost_bad=False, ghost_state=None):
         msg = {"q": list(map(float, q)), "g": float(gripper)}
         if ghost is not None:
             msg["ghost"], msg["ghost_bad"] = list(map(float, ghost)), bool(ghost_bad)
+            msg["ghost_state"] = ghost_state or ("clamped" if ghost_bad else "ok")
         self.tx.sendto(json.dumps(msg).encode(), self.addr)
 
     def reset(self, q_home):
@@ -94,5 +96,5 @@ class RealArm(ArmBackend):
     def read_joints(self):
         raise NotImplementedError
 
-    def command(self, q, gripper, ghost=None, ghost_bad=False):
+    def command(self, q, gripper, ghost=None, ghost_bad=False, ghost_state=None):
         raise NotImplementedError

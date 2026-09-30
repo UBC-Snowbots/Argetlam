@@ -8,8 +8,11 @@ Standalone: needs only this file. Uses the MediaPipe *Tasks* API (mediapipe >= 0
     pip install mediapipe opencv-python numpy
     python body_client.py [--camera 0] [--side right]
 
-In the preview window:  F = "follow me" (the arm stays put; your next pose is neutral)
+In the preview window:  F = clutch (hold still 2 s to calibrate, then the arm follows; F again = freeze)
+                        W = 60 s guided warm-up (checks every direction, auto-detects a mirrored webcam)
                         S = stop   R = reset   M = flip left/right (if the robot goes the wrong way)   Q/Esc = quit
+Hands-free clutch: hold an open palm UP (above your elbow) for 1 s, or keep your LEFT hand raised above your
+shoulder (hold-to-follow: lower it and the arm freezes, so you can reposition yourself).
 Make a fist to close the gripper, open your hand to release (stand-in until EEG is live).
 Stand ~1.5-2 m from the camera with your shoulders, elbow, wrist and hips in view. Gesture mode (default on the VM):
   swing your hand left/right -> the arm rotates left/right
@@ -32,6 +35,7 @@ from mediapipe.tasks.python import BaseOptions, vision
 DEFAULT_HOST = "rover-vm"  # rover-vm on the tailnet
 PORT = 47100
 SIDES = {"right": (12, 16), "left": (11, 15)}  # (shoulder, wrist) pose landmark ids
+SKEL = [11, 12, 13, 14, 15, 16, 23, 24, 0]      # shoulders, elbows, wrists, hips, nose -> HUD skeleton
 ELBOW = {"right": 14, "left": 13}
 OTHER_SHOULDER = {"right": 11, "left": 12}
 HIPS = (23, 24)
@@ -172,9 +176,12 @@ def extract(pose_res, hand_res, side, mirror=False):
     sx = -1.0 if mirror else 1.0
     pt = lambda i: [sx * w[i].x, w[i].y, w[i].z]
     hips = [(pt(HIPS[0])[k] + pt(HIPS[1])[k]) / 2 for k in range(3)]
+    other_wr = SIDES["left" if track == "right" else "right"][1]
+    img = pose_res.pose_landmarks[0] if pose_res.pose_landmarks else None
+    skel = [[round(1 - img[i].x if mirror else img[i].x, 3), round(img[i].y, 3)] for i in SKEL] if img else None
     return {"wrist": pt(wr_i), "shoulder": pt(sh_i), "elbow": pt(ELBOW[track]),
-            "shoulder_other": pt(OTHER_SHOULDER[track]), "hips": hips, "side": side,
-            "hand_open": openness, "visible": vis}, openness, hand
+            "shoulder_other": pt(OTHER_SHOULDER[track]), "wrist_other": pt(other_wr), "hips": hips, "side": side,
+            "skel2d": skel, "hand_open": openness, "visible": vis}, openness, hand
 
 
 class JumpGate:
@@ -246,6 +253,7 @@ def main():
     print("link:", f"tunnel {args.tunnel}" if args.tunnel else f"udp {args.host}:{args.port}")
     status, robot = "press F to follow", {}
     mirror, gate = args.mirror, JumpGate()
+    seq, sent_t, rtt_ms = 0, {}, None
     rec = open(args.record, "a") if args.record else None
 
     def say(text):
@@ -270,9 +278,13 @@ def main():
                 visible = False  # glitch: skip this frame, the robot holds for a moment
         if rec and fields:
             rec.write(json.dumps({"t": now, "mirror": mirror, **fields}) + "\n")
-        if fields and visible and now - last_send >= 1.0 / args.hz:
-            last_send = now
-            link.send({"kind": "body", "t": now, **fields})
+        if fields and now - last_send >= 1.0 / args.hz:
+            last_send, seq = now, seq + 1
+            sent_t[seq] = now
+            if len(sent_t) > 300:
+                sent_t.pop(min(sent_t))
+            fields["visible"] = visible
+            link.send({"kind": "body", "t": now, "seq": seq, "rtt_ms": rtt_ms, **fields})
         if pose_res.pose_landmarks:
             draw(frame, pose_res.pose_landmarks[0], vision.PoseLandmarksConnections.POSE_LANDMARKS, (0, 200, 0))
         if hand is not None:
@@ -280,6 +292,13 @@ def main():
         for msg in link.poll():  # replies (to F/S/R) and 10 Hz robot status
             if msg.get("kind") == "status":
                 robot = msg
+                if msg.get("set_mirror") and not mirror:   # warm-up detected a mirrored webcam
+                    mirror = True
+                    status = "mirrored webcam detected - flipped left/right"
+                es = msg.get("echo_seq")
+                if es in sent_t and msg.get("echo_age") is not None:  # RTT minus the time the app held it
+                    r = (time.time() - sent_t[es] - msg["echo_age"]) * 1000
+                    rtt_ms = r if rtt_ms is None else 0.8 * rtt_ms + 0.2 * r
             else:
                 status = msg.get("say", status)
         if args.minimap:
@@ -291,26 +310,42 @@ def main():
         cv2.putText(frame, f"{args.side} arm {'TRACKED' if visible else 'NOT VISIBLE'}  hand:{grip}  "
                            f"{fps:.0f} fps{'  MIRRORED' if mirror else ''}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7,
                     (0, 200, 0) if visible else (0, 0, 255), 2)
-        cv2.putText(frame, f"robot: {status}  [{robot.get('mode', '?')}]", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7,
-                    (255, 255, 0), 2)
-        if robot.get("clipped"):
-            cv2.putText(frame, "OUT OF REACH - come back toward the box", (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7,
-                        (0, 0, 255), 2)
-        cv2.putText(frame, "F follow | S stop | R reset | M flip L/R | Q quit", (10, frame.shape[0] - 15),
+        cl = robot.get("clutch", "?")
+        cl_txt = {"idle": "FROZEN - press F, hold an open palm up 1 s, or raise your LEFT hand",
+                  "calibrating": f"HOLD STILL... {int(100 * robot.get('calib', 0))}%",
+                  "following": f"FOLLOWING ({robot.get('trigger')})"}.get(cl, cl)
+        cv2.putText(frame, cl_txt, (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7,
+                    {"following": (0, 220, 0), "calibrating": (255, 160, 60)}.get(cl, (200, 200, 200)), 2)
+        lat = f"rtt {rtt_ms:.0f} ms" if rtt_ms is not None else "rtt ?"
+        cv2.putText(frame, f"robot: {status}   {lat}   loss {100 * robot.get('loss', 0):.0f}%   "
+                           f"ghost {robot.get('ghost') or '-'}", (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
+        co = robot.get("coach")
+        if co:
+            cv2.putText(frame, f"WARM-UP {co['n']}/{co['of']}: {co['text']}  ({co['left_s']:.0f}s)", (10, 150),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
+        elif robot.get("coach_msg"):
+            cv2.putText(frame, robot["coach_msg"], (10, 150), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+        if robot.get("ghost") == "clamped":
+            cv2.putText(frame, "OUT OF REACH - the gripper is clamped at the edge", (10, 120),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 165, 255), 2)
+        cv2.putText(frame, "F clutch | W warm-up | S stop | R reset | M flip L/R | Q quit", (10, frame.shape[0] - 15),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
         cv2.imshow("rover body client", frame)
         k = cv2.waitKey(1) & 0xFF
         if k in (ord("q"), 27):
             break
         if k == ord("f"):
-            say("follow me")
+            link.send({"kind": "clutch", "t": time.time(), "action": "toggle"})
         elif k == ord("s"):
             say("stop")
         elif k == ord("r"):
             say("reset")
+        elif k == ord("w"):
+            link.send({"kind": "clutch", "t": time.time(), "action": "warmup"})
         elif k == ord("m"):
             mirror = not mirror
-            say("follow me")  # re-clutch so flipping doesn't make the arm jump
+            if robot.get("clutch") == "following":  # re-calibrate so flipping doesn't make the arm jump
+                link.send({"kind": "clutch", "t": time.time(), "action": "toggle"})
     cap.release()
     cv2.destroyAllWindows()
 

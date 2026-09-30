@@ -51,24 +51,34 @@ class OneEuro:
 
 
 class Retargeter:
-    def __init__(self, axes, scale, origin, alpha: float = 0.3, min_cutoff: float = 1.0, beta: float = 0.7):
+    def __init__(self, axes, scale, origin, alpha: float = 0.3, min_cutoff: float = 1.0, beta: float = 0.7,
+                 ws_min=None, ws_max=None):
+        self.ws_min = None if ws_min is None else np.asarray(ws_min, float)
+        self.ws_max = None if ws_max is None else np.asarray(ws_max, float)
+        self.clipped = False
         self.A = np.asarray(axes, float)
         self.gains = np.broadcast_to(np.asarray(scale, float), (3,)).copy()  # per robot axis (x, y, z)
         self.anchor = np.asarray(origin, float)
         self.filter = OneEuro(min_cutoff, beta)
         self._neutral: np.ndarray | None = None
 
-    def engage(self, tcp_now) -> None:
+    def engage(self, tcp_now, neutral=None) -> None:
+        """neutral: calibrated wrist-shoulder vector (from the clutch); None = the next sample."""
         self.anchor = np.asarray(tcp_now, float).copy()
-        self._neutral = None
+        self._neutral = None if neutral is None else np.asarray(neutral, float)
         self.filter.reset()
+        self.clipped = False
 
     def __call__(self, pose: BodyPose) -> np.ndarray:
         rel = np.asarray(pose.wrist) - np.asarray(pose.shoulder)
         if self._neutral is None:
             self._neutral = rel
-        p = self.anchor + self.gains * (self.A @ (rel - self._neutral))
-        return self.filter(p, pose.t)
+        p = self.filter(self.anchor + self.gains * (self.A @ (rel - self._neutral)), pose.t)
+        if self.ws_min is not None:
+            c = np.clip(p, self.ws_min, self.ws_max)
+            self.clipped = bool(np.max(np.abs(c - p)) > 0.005)  # > 5 mm outside the box = really out of reach
+            p = c
+        return p
 
     def reset(self):
         self._neutral = None

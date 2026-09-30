@@ -304,6 +304,8 @@ def test_app_loop_end_to_end_mock(mode):
     cfg = yaml.safe_load(open(Path(__file__).resolve().parents[1] / "configs/default.yaml"))
     port = 47190 + (mode == "cartesian")
     cfg["net"]["listen_port"], cfg["body"]["mode"] = port, mode
+    cfg["net"]["hud_port"] = port + 50
+    cfg["body"]["clutch"] = {"calib_s": 0.5, "still_m": 0.03, "palm_s": 1.0, "raise_m": 0.05}
     cfg["nemotron"]["api_key_env"] = "NO_SUCH_KEY_FOR_TESTS"   # offline parser, no network
     th = threading.Thread(target=app.run, args=(cfg, "mock", 4.0), daemon=True)
     th.start(); time.sleep(0.5)
@@ -312,14 +314,15 @@ def test_app_loop_end_to_end_mock(mode):
         s.sendto(json.dumps({"kind": "utterance", "t": time.time(), "text": t}).encode(), ("127.0.0.1", port))
         return json.loads(s.recvfrom(9999)[0])
     assert say("reset")["mode"] == "hold"
-    assert say("follow me")["mode"] == "follow"
+    assert say("follow me")["mode"] == "hold"          # clutch starts calibrating: the arm holds
     statuses = []
     s.settimeout(0.001)  # non-blocking-ish drain while streaming poses
-    for i in range(45):  # 1.5 s of swinging the hand to the left
-        p = _synthetic_arm(lateral=min(0.25, i * 0.01), t=time.time()).model_dump()
+    for i in range(75):  # 0.8 s holding still (calibration), then 1.7 s swinging the hand to the left
+        k = max(0, i - 24)
+        p = _synthetic_arm(lateral=min(0.25, k * 0.01), t=time.time()).model_dump()
         p.update(kind="body", visible=True)
         if mode == "cartesian":
-            p["wrist"] = [p["wrist"][0] + min(0.25, i * 0.01), *p["wrist"][1:]]
+            p["wrist"] = [p["wrist"][0] + min(0.25, k * 0.01), *p["wrist"][1:]]
         s.sendto(json.dumps(p).encode(), ("127.0.0.1", port)); time.sleep(1 / 30)
         try:
             while True:
@@ -329,6 +332,8 @@ def test_app_loop_end_to_end_mock(mode):
         except (socket.timeout, BlockingIOError):
             pass
     s.settimeout(3)
+    assert any(m.get("clutch") == "calibrating" for m in statuses)
+    assert statuses[-1]["clutch"] == "following"
     tcps = [m["tcp"] for m in statuses if m["mode"] == "follow"]
     assert tcps[-1][1] > tcps[0][1] + 0.02   # hand to your left -> gripper moved to robot left (+y)
     assert statuses and statuses[-1]["mode"] == "follow" and statuses[-1]["target"] is not None
@@ -367,3 +372,62 @@ def test_scene_is_reachable():
             if not reachable(w.pos) or np.any(w.pos < lo - 1e-6) or np.any(w.pos > hi + 1e-6):
                 bad.append((it.action.value, it.object, it.reference, w.label, np.round(w.pos, 3).tolist()))
     assert not bad, bad
+
+
+def test_clutch_toggle_calibrates_then_follows_and_restarts_if_moved():
+    from rover_intent.body.clutch import Clutch
+    c = Clutch(calib_s=2.0)
+    rel = np.array([0.1, 0.4, -0.1])
+    assert c.toggle(0.0).kind == "calibrating"
+    for t in np.arange(0.1, 1.0, 0.1):
+        assert c.update(rel, False, False, t) is None
+    c.update(rel + [0.1, 0, 0], False, False, 1.0)            # moved 10 cm: countdown restarts at t=1.0
+    ev = None
+    for t in np.arange(1.1, 3.05, 0.1):
+        ev = c.update(rel + [0.1, 0, 0], False, False, t) or ev
+    assert ev.kind == "engaged" and c.state == "following" and np.allclose(ev.neutral, rel + [0.1, 0, 0])
+    assert c.toggle(3.1).kind == "released" and c.state == "idle"
+
+
+def test_clutch_palm_needs_one_second_and_left_hand_is_dead_man():
+    from rover_intent.body.clutch import Clutch
+    c, rel = Clutch(calib_s=0.5), np.zeros(3)
+    assert c.update(rel, True, False, 0.0) is None and c.update(rel, True, False, 0.5) is None
+    assert c.update(rel, False, False, 0.6) is None               # palm dropped: timer resets
+    assert c.update(rel, True, False, 0.7) is None
+    assert c.update(rel, True, False, 1.75).kind == "calibrating"  # 1 s of open palm held up
+    c = Clutch(calib_s=0.5)
+    assert c.update(rel, False, True, 0.0).kind == "calibrating"  # left hand up
+    assert c.update(rel, False, True, 0.6).kind == "engaged"
+    assert c.update(rel, False, False, 0.7).kind == "released"    # left hand down = freeze
+
+
+def test_coach_passes_axes_and_detects_mirror():
+    from types import SimpleNamespace as NS
+    from rover_intent.body.coach import STEPS, Coach
+    c = Coach(min_move=0.06, step_s=5)
+    c.start(0.0)
+    # mirror step: the OTHER tracked wrist rises -> mirrored webcam
+    c.update(0.1, pose=NS(wrist=(0, 0.5, 0), wrist_other=(0, 0.5, 0)))
+    ev = c.update(0.2, pose=NS(wrist=(0, 0.5, 0), wrist_other=(0, 0.3, 0)))
+    assert ev["mirror"] and c.mirror_detected
+    assert c.update(0.3, clutch_state="following")["ok"]                           # calib
+    tgt = np.array([0.5, 0.0, 0.3])
+    for k, d in [("right", [0, -0.07, 0]), ("left", [0, 0.07, 0]), ("up", [0, 0, 0.07]), ("down", [0, 0, -0.07]),
+                 ("reach", [0.07, 0, 0])]:
+        c.update(1.0, target=tgt)
+        ev = c.update(1.1, target=tgt + d)
+        assert ev["step"] == k and ev["ok"], (k, ev)
+    assert c.update(2.0, grip=1.0)["ok"] and c.update(2.1, grip=0.0)["done"]
+    assert c.results == {k: True for k, *_ in STEPS} and not c.active
+
+
+def test_coach_wrong_direction_times_out_as_failed():
+    from rover_intent.body.coach import Coach
+    c = Coach(step_s=2)
+    c.start(0.0); c.i = 2; c._begin(0.0)                      # jump to "right"
+    tgt = np.array([0.5, 0.0, 0.3])
+    c.update(0.1, target=tgt)
+    assert c.update(1.0, target=tgt + [0, 0.1, 0]) is None    # moved LEFT: not a pass
+    ev = c.update(2.5, target=tgt + [0, 0.1, 0])
+    assert ev["step"] == "right" and not ev["ok"]

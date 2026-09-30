@@ -40,6 +40,10 @@ class BodyPose(BaseModel):
     shoulder_other: Optional[tuple[float, float, float]] = None  # the other shoulder (torso frame)
     hips: Optional[tuple[float, float, float]] = None            # hip midpoint (torso "up")
     side: Literal["right", "left"] = "right"
+    wrist_other: Optional[tuple[float, float, float]] = None      # the other wrist (left-hand clutch)
+    skel2d: Optional[list[tuple[float, float]]] = None            # normalized image points for the overlay skeleton
+    seq: int = 0                                                  # for loss / latency measurement
+    rtt_ms: Optional[float] = None                                # client-measured round trip, echoed to the HUD
     hand_rpy: tuple[float, float, float] = (0.0, 0.0, 0.0)
     hand_open: Optional[float] = None  # 0 fist .. 1 open; None = hand not found (must NOT mean "open": it dropped objects)
     visible: bool = True
@@ -51,6 +55,13 @@ class Utterance(BaseModel):
     t: float
     text: str
     offline: bool = False  # True = keyword parser, no Nemotron (deterministic, for scripted checks)
+
+
+class ClutchMsg(BaseModel):
+    """Laptop -> VM: the F key (toggle the clutch)."""
+    kind: Literal["clutch"] = "clutch"
+    t: float = 0.0
+    action: Literal["toggle", "warmup"] = "toggle"
 
 
 class Query(BaseModel):
