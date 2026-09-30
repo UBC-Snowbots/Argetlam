@@ -52,7 +52,9 @@ def build(cfg: dict, backend: str):
     e, s = cfg["eeg"], cfg["assist"]
     arbiter = Arbiter(scene, e["p_on"], e["p_off"], e["hold_s"], s["radius"], s["gain"])
     b = cfg["body"]
-    retarget = Retargeter(b["axes"], b["scale"], b["origin"], b["alpha"])
+    oe = b.get("one_euro", {})
+    retarget = Retargeter(b["axes"], b["scale"], b["origin"], min_cutoff=oe.get("min_cutoff", 1.0),
+                          beta=oe.get("beta", 0.7))
     n = cfg["nemotron"]
     parser = IntentParser(n["model"], n["base_url"], n["api_key_env"])
     return arm, safety, robot, scene, arbiter, retarget, parser
@@ -96,14 +98,16 @@ def run(cfg: dict, backend: str, seconds: float | None = None):
                         "say": arbiter.last_say or intent.say, "mode": arbiter.mode.value})
 
     t_end = None if seconds is None else time.time() + seconds
-    next_status = 0.0
+    next_status = next_body_status = 0.0
+    body_addr = None
     while t_end is None or time.time() < t_end:
         t0 = time.time()
         for _, msg, addr in rx.poll():
             if isinstance(msg, BodyPose) and msg.visible:
+                body_addr = addr
                 if arbiter.mode == Mode.FOLLOW:
                     body_target, body_t = retarget(msg), t0
-                    if grip_from_hand:
+                    if grip_from_hand and msg.hand_open is not None:
                         arbiter.on_hand(msg.hand_open)
             elif isinstance(msg, Utterance):
                 stop = urgent_stop(msg.text)
@@ -141,6 +145,13 @@ def run(cfg: dict, backend: str, seconds: float | None = None):
         q_cmd = safety.step(q_cmd, q_des, dt, input_age)
         q_cmd = np.clip(q_cmd, q - WINDUP, q + WINDUP)  # anti-windup: never run far ahead of the real joints
         robot.command(q_cmd, grip)
+        if body_addr is not None and t0 >= next_body_status:  # live feedback for the body client's mini-map
+            next_body_status = t0 + 0.1
+            tgt = None if p is None else np.asarray(p, float)
+            rx.reply(body_addr, {"kind": "status", "mode": arbiter.mode.value, "tcp": np.round(tcp, 3).tolist(),
+                                 "target": None if tgt is None else np.round(tgt, 3).tolist(),
+                                 "clipped": bool(tgt is not None and not np.allclose(safety.clip_workspace(tgt), tgt)),
+                                 "grip": grip, "ws_min": safety.ws_min.tolist(), "ws_max": safety.ws_max.tolist()})
         if t0 >= next_status:
             next_status = t0 + 1.0
             log.info("mode=%s tcp=%s grip=%.0f%s", arbiter.mode.value, np.round(tcp, 3), grip,

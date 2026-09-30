@@ -10,8 +10,9 @@ arm:
   max_acc: [2.0, 2.0, 2.0, 4.0, 4.0, 4.0]   # rad/s^2
 
 safety:
-  workspace_min: [-0.2, -0.8, 0.03]   # m, base frame; TCP floor (fingertips reach ~2 cm below the TCP)
-  workspace_max: [1.0, 0.8, 1.0]
+  # top-down-reachable box from home (measured 2026-09-29: IK from home, 1 cm / 5 deg); outside it the arm stalls
+  workspace_min: [0.35, -0.40, 0.03]  # m, base frame; z floor: fingertips reach ~2 cm below the TCP
+  workspace_max: [0.80, 0.40, 0.45]
   watchdog_s: 0.25
 
 loop:
@@ -25,11 +26,12 @@ net:                                   # laptop -> VM over the tailnet
   isaac_state_port: 47111
 
 body:
-  # MediaPipe world axes (x right, y down, z toward camera) -> arm base (x forward, y left, z up)
-  axes: [[0, 0, -1], [-1, 0, 0], [0, -1, 0]]
-  scale: 1.0          # robot metres per human metre of wrist motion (relative/clutch mode)
+  # MediaPipe world axes (x image-right, y down, z toward camera = smaller) -> arm base (x fwd, y left, z up).
+  # Over-the-shoulder view: hand to YOUR right -> gripper right on screen. (Was [-1,0,0] for y: left/right inverted.)
+  axes: [[0, 0, -1], [1, 0, 0], [0, -1, 0]]
+  scale: [1.2, 1.4, 1.4]  # robot m per human m, per robot axis (fwd, lateral, up); monocular depth is the noisiest
   origin: [0.45, 0.0, 0.45]
-  alpha: 0.3          # EMA smoothing (higher = snappier, jitterier)
+  one_euro: {min_cutoff: 1.0, beta: 0.7}  # smooth when still, low lag when moving fast
   grip_from_hand: true  # fist closes the gripper; stand-in until EEG is live
 
 nemotron:

@@ -37,7 +37,7 @@ class BodyPose(BaseModel):
     wrist: tuple[float, float, float]
     shoulder: tuple[float, float, float]
     hand_rpy: tuple[float, float, float] = (0.0, 0.0, 0.0)
-    hand_open: float = 1.0  # 0 closed .. 1 open (for a visual check vs EEG)
+    hand_open: Optional[float] = None  # 0 fist .. 1 open; None = hand not found (must NOT mean "open": it dropped objects)
     visible: bool = True
 
 

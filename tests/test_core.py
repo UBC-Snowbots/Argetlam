@@ -209,15 +209,33 @@ def test_arbiter_shared_autonomy_pulls_toward_object():
     assert np.linalg.norm(p - SCENE["cup"]["pos"]) < np.linalg.norm(hand - SCENE["cup"]["pos"])
 
 
-def test_retarget_is_relative_after_engage():
+def test_retarget_is_relative_after_engage_and_directions_are_right():
+    import yaml
     from rover_intent.body.retarget import Retargeter
     from rover_intent.types import BodyPose
-    axes = [[0, 0, -1], [-1, 0, 0], [0, -1, 0]]
-    r = Retargeter(axes, scale=1.0, origin=[0.45, 0, 0.45], alpha=1.0)
+    cfg = yaml.safe_load(open(Path(__file__).resolve().parents[1] / "configs/default.yaml"))["body"]
+    r = Retargeter(cfg["axes"], scale=1.0, origin=[0.45, 0, 0.45], min_cutoff=1e6)  # huge cutoff = no smoothing
     r.engage([0.5, 0.1, 0.3])
-    pose = lambda w: BodyPose(t=0, wrist=w, shoulder=(0, 0, 0))
-    assert np.allclose(r(pose((0.0, 0.5, 0.0))), [0.5, 0.1, 0.3])       # first sample = neutral: no jump
-    assert np.allclose(r(pose((0.0, 0.4, -0.1))), [0.6, 0.1, 0.4])      # hand 10 cm up + 10 cm toward camera
+    pose = lambda w, t: BodyPose(t=t, wrist=w, shoulder=(0, 0, 0))
+    assert np.allclose(r(pose((0.0, 0.5, 0.0), 0.0)), [0.5, 0.1, 0.3])     # first sample = neutral: no jump
+    assert np.allclose(r(pose((0.0, 0.4, -0.1), 0.1)), [0.6, 0.1, 0.4])    # hand 10 cm up + toward the camera
+    # user's RIGHT = image LEFT (x decreases) in a raw webcam frame -> gripper to the right in the over-shoulder view (-y)
+    assert r(pose((-0.1, 0.5, 0.0), 0.2))[1] < 0.1
+
+
+def test_one_euro_smooths_jitter_but_follows_fast_moves():
+    from rover_intent.body.retarget import OneEuro
+    f, rng = OneEuro(1.0, 0.7), np.random.default_rng(0)
+    still = [f(np.array([0.0]) + rng.normal(0, 0.01, 1), i / 30)[0] for i in range(60)]
+    assert np.std(still[30:]) < 0.004                      # 1 cm jitter -> < 4 mm
+    f.reset()
+    ramp = [f(np.array([i / 30 * 1.0]), i / 30)[0] for i in range(30)]  # 1 m/s move
+    assert 1.0 * 29 / 30 - ramp[-1] < 0.06                  # lag under 6 cm at 1 m/s
+
+
+def test_hand_not_found_is_not_open():
+    from rover_intent.types import BodyPose
+    assert BodyPose(t=0, wrist=(0, 0, 0), shoulder=(0, 0, 0)).hand_open is None
 
 
 def test_hand_grip_only_in_follow_with_hysteresis():

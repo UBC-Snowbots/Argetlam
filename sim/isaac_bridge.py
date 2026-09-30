@@ -31,6 +31,8 @@ parser.add_argument("--config", default=str(ROOT / "configs/default.yaml"))
 parser.add_argument("--realtime", type=float, default=1.0, help="1 = real time; 0 = as fast as possible")
 parser.add_argument("--exit_after", type=float, default=0.0, help="quit after N sim seconds (0 = run forever)")
 parser.add_argument("--dt", type=float, default=1 / 120, help="physics step (s)")
+parser.add_argument("--view", choices=["shoulder", "front"], default="shoulder",
+                    help="shoulder = behind the arm, so your right is the arm's right when mirroring; front = old view")
 parser.add_argument("--render_every", type=int, default=4, help="render once per N physics steps (4 -> 30 fps)")
 AppLauncher.add_app_launcher_args(parser)
 # One arm: CPU PhysX is far cheaper per step than the GPU pipeline (measured: GUI 1.19x vs 0.22x real time).
@@ -59,7 +61,8 @@ sim = sim_utils.SimulationContext(sim_utils.SimulationCfg(
     dt=args.dt, render_interval=args.render_every, device=args.device,
     physics_material=sim_utils.RigidBodyMaterialCfg(static_friction=1.2, dynamic_friction=1.0),
 ))
-sim.set_camera_view(eye=(1.35, -1.05, 0.85), target=(0.45, 0.0, 0.2))
+VIEWS = {"shoulder": ((-0.85, 0.2, 1.55), (0.6, -0.05, 0.05)), "front": ((1.35, -1.05, 0.85), (0.45, 0.0, 0.2))}
+sim.set_camera_view(eye=VIEWS[args.view][0], target=VIEWS[args.view][1])
 
 ground = sim_utils.GroundPlaneCfg()
 ground.func("/World/ground", ground)
