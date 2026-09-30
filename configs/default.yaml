@@ -1,18 +1,10 @@
-# rover-intent default config. PLACEHOLDER values are marked; replace as hardware facts come in.
+# rover-intent shared config. Arm-specific settings (URDF, joints, home, limits, workspace, table, objects, Isaac
+# actuators) live in configs/arms/<arm_profile>.yaml and are merged over this file by rover_intent.config.load_config.
+# Override the profile with the ROVER_ARM environment variable. PLACEHOLDER values are marked.
 
-arm:
-  urdf: assets/rover2026/rover2026_gripper.urdf
-  tip_link: a6_EE_holder
-  tcp_offset: [0.145, 0.0, 0.0]       # sim gripper pad centre (sim/make_gripper_urdf.py). PLACEHOLDER for the real claw
-  home: [3.978, -1.285, 0.689, 0.0, 1.966, 2.305]  # sim: TCP top-down at (0.45, 0, 0.38), inside the reach box. PLACEHOLDER for the real arm
-  # PLACEHOLDER motor limits (same as the v4 sim work) until the datasheets arrive
-  max_vel: [0.8, 0.8, 0.8, 1.5, 1.5, 1.5]   # rad/s
-  max_acc: [2.0, 2.0, 2.0, 4.0, 4.0, 4.0]   # rad/s^2
+arm_profile: dev_arm          # dev_arm (the 2023 arm, the real hardware) | rover2026
 
 safety:
-  # top-down-reachable box from home (measured 2026-09-29: IK from home, 1 cm / 5 deg); outside it the arm stalls
-  workspace_min: [0.35, -0.40, 0.15]  # m, base frame; z floor = table top 0.12 + 0.03 (fingertips reach ~2 cm below the TCP)
-  workspace_max: [0.80, 0.40, 0.45]
   watchdog_s: 0.25
 
 loop:
@@ -53,15 +45,3 @@ eeg:
 assist:
   radius: 0.08
   gain: 0.6
-
-table:  # static table in front of the arm (the arm stands on the floor, z = 0)
-  top: 0.12                  # m; puts grasp points at 0.155-0.23 m, mid-band of the top-down reach (IK-checked)
-  x: [0.32, 0.86]
-  y: [-0.42, 0.42]
-
-scene:  # pos = grasp point (TCP target) in the arm base frame; objects stand on the table top.
-        # Layout checked with IK (tests/test_core.py::test_scene_is_reachable): grasp, pre-grasp, transit and every
-        # "beside" drop-off are reachable top-down with margin. >= 0.15 m spacing so drop-offs don't collide.
-  cup:    {pos: [0.50, 0.18, 0.175], height: 0.09, radius: 0.035, mass: 0.15, shape: cylinder, desc: "short red cup"}
-  bottle: {pos: [0.50, -0.18, 0.305], height: 0.22, radius: 0.035, mass: 0.50, shape: cylinder, desc: "tall blue bottle"}
-  block:  {pos: [0.64, 0.00, 0.155], height: 0.05, radius: 0.025, mass: 0.10, shape: box, desc: "small yellow cube"}

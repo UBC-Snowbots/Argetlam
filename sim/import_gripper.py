@@ -10,7 +10,16 @@ import os
 import traceback
 from pathlib import Path
 
-from isaacsim import SimulationApp
+import argparse
+
+ap = argparse.ArgumentParser()
+ap.add_argument("--urdf", default="assets/rover2026/rover2026_gripper.urdf")
+ap.add_argument("--out", default="assets/rover2026/usd")
+ap.add_argument("--check", nargs="*", default=["gripper_base", "finger_left", "finger_right", "tcp", "a6_rotation",
+                                                "finger_left_joint", "finger_right_joint"])
+args = ap.parse_args()
+
+from isaacsim import SimulationApp  # noqa: E402
 
 app = SimulationApp({"headless": True})
 from isaacsim.core.utils.extensions import enable_extension  # noqa: E402
@@ -21,8 +30,8 @@ from isaacsim.asset.importer.urdf import URDFImporter, URDFImporterConfig  # noq
 from pxr import Usd  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
-SRC = ROOT / "assets/rover2026/rover2026_gripper.urdf"
-OUT_DIR = ROOT / "assets/rover2026/usd"
+SRC = ROOT / args.urdf
+OUT_DIR = ROOT / args.out
 REPORT = ROOT / "logs/import_gripper.out"
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 REPORT.parent.mkdir(parents=True, exist_ok=True)
@@ -42,10 +51,9 @@ path = res if isinstance(res, str) and os.path.exists(res) else (files[0] if fil
 if path:
     st = Usd.Stage.Open(path)
     prims = {p.GetName(): p for p in st.Traverse()}
-    for want in ("a6_EE_holder", "gripper_base", "finger_left", "finger_right", "tcp",
-                 "a6_rotation", "finger_left_joint", "finger_right_joint"):
+    for want in args.check:
         out.append(f"has {want}: {want in prims}")
-    for jn in ("a6_rotation", "finger_left_joint", "finger_right_joint"):
+    for jn in [c for c in args.check if "joint" in c or "rotation" in c]:
         p = prims.get(jn)
         if p:
             lo, hi = p.GetAttribute("physics:lowerLimit"), p.GetAttribute("physics:upperLimit")

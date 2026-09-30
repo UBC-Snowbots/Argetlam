@@ -1,0 +1,46 @@
+# dev_arm: the team's development arm (UBC-Snowbots/RoverFlake2 dev_arm_description; believed to be the 2023 arm).
+# THE PHYSICAL ARM FOR THE DEMO. Sources: assets/dev_arm/SOURCE.md. Numbers measured 2026-09-30 with our IK.
+
+arm:
+  urdf: assets/dev_arm/dev_arm_gripper.urdf
+  base_link: link_0
+  tip_link: link_6
+  tool_axis: [0, 0, 1]                 # tool points along +z of link_6 (upstream link_tt)
+  tcp_offset: [0.0, 0.0, 0.2]          # upstream tool frame link_tt = placeholder finger pad centre. UNCONFIRMED on the real EE
+  palm_above_tcp: 0.045                # placeholder gripper: palm front 4.5 cm above the TCP
+  joints: [joint_1, joint_2, joint_3, joint_4, joint_5, joint_6]
+  # gripper straight down at (0.45, 0, 0.25); IK solution with the most joint-limit margin (0.37 rad)
+  home: [0.144, -1.131, -1.007, -0.003, 0.679, -2.957]
+  # HALF the firmware max speeds (FirmFlake main.cpp: 80, 40, 60, 110, 90, 90 deg/s), for demos
+  max_vel: [0.698, 0.349, 0.524, 0.960, 0.785, 0.785]   # rad/s
+  max_acc: [1.5, 1.0, 1.5, 3.0, 3.0, 3.0]               # rad/s^2  PLACEHOLDER (stepper accel not documented)
+
+sim:
+  usd: assets/dev_arm/usd/dev_arm_gripper/dev_arm_gripper.usda
+  # straight-behind is blocked by this arm's tall upper arm: behind-right, a bit lower (picked from 3 live candidates,
+  # gripper + held block + bottle visible mid-grasp; the cup on the arm's left is partly hidden from any rear view)
+  default_view: behind
+  views:
+    behind: {eye: [-0.5, -0.5, 0.75], target: [0.5, 0.0, 0.1]}
+  tcp_body: tcp
+  finger_joints: [finger_left_joint, finger_right_joint]
+  stroke: 0.0425
+  actuators:   # steppers hold position: stiff PD position drives are a fair stand-in (no missed-step model)
+    - {joints: [joint_1, joint_2, joint_3], stiffness: 2000.0, damping: 200.0, effort: 150.0, velocity: 1.5}
+    - {joints: [joint_4, joint_5, joint_6], stiffness: 400.0, damping: 40.0, effort: 30.0, velocity: 3.0}
+
+safety:
+  # robust top-down reach FROM HOME (a +-3 cm cross reachable, IK from home like the live loop), 2026-09-30:
+  # x 0.40-0.60 full width at z 0.03-0.30; box kept inside that with margin
+  workspace_min: [0.40, -0.40, 0.03]
+  workspace_max: [0.62, 0.40, 0.32]
+
+table:  # the objects stand on the same surface as the arm's base (decision 2026-09-30): no raised table
+  top: 0.0
+  x: [0.30, 0.75]
+  y: [-0.50, 0.50]
+
+scene:  # pos = grasp point (TCP target); objects stand on the arm's surface (z = 0). IK-checked: test_scene_is_reachable
+  cup:    {pos: [0.45, 0.20, 0.055], height: 0.09, radius: 0.035, mass: 0.15, shape: cylinder, desc: "short red cup"}
+  bottle: {pos: [0.45, -0.20, 0.185], height: 0.22, radius: 0.035, mass: 0.50, shape: cylinder, desc: "tall blue bottle"}
+  block:  {pos: [0.56, 0.00, 0.035], height: 0.05, radius: 0.025, mass: 0.10, shape: box, desc: "small yellow cube"}

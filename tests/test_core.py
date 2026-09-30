@@ -216,7 +216,8 @@ def test_retarget_is_relative_after_engage_and_directions_are_right():
     import yaml
     from rover_intent.body.retarget import Retargeter
     from rover_intent.types import BodyPose
-    cfg = yaml.safe_load(open(Path(__file__).resolve().parents[1] / "configs/default.yaml"))["body"]
+    from rover_intent.config import load_config
+    cfg = load_config()["body"]
     r = Retargeter(cfg["axes"], scale=1.0, origin=[0.45, 0, 0.45], min_cutoff=1e6)  # huge cutoff = no smoothing
     r.engage([0.5, 0.1, 0.3])
     pose = lambda w, t: BodyPose(t=t, wrist=w, shoulder=(0, 0, 0))
@@ -304,7 +305,8 @@ def test_app_loop_end_to_end_mock(mode):
     """Runs the real control loop (mock arm) and drives it over UDP: reset, follow, gestures, stop."""
     import json, socket, threading, time, yaml
     from rover_intent import app
-    cfg = yaml.safe_load(open(Path(__file__).resolve().parents[1] / "configs/default.yaml"))
+    from rover_intent.config import load_config
+    cfg = load_config()
     port = 47190 + (mode == "cartesian")
     cfg["net"]["listen_port"], cfg["body"]["mode"] = port, mode
     cfg["net"]["hud_port"] = port + 50
@@ -345,37 +347,42 @@ def test_app_loop_end_to_end_mock(mode):
     assert not th.is_alive()
 
 
-def test_scene_is_reachable():
-    """Every waypoint of every pick and every 'move X beside/on Y' in the configured scene is reachable top-down
-    (IK from home, like the live loop), and the travel height clears the tallest object."""
-    import itertools, yaml
-    cfg = yaml.safe_load(open(Path(__file__).resolve().parents[1] / "configs/default.yaml"))
-    arm = ArmModel(str(Path(__file__).resolve().parents[1] / cfg["arm"]["urdf"]), tcp_offset=cfg["arm"]["tcp_offset"])
-    home = np.array(cfg["arm"]["home"])
+@pytest.mark.parametrize("profile", ["rover2026", "dev_arm"])
+def test_scene_is_reachable(profile):
+    """Every waypoint of every pick and every 'move X beside Y' in the arm profile's scene is reachable with the home
+    orientation (top-down), IK from home like the live loop; objects stand on the table; the palm clears their tops."""
+    import itertools
+    from rover_intent.config import load_config
+    root = Path(__file__).resolve().parents[1]
+    cfg = load_config(arm=profile)
+    a = cfg["arm"]
+    arm = ArmModel(str(root / a["urdf"]), base=a["base_link"], tip=a["tip_link"], tcp_offset=a["tcp_offset"])
+    home = np.array(a["home"])
+    R_home = arm.fk(home)[:3, :3]
+    assert np.allclose(R_home @ np.asarray(a["tool_axis"], float) / np.linalg.norm(a["tool_axis"]), [0, 0, -1],
+                       atol=0.02), "home must point the tool straight down"
     table = cfg["table"]["top"]
     scene = Scene(cfg["scene"], support_z=table)
     lo, hi = np.array(cfg["safety"]["workspace_min"]), np.array(cfg["safety"]["workspace_max"])
-    palm_above_tcp = 0.145 - 0.100   # gripper palm front is 4.5 cm above the TCP (sim/make_gripper_urdf.py)
+    assert np.all(arm.fk(home)[:3, 3] >= lo) and np.all(arm.fk(home)[:3, 3] <= hi), "home inside the box"
     for o in scene.objects.values():
         assert abs(o.pos[2] - o.grasp_z - table) < 1e-9                      # stands on the table
-        # top-down grasp: the palm must clear the object's top, or the gripper stalls on it (bottle bug, 2026-09-30)
-        assert o.grasp_z + palm_above_tcp >= o.height + 0.005, (o.name, o.grasp_z, o.height)
-        assert o.grasp_z >= 0.02, o.name                                     # fingers must still reach the object
         assert scene.transit_z > o.pos[2] - o.grasp_z + o.height + 0.05      # travel clears the top
+        assert o.grasp_z + a["palm_above_tcp"] >= o.height + 0.005, (o.name, o.grasp_z, o.height)
+        assert o.grasp_z >= 0.02, o.name
     def reachable(p):
-        T = np.eye(4); T[:3, :3] = TOP_DOWN; T[:3, 3] = p
+        T = np.eye(4); T[:3, :3] = R_home; T[:3, 3] = p
         q = arm.ik(home, T, iters=300); Tq = arm.fk(q)
-        return np.linalg.norm(Tq[:3, 3] - p) < 5e-3 and np.degrees(np.linalg.norm(rot_err(Tq[:3, :3], TOP_DOWN))) < 3
+        return np.linalg.norm(Tq[:3, 3] - p) < 5e-3 and np.degrees(np.linalg.norm(rot_err(Tq[:3, :3], R_home))) < 3
     intents = [Intent(action=Action.pick, object=n) for n in scene.names()]
-    intents += [Intent(action=Action.move, object=a, relation=r, reference=b)
-                for a, b in itertools.permutations(scene.names(), 2) for r in ("beside",)]
+    intents += [Intent(action=Action.move, object=x, relation="beside", reference=y)
+                for x, y in itertools.permutations(scene.names(), 2)]
     bad = []
     for it in intents:
         for w in plan(it, scene, held=None):
             if not reachable(w.pos) or np.any(w.pos < lo - 1e-6) or np.any(w.pos > hi + 1e-6):
                 bad.append((it.action.value, it.object, it.reference, w.label, np.round(w.pos, 3).tolist()))
     assert not bad, bad
-
 
 def test_clutch_toggle_calibrates_then_follows_and_restarts_if_moved():
     from rover_intent.body.clutch import Clutch

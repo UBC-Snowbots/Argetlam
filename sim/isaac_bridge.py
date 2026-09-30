@@ -29,9 +29,10 @@ ROOT = Path(__file__).resolve().parents[1]
 parser = argparse.ArgumentParser()
 parser.add_argument("--config", default=str(ROOT / "configs/default.yaml"))
 parser.add_argument("--realtime", type=float, default=1.0, help="1 = real time; 0 = as fast as possible")
+parser.add_argument("--arm", default=None, help="arm profile (configs/arms/<name>.yaml); default: ROVER_ARM or config")
 parser.add_argument("--exit_after", type=float, default=0.0, help="quit after N sim seconds (0 = run forever)")
 parser.add_argument("--dt", type=float, default=1 / 120, help="physics step (s)")
-parser.add_argument("--view", default="behind",
+parser.add_argument("--view", default=None,
                     help="camera: behind | operator | high | top | shoulder | side | front. Live: UDP {\"view\": \"top\"}")
 parser.add_argument("--render_every", type=int, default=4, help="render once per N physics steps (4 -> 30 fps)")
 AppLauncher.add_app_launcher_args(parser)
@@ -41,21 +42,26 @@ args = parser.parse_args()
 app = AppLauncher(args).app
 
 import numpy as np  # noqa: E402
+import sys  # noqa: E402
+
 import torch  # noqa: E402
-import yaml  # noqa: E402
+
+sys.path.insert(0, str(ROOT / "src"))
+from rover_intent.config import load_config  # noqa: E402
 
 import isaaclab.sim as sim_utils  # noqa: E402
 from isaaclab.actuators import ImplicitActuatorCfg  # noqa: E402
 from isaaclab.assets import Articulation, ArticulationCfg, RigidObject, RigidObjectCfg  # noqa: E402
 from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg  # noqa: E402
 
-ARM_JOINTS = ["shoulder_joint", "link_1_joint", "link1_link2", "a4_rotation", "a5_rotation", "a6_rotation"]
-FINGER_JOINTS = ["finger_left_joint", "finger_right_joint"]
-STROKE = 0.0425
-ROBOT_USD = ROOT / "assets/rover2026/usd/rover2026_gripper/rover2026_gripper.usda"
 COLORS = {"cup": (0.85, 0.25, 0.20), "bottle": (0.20, 0.45, 0.85), "block": (0.95, 0.75, 0.10)}
 
-cfg = yaml.safe_load(open(args.config))
+cfg = load_config(args.config, args.arm)
+ARM_JOINTS = cfg["arm"]["joints"]
+FINGER_JOINTS = cfg["sim"]["finger_joints"]
+STROKE = cfg["sim"]["stroke"]
+ROBOT_USD = ROOT / cfg["sim"]["usd"]
+print(f"[bridge] arm profile {cfg['arm_profile']}: {ROBOT_USD.name}", flush=True)
 net = cfg["net"]
 home = cfg["arm"]["home"]
 
@@ -76,12 +82,16 @@ VIEWS = {"behind": ((-0.75, -0.1, 1.0), (0.62, 0.0, 0.15)),
          "front": ((1.35, -1.05, 0.85), (0.45, 0.0, 0.2))}
 
 
+for _name, _v in cfg.get("sim", {}).get("views", {}).items():   # per-arm camera views from the profile
+    VIEWS[_name] = (tuple(_v["eye"]), tuple(_v["target"]))
+
+
 def set_view(v):
     eye, target = (VIEWS[v] if isinstance(v, str) else (v["eye"], v["target"]))
     sim.set_camera_view(eye=eye, target=target)
 
 
-set_view(args.view)
+set_view(args.view or cfg.get("sim", {}).get("default_view", "behind"))
 
 ground = sim_utils.GroundPlaneCfg()
 ground.func("/World/ground", ground)
@@ -99,10 +109,9 @@ robot = Articulation(ArticulationCfg(
     init_state=ArticulationCfg.InitialStateCfg(
         joint_pos={**dict(zip(ARM_JOINTS, home)), **{j: 0.0 for j in FINGER_JOINTS}}),
     actuators={
-        "arm": ImplicitActuatorCfg(joint_names_expr=ARM_JOINTS[:3], effort_limit_sim=200.0,
-                                   velocity_limit_sim=1.5, stiffness=2000.0, damping=200.0),
-        "wrist": ImplicitActuatorCfg(joint_names_expr=ARM_JOINTS[3:], effort_limit_sim=40.0,
-                                     velocity_limit_sim=3.0, stiffness=400.0, damping=40.0),
+        **{f"group{i}": ImplicitActuatorCfg(joint_names_expr=g["joints"], effort_limit_sim=g["effort"],
+                                            velocity_limit_sim=g["velocity"], stiffness=g["stiffness"],
+                                            damping=g["damping"]) for i, g in enumerate(cfg["sim"]["actuators"])},
         "gripper": ImplicitActuatorCfg(joint_names_expr=FINGER_JOINTS, effort_limit_sim=40.0,
                                        velocity_limit_sim=0.15, stiffness=2000.0, damping=100.0),
     },
@@ -111,7 +120,7 @@ robot = Articulation(ArticulationCfg(
 # Static table in front of the arm (collider only, no rigid body -> it can't move).
 tbl = cfg.get("table")
 table_top = tbl["top"] if tbl else 0.0
-if tbl:
+if tbl and tbl["top"] > 0:  # top 0 = objects stand on the arm's own surface (the ground): no table
     tsize = (tbl["x"][1] - tbl["x"][0], tbl["y"][1] - tbl["y"][0], tbl["top"])
     tcfg = sim_utils.CuboidCfg(size=tsize, collision_props=sim_utils.CollisionPropertiesCfg(),
                                visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.45, 0.33, 0.22)))
@@ -196,7 +205,7 @@ reach_box.visualize(translations=np.array([(a + b) / 2 for a, b in _edges], dtyp
                     marker_indices=[0] * len(_edges))
 arm_ids = robot.find_joints(ARM_JOINTS, preserve_order=True)[0]
 finger_ids = robot.find_joints(FINGER_JOINTS, preserve_order=True)[0]
-tcp_body = robot.find_bodies("tcp")[0][0]
+tcp_body = robot.find_bodies(cfg["sim"].get("tcp_body", "tcp"))[0][0]
 dev = sim.device
 q_target = torch.tensor([home], dtype=torch.float32, device=dev)
 g_target = torch.zeros(1, 2, device=dev)

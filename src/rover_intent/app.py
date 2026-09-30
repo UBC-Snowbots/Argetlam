@@ -30,6 +30,7 @@ from .robot.backends import IsaacArm, MockArm, RealArm
 from .transport.udp import Receiver
 from .planner.nemotron import fallback_parse
 from .body.clutch import Clutch
+from .config import load_config
 from .body.coach import Coach
 from .types import Action, BodyPose, ClutchMsg, EEGState, Intent, Query, Utterance
 
@@ -40,7 +41,8 @@ WINDUP = 0.25  # rad: max gap between the commanded and the measured joint posit
 
 def build(cfg: dict, backend: str):
     a = cfg["arm"]
-    arm = ArmModel(str(ROOT / a["urdf"]), tip=a["tip_link"], tcp_offset=a["tcp_offset"])
+    arm = ArmModel(str(ROOT / a["urdf"]), base=a.get("base_link", "base_link"), tip=a["tip_link"],
+                   tcp_offset=a["tcp_offset"])
     safety = SafetyLayer(arm.lower, arm.upper, a["max_vel"], a["max_acc"],
                          cfg["safety"]["workspace_min"], cfg["safety"]["workspace_max"],
                          cfg["safety"]["watchdog_s"])
@@ -280,12 +282,14 @@ def load_dotenv(path: Path) -> None:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", default=str(ROOT / "configs/default.yaml"))
+    ap.add_argument("--arm", default=None, help="arm profile (configs/arms/<name>.yaml); default: ROVER_ARM or config")
     ap.add_argument("--backend", default=None, choices=["mock", "isaac", "real"])
     ap.add_argument("--seconds", type=float, default=None)
     args = ap.parse_args()
     load_dotenv(ROOT / ".env")
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    cfg = yaml.safe_load(open(args.config))
+    cfg = load_config(args.config, args.arm)
+    log.info("arm profile: %s (%s)", cfg["arm_profile"], cfg["arm"]["urdf"])
     run(cfg, args.backend or cfg["loop"]["backend"], args.seconds)
 
 
