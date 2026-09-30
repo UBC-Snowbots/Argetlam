@@ -43,6 +43,64 @@ MODELS = {
 }
 
 
+class Link:
+    """UDP straight to the VM, or (--tunnel host:port) newline-JSON over TCP through an SSH tunnel to
+    scripts/tcp_relay.py on the VM. Same messages either way."""
+
+    def __init__(self, host, port, tunnel=None):
+        self.tunnel = tunnel
+        if tunnel:
+            th, tp = tunnel.rsplit(":", 1)
+            self.sock = socket.create_connection((th, int(tp)), timeout=5)
+            self.sock.setblocking(False)
+            self._buf = b""
+        else:
+            self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self.sock.setblocking(False)
+            self.addr = (host, port)
+
+    def send(self, msg: dict):
+        data = json.dumps(msg).encode()
+        if self.tunnel:
+            self.sock.setblocking(True)
+            self.sock.sendall(data + b"\n")
+            self.sock.setblocking(False)
+        else:
+            self.sock.sendto(data, self.addr)
+
+    def poll(self):
+        """All messages received so far (non-blocking)."""
+        out = []
+        while True:
+            try:
+                data = self.sock.recv(65536) if self.tunnel else self.sock.recvfrom(65536)[0]
+            except (BlockingIOError, ConnectionResetError, OSError):
+                break
+            if self.tunnel:
+                if not data:
+                    break
+                self._buf += data
+                *lines, self._buf = self._buf.split(b"\n")
+                out += [json.loads(x) for x in lines if x.strip()]
+            else:
+                try:
+                    out.append(json.loads(data))
+                except ValueError:
+                    pass
+        return out
+
+    def wait(self, timeout, want=lambda m: True):
+        """Block up to `timeout` s for a message matching `want`."""
+        import time as _t
+        end = _t.time() + timeout
+        while _t.time() < end:
+            for m in self.poll():
+                if want(m):
+                    return m
+            _t.sleep(0.02)
+        return None
+
+
 def model_path(name: str) -> str:
     p = Path(__file__).resolve().parent / name
     if not p.exists():
@@ -167,6 +225,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--host", default=DEFAULT_HOST)
     ap.add_argument("--port", type=int, default=PORT)
+    ap.add_argument("--tunnel", help="host:port of an SSH tunnel to scripts/tcp_relay.py (when UDP can't reach the VM)")
     ap.add_argument("--camera", type=int, default=0)
     ap.add_argument("--side", choices=SIDES, default="right")
     ap.add_argument("--hz", type=float, default=30.0)
@@ -183,15 +242,14 @@ def main():
                           **(fields or {})}, indent=1))
         return
 
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.setblocking(False)
-    addr = (args.host, args.port)
+    link = Link(args.host, args.port, args.tunnel)
+    print("link:", f"tunnel {args.tunnel}" if args.tunnel else f"udp {args.host}:{args.port}")
     status, robot = "press F to follow", {}
     mirror, gate = args.mirror, JumpGate()
     rec = open(args.record, "a") if args.record else None
 
     def say(text):
-        sock.sendto(json.dumps({"kind": "utterance", "t": time.time(), "text": text}).encode(), addr)
+        link.send({"kind": "utterance", "t": time.time(), "text": text})
 
     cap = cv2.VideoCapture(args.camera)
     if not cap.isOpened():
@@ -214,16 +272,12 @@ def main():
             rec.write(json.dumps({"t": now, "mirror": mirror, **fields}) + "\n")
         if fields and visible and now - last_send >= 1.0 / args.hz:
             last_send = now
-            sock.sendto(json.dumps({"kind": "body", "t": now, **fields}).encode(), addr)
+            link.send({"kind": "body", "t": now, **fields})
         if pose_res.pose_landmarks:
             draw(frame, pose_res.pose_landmarks[0], vision.PoseLandmarksConnections.POSE_LANDMARKS, (0, 200, 0))
         if hand is not None:
             draw(frame, hand, vision.HandLandmarksConnections.HAND_CONNECTIONS, (255, 128, 0))
-        while True:  # replies (to F/S/R) and 10 Hz robot status for the mini-map
-            try:
-                msg = json.loads(sock.recvfrom(65536)[0])
-            except (BlockingIOError, ConnectionResetError, OSError, ValueError):
-                break
+        for msg in link.poll():  # replies (to F/S/R) and 10 Hz robot status
             if msg.get("kind") == "status":
                 robot = msg
             else:

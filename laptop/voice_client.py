@@ -23,15 +23,71 @@ PORT = 47100
 SR = 16000
 
 
-def send_and_wait(sock, host, port, text, timeout=12.0):
-    sock.sendto(json.dumps({"kind": "utterance", "t": time.time(), "text": text}).encode(), (host, port))
-    sock.settimeout(timeout)
-    try:
-        data, _ = sock.recvfrom(65536)
-    except socket.timeout:
-        print("  !! no reply in %.0fs: is the app running on the VM, and UDP %d open?" % (timeout, port))
+class Link:
+    """UDP straight to the VM, or (--tunnel host:port) newline-JSON over TCP through an SSH tunnel to
+    scripts/tcp_relay.py on the VM. Same messages either way."""
+
+    def __init__(self, host, port, tunnel=None):
+        self.tunnel = tunnel
+        if tunnel:
+            th, tp = tunnel.rsplit(":", 1)
+            self.sock = socket.create_connection((th, int(tp)), timeout=5)
+            self.sock.setblocking(False)
+            self._buf = b""
+        else:
+            self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self.sock.setblocking(False)
+            self.addr = (host, port)
+
+    def send(self, msg: dict):
+        data = json.dumps(msg).encode()
+        if self.tunnel:
+            self.sock.setblocking(True)
+            self.sock.sendall(data + b"\n")
+            self.sock.setblocking(False)
+        else:
+            self.sock.sendto(data, self.addr)
+
+    def poll(self):
+        """All messages received so far (non-blocking)."""
+        out = []
+        while True:
+            try:
+                data = self.sock.recv(65536) if self.tunnel else self.sock.recvfrom(65536)[0]
+            except (BlockingIOError, ConnectionResetError, OSError):
+                break
+            if self.tunnel:
+                if not data:
+                    break
+                self._buf += data
+                *lines, self._buf = self._buf.split(b"\n")
+                out += [json.loads(x) for x in lines if x.strip()]
+            else:
+                try:
+                    out.append(json.loads(data))
+                except ValueError:
+                    pass
+        return out
+
+    def wait(self, timeout, want=lambda m: True):
+        """Block up to `timeout` s for a message matching `want`."""
+        import time as _t
+        end = _t.time() + timeout
+        while _t.time() < end:
+            for m in self.poll():
+                if want(m):
+                    return m
+            _t.sleep(0.02)
+        return None
+
+
+def send_and_wait(link, text, timeout=12.0):
+    link.poll()  # drop anything stale (status messages)
+    link.send({"kind": "utterance", "t": time.time(), "text": text})
+    r = link.wait(timeout, lambda m: m.get("kind") == "reply" and m.get("text") == text)
+    if r is None:
+        print("  !! no reply in %.0fs: is the app running on the VM? (UDP blocked? try --tunnel)" % timeout)
         return
-    r = json.loads(data)
     it = r.get("intent", {})
     what = " ".join(f"{k}={v}" for k, v in it.items() if k != "say")
     print(f"  robot: {r.get('say', '')!r}   [{what}]  mode={r.get('mode')}  nemotron {r.get('latency_s', '?')}s")
@@ -53,12 +109,13 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--host", default=DEFAULT_HOST)
     ap.add_argument("--port", type=int, default=PORT)
+    ap.add_argument("--tunnel", help="host:port of an SSH tunnel to scripts/tcp_relay.py (when UDP can't reach the VM)")
     ap.add_argument("--text", action="store_true", help="type commands instead of speaking")
     ap.add_argument("--mic", type=int, default=None, help="input device index (see --list-devices)")
     ap.add_argument("--list-devices", action="store_true")
     ap.add_argument("--model", default="base.en", help="whisper size: tiny.en/base.en/small.en")
     args = ap.parse_args()
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    link = Link(args.host, args.port, args.tunnel)
 
     if args.text:
         print(f"text mode -> {args.host}:{args.port}. Try: move the cup beside the bottle | stop | follow me")
@@ -68,7 +125,7 @@ def main():
             except (EOFError, KeyboardInterrupt):
                 return
             if line:
-                send_and_wait(sock, args.host, args.port, line)
+                send_and_wait(link, line)
 
     import numpy as np
     import sounddevice as sd
@@ -98,7 +155,7 @@ def main():
         if not text:
             print("  (nothing recognised - mic muted or wrong --mic?)")
             continue
-        send_and_wait(sock, args.host, args.port, text)
+        send_and_wait(link, text)
 
 
 if __name__ == "__main__":

@@ -58,7 +58,7 @@ def build(cfg: dict, backend: str):
                           beta=oe.get("beta", 0.7))
     if b.get("mode", "cartesian") == "gesture":
         retarget = GestureMirror(arm, gains=b.get("gesture_gains", (2.5, 1.0, 0.6)),
-                                 height=(cfg["safety"]["workspace_min"][2], 0.55),
+                                 height=(cfg["safety"]["workspace_min"][2], cfg["safety"]["workspace_max"][2]),
                                  min_cutoff=oe.get("min_cutoff", 1.0), beta=oe.get("beta", 0.5))
     n = cfg["nemotron"]
     parser = IntentParser(n["model"], n["base_url"], n["api_key_env"])
