@@ -19,6 +19,7 @@ from pathlib import Path
 import numpy as np
 import yaml
 
+from .body.mirror import GestureMirror
 from .body.retarget import Retargeter
 from .control.arbiter import Arbiter, Mode
 from .control.kinematics import ArmModel
@@ -55,6 +56,10 @@ def build(cfg: dict, backend: str):
     oe = b.get("one_euro", {})
     retarget = Retargeter(b["axes"], b["scale"], b["origin"], min_cutoff=oe.get("min_cutoff", 1.0),
                           beta=oe.get("beta", 0.7))
+    if b.get("mode", "cartesian") == "gesture":
+        retarget = GestureMirror(arm, gains=b.get("gesture_gains", (2.5, 1.0, 0.6)),
+                                 height=(cfg["safety"]["workspace_min"][2], 0.55),
+                                 min_cutoff=oe.get("min_cutoff", 1.0), beta=oe.get("beta", 0.5))
     n = cfg["nemotron"]
     parser = IntentParser(n["model"], n["base_url"], n["api_key_env"])
     return arm, safety, robot, scene, arbiter, retarget, parser
@@ -84,7 +89,7 @@ def run(cfg: dict, backend: str, seconds: float | None = None):
             pending.clear()
         arbiter.on_intent(intent)
         if intent.action == Action.follow:  # clutch in: the arm stays put, your next wrist pose is neutral
-            retarget.engage(arm.fk(q_cmd)[:3, 3])
+            retarget.engage(arm.fk(q_cmd)[:3, 3])  # Retargeter or GestureMirror: both clutch at the current TCP
             body_target = None
         if intent.action == Action.reset:
             robot.reset(home)
@@ -99,14 +104,18 @@ def run(cfg: dict, backend: str, seconds: float | None = None):
 
     t_end = None if seconds is None else time.time() + seconds
     next_status = next_body_status = 0.0
-    body_addr = None
+    body_addr, n_body = None, 0
     while t_end is None or time.time() < t_end:
         t0 = time.time()
         for _, msg, addr in rx.poll():
-            if isinstance(msg, BodyPose) and msg.visible:
+            if isinstance(msg, BodyPose):
+                n_body += 1
                 body_addr = addr
+            if isinstance(msg, BodyPose) and msg.visible:
                 if arbiter.mode == Mode.FOLLOW:
-                    body_target, body_t = retarget(msg), t0
+                    tgt = retarget(msg)
+                    if tgt is not None:
+                        body_target, body_t = tgt, t0
                     if grip_from_hand and msg.hand_open is not None:
                         arbiter.on_hand(msg.hand_open)
             elif isinstance(msg, Utterance):
@@ -144,18 +153,21 @@ def run(cfg: dict, backend: str, seconds: float | None = None):
         q_des = arm.ik_step(q_cmd, T_des)
         q_cmd = safety.step(q_cmd, q_des, dt, input_age)
         q_cmd = np.clip(q_cmd, q - WINDUP, q + WINDUP)  # anti-windup: never run far ahead of the real joints
-        robot.command(q_cmd, grip)
+        ghost_bad = bool(p is not None and (getattr(retarget, "clipped", False) and arbiter.mode == Mode.FOLLOW
+                                            or not np.allclose(safety.clip_workspace(p), p)))
+        robot.command(q_cmd, grip, ghost=None if p is None else T_des[:3, 3], ghost_bad=ghost_bad)
         if body_addr is not None and t0 >= next_body_status:  # live feedback for the body client's mini-map
             next_body_status = t0 + 0.1
             tgt = None if p is None else np.asarray(p, float)
             rx.reply(body_addr, {"kind": "status", "mode": arbiter.mode.value, "tcp": np.round(tcp, 3).tolist(),
                                  "target": None if tgt is None else np.round(tgt, 3).tolist(),
-                                 "clipped": bool(tgt is not None and not np.allclose(safety.clip_workspace(tgt), tgt)),
+                                 "clipped": ghost_bad,
                                  "grip": grip, "ws_min": safety.ws_min.tolist(), "ws_max": safety.ws_max.tolist()})
         if t0 >= next_status:
             next_status = t0 + 1.0
-            log.info("mode=%s tcp=%s grip=%.0f%s", arbiter.mode.value, np.round(tcp, 3), grip,
-                     " ESTOP:" + safety.reason if safety.estopped else "")
+            log.info("mode=%s tcp=%s grip=%.0f body=%d pkt/s%s%s", arbiter.mode.value, np.round(tcp, 3), grip, n_body,
+                     f" from {body_addr[0]}" if body_addr else "", " ESTOP:" + safety.reason if safety.estopped else "")
+            n_body = 0
         time.sleep(max(0.0, dt - (time.time() - t0)))
 
 

@@ -254,3 +254,84 @@ def test_app_and_laptop_scripts_compile():
     import rover_intent.app  # noqa: F401
     for f in ["laptop/voice_client.py", "laptop/body_client.py", "sim/isaac_bridge.py", "src/rover_intent/eeg/live.py"]:
         py_compile.compile(str(root / f), doraise=True)
+
+
+def _synthetic_arm(lateral=0.0, up=0.0, flex_deg=60.0, t=0.0):
+    """Right arm of a person facing the camera, in MediaPipe world coords (x image-right, y down, z toward camera
+    smaller). Their fwd = -z, left = +x, up = -y. Wrist placed via shoulder->elbow->wrist geometry."""
+    from rover_intent.types import BodyPose
+    fwd, left, upv = np.array([0, 0, -1.]), np.array([1., 0, 0]), np.array([0, -1., 0])
+    S, O, H = -0.18 * left, 0.18 * left, -0.5 * upv
+    u = _n(-0.5 * upv + 0.8 * fwd + lateral * left + up * upv)
+    E = S + 0.30 * u
+    side = _n(np.cross(u, upv)); perp = np.cross(side, u)
+    f = np.cos(np.radians(flex_deg)) * u + np.sin(np.radians(flex_deg)) * perp
+    return BodyPose(t=t, wrist=tuple(E + 0.27 * f), shoulder=tuple(S), elbow=tuple(E), shoulder_other=tuple(O),
+                    hips=tuple(H))
+
+
+def _n(v):
+    return v / np.linalg.norm(v)
+
+
+def test_gesture_mirror_directions():
+    from rover_intent.body.mirror import GestureMirror
+    arm = ArmModel(URDF, tcp_offset=(0.145, 0, 0))
+    home_tcp = np.array([0.45, 0.0, 0.45])
+    def run(start=home_tcp, **kw):
+        m = GestureMirror(arm, min_cutoff=1e6)
+        m.engage(start)
+        first = m(_synthetic_arm(t=0.0))
+        return first, m(_synthetic_arm(t=0.1, **kw)), m
+    first, _, _ = run()
+    assert np.allclose(first, home_tcp, atol=1e-6)                     # engage: no jump
+    _, p, _ = run(lateral=0.3)                                          # swing hand to your LEFT
+    assert p[1] > home_tcp[1] + 0.03                                    # -> gripper moves to robot left (+y)
+    _, p, _ = run(up=0.4)                                               # raise hand
+    assert p[2] > home_tcp[2] + 0.03                                    # -> gripper up
+    _, p_ext, _ = run(flex_deg=20)                                      # straighten elbow (reach out)
+    axis = GestureMirror(arm).axis_xy
+    assert np.hypot(*(p_ext[:2] - axis)) > np.hypot(*(home_tcp[:2] - axis)) + 0.02   # -> reaches farther
+    _, p, m = run(start=np.array([0.45, 0.0, 0.15]), up=-3.0)           # low gripper, hand dropped ~0.34 m
+    assert m.clipped and abs(p[2] - 0.03) < 1e-9                        # clamped at the floor, flagged
+
+
+@pytest.mark.parametrize("mode", ["gesture", "cartesian"])
+def test_app_loop_end_to_end_mock(mode):
+    """Runs the real control loop (mock arm) and drives it over UDP: reset, follow, gestures, stop."""
+    import json, socket, threading, time, yaml
+    from rover_intent import app
+    cfg = yaml.safe_load(open(Path(__file__).resolve().parents[1] / "configs/default.yaml"))
+    port = 47190 + (mode == "cartesian")
+    cfg["net"]["listen_port"], cfg["body"]["mode"] = port, mode
+    cfg["nemotron"]["api_key_env"] = "NO_SUCH_KEY_FOR_TESTS"   # offline parser, no network
+    th = threading.Thread(target=app.run, args=(cfg, "mock", 4.0), daemon=True)
+    th.start(); time.sleep(0.5)
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.settimeout(3)
+    def say(t):
+        s.sendto(json.dumps({"kind": "utterance", "t": time.time(), "text": t}).encode(), ("127.0.0.1", port))
+        return json.loads(s.recvfrom(9999)[0])
+    assert say("reset")["mode"] == "hold"
+    assert say("follow me")["mode"] == "follow"
+    statuses = []
+    s.settimeout(0.001)  # non-blocking-ish drain while streaming poses
+    for i in range(45):  # 1.5 s of swinging the hand to the left
+        p = _synthetic_arm(lateral=min(0.25, i * 0.01), t=time.time()).model_dump()
+        p.update(kind="body", visible=True)
+        if mode == "cartesian":
+            p["wrist"] = [p["wrist"][0] + min(0.25, i * 0.01), *p["wrist"][1:]]
+        s.sendto(json.dumps(p).encode(), ("127.0.0.1", port)); time.sleep(1 / 30)
+        try:
+            while True:
+                m = json.loads(s.recvfrom(9999)[0])
+                if m.get("kind") == "status":
+                    statuses.append(m)
+        except (socket.timeout, BlockingIOError):
+            pass
+    s.settimeout(3)
+    tcps = [m["tcp"] for m in statuses if m["mode"] == "follow"]
+    assert tcps[-1][1] > tcps[0][1] + 0.02   # hand to your left -> gripper moved to robot left (+y)
+    assert statuses and statuses[-1]["mode"] == "follow" and statuses[-1]["target"] is not None
+    assert say("reset")["mode"] == "hold"
+    th.join(timeout=6)
+    assert not th.is_alive()

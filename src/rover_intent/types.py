@@ -36,6 +36,10 @@ class BodyPose(BaseModel):
     t: float
     wrist: tuple[float, float, float]
     shoulder: tuple[float, float, float]
+    elbow: Optional[tuple[float, float, float]] = None           # for pose mirroring
+    shoulder_other: Optional[tuple[float, float, float]] = None  # the other shoulder (torso frame)
+    hips: Optional[tuple[float, float, float]] = None            # hip midpoint (torso "up")
+    side: Literal["right", "left"] = "right"
     hand_rpy: tuple[float, float, float] = (0.0, 0.0, 0.0)
     hand_open: Optional[float] = None  # 0 fist .. 1 open; None = hand not found (must NOT mean "open": it dropped objects)
     visible: bool = True

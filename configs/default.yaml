@@ -26,6 +26,8 @@ net:                                   # laptop -> VM over the tailnet
   isaac_state_port: 47111
 
 body:
+  mode: gesture         # gesture = swing/raise/reach -> yaw/height/reach (body/mirror.py); cartesian = old xyz mapping
+  gesture_gains: [2.5, 1.0, 0.6]   # rad yaw per m sideways, m height per m up, m reach per unit elbow extension
   # MediaPipe world axes (x image-right, y down, z toward camera = smaller) -> arm base (x fwd, y left, z up).
   # Over-the-shoulder view: hand to YOUR right -> gripper right on screen. (Was [-1,0,0] for y: left/right inverted.)
   axes: [[0, 0, -1], [1, 0, 0], [0, -1, 0]]

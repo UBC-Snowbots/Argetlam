@@ -11,9 +11,11 @@ Standalone: needs only this file. Uses the MediaPipe *Tasks* API (mediapipe >= 0
 In the preview window:  F = "follow me" (the arm stays put; your next pose is neutral)
                         S = stop   R = reset   M = flip left/right (if the robot goes the wrong way)   Q/Esc = quit
 Make a fist to close the gripper, open your hand to release (stand-in until EEG is live).
-Stand ~1.5-2 m from the camera with your shoulder, elbow and wrist in view. Watch Isaac from BEHIND the arm:
-hand to your right -> gripper right, toward the screen -> forward, up -> up. The mini-map (top right) shows the
-gripper (white), where you are steering it (green, red = outside reach) and the reachable box.
+Stand ~1.5-2 m from the camera with your shoulders, elbow, wrist and hips in view. Gesture mode (default on the VM):
+  swing your hand left/right -> the arm rotates left/right
+  raise/lower your hand      -> the gripper goes up/down
+  straighten/bend your elbow -> the gripper reaches farther/closer
+The green ghost ball in Isaac shows where the gripper is heading (red = out of reach, clamped).
 Only the chosen arm's hand is used (--side, default right); the other hand is ignored.
 """
 import argparse
@@ -30,6 +32,9 @@ from mediapipe.tasks.python import BaseOptions, vision
 DEFAULT_HOST = "rover-vm"  # rover-vm on the tailnet
 PORT = 47100
 SIDES = {"right": (12, 16), "left": (11, 15)}  # (shoulder, wrist) pose landmark ids
+ELBOW = {"right": 14, "left": 13}
+OTHER_SHOULDER = {"right": 11, "left": 12}
+HIPS = (23, 24)
 MODELS = {
     "pose_landmarker_full.task": "https://storage.googleapis.com/mediapipe-models/pose_landmarker/"
                                  "pose_landmarker_full/float16/latest/pose_landmarker_full.task",
@@ -95,8 +100,11 @@ def pick_hand(pose_res, hand_res, wr_i, max_dist=0.12):
 
 
 def extract(pose_res, hand_res, side, mirror=False):
-    """-> (message fields or None, openness or None, chosen hand landmarks or None)"""
-    sh_i, wr_i = SIDES[side]
+    """-> (message fields or None, openness or None, chosen hand landmarks or None).
+    mirror: the webcam flips the image, so MediaPipe labels your right arm "left": track the other side's landmarks
+    and flip x back, which restores your real right arm in un-mirrored coordinates."""
+    track = side if not mirror else ("left" if side == "right" else "right")
+    sh_i, wr_i = SIDES[track]
     hand = pick_hand(pose_res, hand_res, wr_i)
     openness = hand_openness(hand) if hand is not None else None  # None = not found (NOT "open")
     if not pose_res.pose_world_landmarks:
@@ -104,7 +112,10 @@ def extract(pose_res, hand_res, side, mirror=False):
     w = pose_res.pose_world_landmarks[0]
     vis = min(w[sh_i].visibility or 0.0, w[wr_i].visibility or 0.0) > 0.5
     sx = -1.0 if mirror else 1.0
-    return {"wrist": [sx * w[wr_i].x, w[wr_i].y, w[wr_i].z], "shoulder": [sx * w[sh_i].x, w[sh_i].y, w[sh_i].z],
+    pt = lambda i: [sx * w[i].x, w[i].y, w[i].z]
+    hips = [(pt(HIPS[0])[k] + pt(HIPS[1])[k]) / 2 for k in range(3)]
+    return {"wrist": pt(wr_i), "shoulder": pt(sh_i), "elbow": pt(ELBOW[track]),
+            "shoulder_other": pt(OTHER_SHOULDER[track]), "hips": hips, "side": side,
             "hand_open": openness, "visible": vis}, openness, hand
 
 
@@ -162,6 +173,7 @@ def main():
     ap.add_argument("--image", help="test on one image instead of the camera (prints, sends nothing)")
     ap.add_argument("--mirror", action="store_true", help="flip left/right (webcams that mirror the image); M toggles")
     ap.add_argument("--record", help="append every frame's landmarks to this .jsonl (for debugging the mapping)")
+    ap.add_argument("--minimap", action="store_true", help="show the old top/side mini-map (the ghost in Isaac replaces it)")
     args = ap.parse_args()
 
     if args.image:
@@ -216,7 +228,8 @@ def main():
                 robot = msg
             else:
                 status = msg.get("say", status)
-        minimap(frame, robot)
+        if args.minimap:
+            minimap(frame, robot)
         frames += 1
         if now - fps_t >= 1.0:
             fps, frames, fps_t = frames / (now - fps_t), 0, now

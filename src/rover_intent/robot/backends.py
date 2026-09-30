@@ -19,7 +19,7 @@ class ArmBackend(abc.ABC):
     def read_joints(self) -> np.ndarray: ...
 
     @abc.abstractmethod
-    def command(self, q: np.ndarray, gripper: float) -> None: ...
+    def command(self, q: np.ndarray, gripper: float, ghost=None, ghost_bad: bool = False) -> None: ...
 
     def reset(self, q_home) -> None:
         """Put the arm at q_home with the gripper open (sim: also restore the objects)."""
@@ -37,7 +37,7 @@ class MockArm(ArmBackend):
     def read_joints(self):
         return self.q.copy()
 
-    def command(self, q, gripper):
+    def command(self, q, gripper, ghost=None, ghost_bad=False):
         self.q = np.array(q, float)
         self.gripper = float(gripper)
 
@@ -47,7 +47,7 @@ class MockArm(ArmBackend):
 
 class IsaacArm(ArmBackend):
     """Joint targets -> Isaac over UDP; state <- Isaac.
-    cmd:   {"q": [6], "g": 0..1}   or   {"reset": true}
+    cmd:   {"q": [6], "g": 0..1, "ghost": [x,y,z]?, "ghost_bad": bool?}   or   {"reset": true}   or   {"view": name}
     state: {"q": [6], "objects": {name: [x, y, z_bottom]}}   (objects: sim ground truth, stands in for perception)
     """
 
@@ -74,8 +74,11 @@ class IsaacArm(ArmBackend):
             self.objects = msg.get("objects", self.objects)
             self.connected = True
 
-    def command(self, q, gripper):
-        self.tx.sendto(json.dumps({"q": list(map(float, q)), "g": float(gripper)}).encode(), self.addr)
+    def command(self, q, gripper, ghost=None, ghost_bad=False):
+        msg = {"q": list(map(float, q)), "g": float(gripper)}
+        if ghost is not None:
+            msg["ghost"], msg["ghost_bad"] = list(map(float, ghost)), bool(ghost_bad)
+        self.tx.sendto(json.dumps(msg).encode(), self.addr)
 
     def reset(self, q_home):
         """The bridge teleports the arm home and restores the objects; then we adopt home as the state."""
@@ -91,5 +94,5 @@ class RealArm(ArmBackend):
     def read_joints(self):
         raise NotImplementedError
 
-    def command(self, q, gripper):
+    def command(self, q, gripper, ghost=None, ghost_bad=False):
         raise NotImplementedError

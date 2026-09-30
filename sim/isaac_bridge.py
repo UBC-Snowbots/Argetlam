@@ -31,8 +31,8 @@ parser.add_argument("--config", default=str(ROOT / "configs/default.yaml"))
 parser.add_argument("--realtime", type=float, default=1.0, help="1 = real time; 0 = as fast as possible")
 parser.add_argument("--exit_after", type=float, default=0.0, help="quit after N sim seconds (0 = run forever)")
 parser.add_argument("--dt", type=float, default=1 / 120, help="physics step (s)")
-parser.add_argument("--view", choices=["shoulder", "front"], default="shoulder",
-                    help="shoulder = behind the arm, so your right is the arm's right when mirroring; front = old view")
+parser.add_argument("--view", default="high",
+                    help="camera: high | top | shoulder | side | front. Change live: UDP {\"view\": \"top\"} to the cmd port")
 parser.add_argument("--render_every", type=int, default=4, help="render once per N physics steps (4 -> 30 fps)")
 AppLauncher.add_app_launcher_args(parser)
 # One arm: CPU PhysX is far cheaper per step than the GPU pipeline (measured: GUI 1.19x vs 0.22x real time).
@@ -40,12 +40,14 @@ parser.set_defaults(device="cpu")
 args = parser.parse_args()
 app = AppLauncher(args).app
 
+import numpy as np  # noqa: E402
 import torch  # noqa: E402
 import yaml  # noqa: E402
 
 import isaaclab.sim as sim_utils  # noqa: E402
 from isaaclab.actuators import ImplicitActuatorCfg  # noqa: E402
 from isaaclab.assets import Articulation, ArticulationCfg, RigidObject, RigidObjectCfg  # noqa: E402
+from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg  # noqa: E402
 
 ARM_JOINTS = ["shoulder_joint", "link_1_joint", "link1_link2", "a4_rotation", "a5_rotation", "a6_rotation"]
 FINGER_JOINTS = ["finger_left_joint", "finger_right_joint"]
@@ -61,8 +63,20 @@ sim = sim_utils.SimulationContext(sim_utils.SimulationCfg(
     dt=args.dt, render_interval=args.render_every, device=args.device,
     physics_material=sim_utils.RigidBodyMaterialCfg(static_friction=1.2, dynamic_friction=1.0),
 ))
-VIEWS = {"shoulder": ((-0.85, 0.2, 1.55), (0.6, -0.05, 0.05)), "front": ((1.35, -1.05, 0.85), (0.45, 0.0, 0.2))}
-sim.set_camera_view(eye=VIEWS[args.view][0], target=VIEWS[args.view][1])
+# All views keep "your right = screen right" except front/side. high = steep from behind, top = straight down.
+VIEWS = {"high": ((-0.35, 0.0, 1.75), (0.65, 0.0, 0.0)),
+         "top": ((0.58, 0.0, 1.9), (0.6, 0.0, 0.0)),
+         "shoulder": ((-0.85, 0.2, 1.55), (0.6, -0.05, 0.05)),
+         "side": ((0.6, 1.4, 0.6), (0.6, 0.0, 0.15)),
+         "front": ((1.35, -1.05, 0.85), (0.45, 0.0, 0.2))}
+
+
+def set_view(v):
+    eye, target = (VIEWS[v] if isinstance(v, str) else (v["eye"], v["target"]))
+    sim.set_camera_view(eye=eye, target=target)
+
+
+set_view(args.view)
 
 ground = sim_utils.GroundPlaneCfg()
 ground.func("/World/ground", ground)
@@ -105,6 +119,14 @@ for name, o in cfg["scene"].items():
         prim_path=f"/World/Objects/{name}", spawn=spawn,
         init_state=RigidObjectCfg.InitialStateCfg(pos=(x, y, h / 2 + 0.001))))
 heights = {n: cfg["scene"][n]["height"] for n in objects}
+
+# Ghost marker: where the gripper is being steered (green) / can't go (red). Visual only, no physics.
+ghost = VisualizationMarkers(VisualizationMarkersCfg(prim_path="/Visuals/ghost", markers={
+    "ok": sim_utils.SphereCfg(radius=0.03, visual_material=sim_utils.PreviewSurfaceCfg(
+        diffuse_color=(0.1, 0.9, 0.3), emissive_color=(0.05, 0.4, 0.1), opacity=0.55)),
+    "bad": sim_utils.SphereCfg(radius=0.03, visual_material=sim_utils.PreviewSurfaceCfg(
+        diffuse_color=(0.95, 0.15, 0.1), emissive_color=(0.5, 0.05, 0.02), opacity=0.55))}))
+ghost_pos, ghost_bad, ghost_shown = None, False, None
 
 sim.reset()
 
@@ -151,6 +173,13 @@ while app.is_running():
             msg = json.loads(rx.recv(65536))
         except BlockingIOError:
             break
+        if "view" in msg:
+            try:
+                set_view(msg["view"])
+                print(f"[bridge] view -> {msg['view']}", flush=True)
+            except (KeyError, TypeError):
+                print(f"[bridge] unknown view {msg['view']!r}; known: {list(VIEWS)}", flush=True)
+            continue
         if msg.get("reset"):
             reset_scene()
             q_target[0] = torch.tensor(home, dtype=torch.float32, device=dev)
@@ -160,10 +189,19 @@ while app.is_running():
             continue
         q_target[0] = torch.tensor(msg["q"], dtype=torch.float32, device=dev)
         g_target[:] = float(msg.get("g", 0.0)) * STROKE
+        ghost_pos, ghost_bad = msg.get("ghost"), bool(msg.get("ghost_bad", False))
         n_cmd += 1
     robot.set_joint_position_target_index(target=q_target, joint_ids=arm_ids)
     robot.set_joint_position_target_index(target=g_target, joint_ids=finger_ids)
     robot.write_data_to_sim()
+    state = (tuple(round(v, 3) for v in ghost_pos), ghost_bad) if ghost_pos else None
+    if state != ghost_shown:  # only touch the marker when it changes
+        ghost_shown = state
+        if state is None:
+            ghost.set_visibility(False)
+        else:
+            ghost.set_visibility(True)
+            ghost.visualize(translations=np.array([ghost_pos], dtype=np.float32), marker_indices=[1 if ghost_bad else 0])
     n_step += 1
     rend = n_step % args.render_every == 0
     ts = time.time()
