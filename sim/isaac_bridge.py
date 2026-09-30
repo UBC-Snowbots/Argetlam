@@ -220,6 +220,7 @@ print(f"[bridge] ready: cmd :{net['isaac_cmd_port']}  state -> :{net['isaac_stat
 dt = sim.get_physics_dt()
 t_sim, n_cmd, last_log, n_resets = 0.0, 0, 0.0, 0
 wall0, n_step = time.time(), 0
+wall_start = wall0  # for the rtf readout (wall0 is re-anchored after hitches; this one isn't)
 prof = {"step_r": [0.0, 0], "step_n": [0.0, 0], "io": [0.0, 0]}
 while app.is_running():
     t0 = time.time()
@@ -295,7 +296,7 @@ while app.is_running():
     if t_sim - last_log >= 2.0:
         last_log = t_sim
         fingers = robot.data.joint_pos.torch[0, finger_ids].tolist()
-        rtf = t_sim / max(time.time() - wall0, 1e-6)
+        rtf = t_sim / max(time.time() - wall_start, 1e-6)
         print("[prof] " + " ".join(f"{k}={1e3 * v[0] / max(v[1], 1):.1f}ms" for k, v in prof.items()), flush=True)
         print(f"[bridge] t={t_sim:6.1f}s rtf={rtf:.2f} cmds={n_cmd} q={[round(v, 2) for v in q]} "
               f"fingers={[round(v * 1000, 1) for v in fingers]}mm "
@@ -303,6 +304,12 @@ while app.is_running():
     if args.exit_after and t_sim >= args.exit_after:
         break
     if args.realtime > 0:
-        time.sleep(max(0.0, dt / args.realtime - (time.time() - t0)))
+        # pace against a GLOBAL clock: a slow (rendered) step is caught up by the fast ones. Per-step pacing
+        # ("sleep until dt after this step began") lost every render overshoot for good: rtf 0.82 with 36 % idle CPU.
+        lag = wall0 + t_sim / args.realtime - time.time()
+        if lag > 0:
+            time.sleep(lag)
+        elif lag < -0.25:
+            wall0 -= lag + 0.25  # far behind (e.g. a hitch): don't sprint to catch up, just re-anchor
 
 app.close()
