@@ -31,8 +31,8 @@ parser.add_argument("--config", default=str(ROOT / "configs/default.yaml"))
 parser.add_argument("--realtime", type=float, default=1.0, help="1 = real time; 0 = as fast as possible")
 parser.add_argument("--exit_after", type=float, default=0.0, help="quit after N sim seconds (0 = run forever)")
 parser.add_argument("--dt", type=float, default=1 / 120, help="physics step (s)")
-parser.add_argument("--view", default="high",
-                    help="camera: high | top | shoulder | side | front. Change live: UDP {\"view\": \"top\"} to the cmd port")
+parser.add_argument("--view", default="operator",
+                    help="camera: operator | high | top | shoulder | side | front. Live: UDP {\"view\": \"top\"} to the cmd port")
 parser.add_argument("--render_every", type=int, default=4, help="render once per N physics steps (4 -> 30 fps)")
 AppLauncher.add_app_launcher_args(parser)
 # One arm: CPU PhysX is far cheaper per step than the GPU pipeline (measured: GUI 1.19x vs 0.22x real time).
@@ -63,8 +63,10 @@ sim = sim_utils.SimulationContext(sim_utils.SimulationCfg(
     dt=args.dt, render_interval=args.render_every, device=args.device,
     physics_material=sim_utils.RigidBodyMaterialCfg(static_friction=1.2, dynamic_friction=1.0),
 ))
-# All views keep "your right = screen right" except front/side. high = steep from behind, top = straight down.
-VIEWS = {"high": ((-0.35, 0.0, 1.75), (0.65, 0.0, 0.0)),
+# operator (default, Pranav 2026-09-30): eye level, behind and to the right of the arm, like standing at its shoulder;
+# whole arm + gripper + objects stay in view during grasps. Your right = screen right (except front/side).
+VIEWS = {"operator": ((-0.9, -0.6, 0.7), (0.58, 0.0, 0.18)),
+         "high": ((-0.35, 0.0, 1.75), (0.65, 0.0, 0.0)),
          "top": ((0.58, 0.0, 1.9), (0.6, 0.0, 0.0)),
          "shoulder": ((-0.85, 0.2, 1.55), (0.6, -0.05, 0.05)),
          "side": ((0.6, 1.4, 0.6), (0.6, 0.0, 0.15)),
