@@ -234,5 +234,5 @@ def test_app_and_laptop_scripts_compile():
     import py_compile
     root = Path(__file__).resolve().parents[1]
     import rover_intent.app  # noqa: F401
-    for f in ["laptop/voice_client.py", "laptop/body_client.py", "sim/isaac_bridge.py"]:
+    for f in ["laptop/voice_client.py", "laptop/body_client.py", "sim/isaac_bridge.py", "src/rover_intent/eeg/live.py"]:
         py_compile.compile(str(root / f), doraise=True)

@@ -4,6 +4,10 @@ OpenBCI Cyton later (--board cyton --serial /dev/ttyUSB0 or COM3).
     python -m rover_intent.eeg.live --model models/mi_riemann.joblib --host <vm> [--board synthetic]
 
 On the synthetic board the output is meaningless (random signal); it only proves the pipeline runs.
+Model files: a single motor-imagery model (train_mi.py: {"model": ...}) or the hybrid grasp decoder
+(hybrid_eval.py: {"decoder": HybridDecoder, ...}); the hybrid is streamed with causal filters (OnlineHybrid).
+Hybrid expects 8 channels in MOTOR_8 order (FC3 FC4 C3 Cz C4 CP3 CP4 Pz). It was trained at 256 Hz; the Cyton
+runs at 250 Hz (~2 % time-scale mismatch; recalibrate on the headset for real use).
 Channel order must match eeg.data.MOTOR_8: wire the Cyton N1P..N8P to FC3 FC4 C3 Cz C4 CP3 CP4 Pz.
 """
 from __future__ import annotations
@@ -35,7 +39,7 @@ def main():
     ap.add_argument("--hz", type=float, default=8.0)
     args = ap.parse_args()
 
-    clf = joblib.load(args.model)["model"]
+    bundle = joblib.load(args.model)
     board_id = BoardIds.SYNTHETIC_BOARD if args.board == "synthetic" else BoardIds.CYTON_BOARD
     params = BrainFlowInputParams()
     params.serial_port = args.serial
@@ -47,6 +51,21 @@ def main():
     tx = Sender(args.host, args.port)
     board.prepare_session()
     board.start_stream()
+    if "decoder" in bundle:  # hybrid: stream every new sample through causal filters
+        from .hybrid import OnlineHybrid
+        online = OnlineHybrid(bundle["decoder"], n_ch=len(chans), step=max(1, int(fs / args.hz)))
+        try:
+            while True:
+                data = board.get_board_data()  # everything since the last call
+                if data.shape[1]:
+                    for _pc, _pl, pg in online.push(data[chans] * 1e-6):
+                        tx.send(EEGState(t=time.time(), p_grasp=pg))
+                time.sleep(0.02)
+        finally:
+            board.stop_stream()
+            board.release_session()
+        return
+    clf = bundle["model"]
     try:
         time.sleep(n / fs)
         while True:
