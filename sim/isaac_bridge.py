@@ -86,9 +86,13 @@ for _name, _v in cfg.get("sim", {}).get("views", {}).items():   # per-arm camera
     VIEWS[_name] = (tuple(_v["eye"]), tuple(_v["target"]))
 
 
+current_cam = {"eye": None, "target": None}
+
+
 def set_view(v):
     eye, target = (VIEWS[v] if isinstance(v, str) else (v["eye"], v["target"]))
     sim.set_camera_view(eye=eye, target=target)
+    current_cam.update(eye=list(map(float, eye)), target=list(map(float, target)))
 
 
 set_view(args.view or cfg.get("sim", {}).get("default_view", "behind"))
@@ -197,6 +201,23 @@ def reset_scene():
 
 
 reset_scene()
+# Neutral marker: a white 3-axis cross at the box centre (your relaxed hand maps here after calibration).
+neutral_mk = VisualizationMarkers(VisualizationMarkersCfg(prim_path="/Visuals/neutral", markers={
+    "bar": sim_utils.CylinderCfg(radius=0.004, height=0.08, axis="Z", visual_material=sim_utils.PreviewSurfaceCfg(
+        diffuse_color=(1.0, 1.0, 1.0), emissive_color=(0.6, 0.6, 0.6))),
+    "dot": sim_utils.SphereCfg(radius=0.012, visual_material=sim_utils.PreviewSurfaceCfg(
+        diffuse_color=(1.0, 1.0, 1.0), emissive_color=(0.6, 0.6, 0.6)))}))
+_c = (ws_lo + ws_hi) / 2
+neutral_mk.visualize(translations=np.array([_c] * 4, dtype=np.float32),
+                     orientations=np.array([quat_z_to(np.array(d, float)) for d in
+                                            ([1, 0, 0], [0, 1, 0], [0, 0, 1], [0, 0, 1])], dtype=np.float32),
+                     marker_indices=[0, 0, 0, 1])
+# Verification target (magenta): touch it with the gripper during the calibration check.
+vtarget = VisualizationMarkers(VisualizationMarkersCfg(prim_path="/Visuals/vtarget", markers={
+    "t": sim_utils.SphereCfg(radius=0.025, visual_material=sim_utils.PreviewSurfaceCfg(
+        diffuse_color=(0.95, 0.1, 0.85), emissive_color=(0.5, 0.05, 0.45), opacity=0.8))}))
+vtarget.set_visibility(False)
+vtarget_shown = None
 _corners = [np.array([x, y, z]) for x in (ws_lo[0], ws_hi[0]) for y in (ws_lo[1], ws_hi[1]) for z in (ws_lo[2], ws_hi[2])]
 _edges = [(a, b) for i, a in enumerate(_corners) for b in _corners[i + 1:] if np.count_nonzero(a != b) == 1]
 reach_box.visualize(translations=np.array([(a + b) / 2 for a, b in _edges], dtype=np.float32),
@@ -245,6 +266,14 @@ while app.is_running():
             continue
         q_target[0] = torch.tensor(msg["q"], dtype=torch.float32, device=dev)
         g_target[:] = float(msg.get("g", 0.0)) * STROKE
+        vt = msg.get("vtarget")
+        if (tuple(vt) if vt else None) != vtarget_shown:
+            vtarget_shown = tuple(vt) if vt else None
+            if vt:
+                vtarget.set_visibility(True)
+                vtarget.visualize(translations=np.array([vt], dtype=np.float32))
+            else:
+                vtarget.set_visibility(False)
         ghost_pos = msg.get("ghost")
         ghost_state = msg.get("ghost_state") or ("clamped" if msg.get("ghost_bad") else "ok")
         n_cmd += 1
@@ -290,7 +319,7 @@ while app.is_running():
     for n, o in objects.items():
         p = o.data.root_pos_w.torch[0].tolist()
         objs[n] = [p[0], p[1], p[2] - heights[n] / 2]  # bottom (on the table: table_top)
-    tx.sendto(json.dumps({"q": q, "objects": objs}).encode(), state_addr)
+    tx.sendto(json.dumps({"q": q, "objects": objs, "cam": current_cam}).encode(), state_addr)
     prof["io"][0] += time.time() - ts; prof["io"][1] += 1
 
     if t_sim - last_log >= 2.0:

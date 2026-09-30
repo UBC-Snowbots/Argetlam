@@ -31,7 +31,8 @@ from .transport.udp import Receiver
 from .planner.nemotron import fallback_parse
 from .body.clutch import Clutch
 from .config import load_config
-from .body.coach import Coach
+from .body.calib_session import CalibratedMapper, CalibrationSession
+from .body.calibration import Profile
 from .types import Action, BodyPose, ClutchMsg, EEGState, Intent, Query, Utterance
 
 log = logging.getLogger("rover_intent")
@@ -89,12 +90,45 @@ def run(cfg: dict, backend: str, seconds: float | None = None):
                     raise_m=c.get("raise_m", 0.05))
     hud = (cfg["net"].get("hud_host", "127.0.0.1"), cfg["net"].get("hud_port", 47130))
     last_body, last_target, last_body_arrival, last_visible_t = None, None, 0.0, 0.0
-    coach, coach_msg, set_mirror = Coach(), "", None
+    set_mirror = None
+    lo_ws, hi_ws = cfg["safety"]["workspace_min"], cfg["safety"]["workspace_max"]
+    sim = cfg.get("sim", {})
+    default_cam = sim.get("views", {}).get(sim.get("default_view", "behind"))
+    camera = lambda: getattr(robot, "camera", None) or default_cam
+    profile_path = ROOT / cfg["body"].get("profile", "data/profiles/{arm}_pranav.json").format(arm=cfg["arm_profile"])
+    session = CalibrationSession(lo_ws, hi_ws, profile_path, cfg["arm_profile"], default_cam)
+    bubble = (cfg["net"].get("bubble_host", "127.0.0.1"), cfg["net"].get("bubble_port", 47101))
+    if profile_path.exists():
+        prof = Profile.load(profile_path)
+        retarget = CalibratedMapper(prof, lo_ws, hi_ws, camera)
+        log.info("calibration profile loaded: %s (%s, residual %.1f deg, verify %s)", profile_path.name, prof.created,
+                 prof.residual_deg, prof.verify)
+    else:
+        log.info("no calibration profile yet (%s): using %s mode until you calibrate (C)", profile_path.name,
+                 cfg["body"].get("mode"))
+
+    def say(text):
+        arbiter.last_say = text
+        rx.reply(bubble, {"state": "reply", "text": text})   # Pranav's voice bubble on the VM screen
+        log.info("calibration: %s", text)
+
+    def handle_session(effects):
+        nonlocal retarget
+        if not effects:
+            return
+        if effects.get("say"):
+            say(effects["say"])
+        if effects.get("release") and clutch.state != "idle":
+            on_clutch(clutch._release("calibrating"))
+        if effects.get("profile") is not None:
+            retarget = CalibratedMapper(effects["profile"], lo_ws, hi_ws, camera)
+        if effects.get("engage") and clutch.state == "idle":
+            on_clutch(clutch.toggle(time.time()))
     seq_seen = []  # (t, seq) over the last second, for packet loss
 
     def on_clutch(ev):
         """Clutch events -> arm modes. Calibrating/released freeze the arm; engaged starts following."""
-        nonlocal body_target, last_target
+        nonlocal body_target, last_target, retarget
         if ev is None:
             return
         log.info("clutch: %s (trigger=%s%s)", ev.kind, clutch.trigger,
@@ -104,8 +138,7 @@ def run(cfg: dict, backend: str, seconds: float | None = None):
                 arbiter.mode = Mode.HOLD
             body_target = None
         elif ev.kind == "engaged":
-            retarget.engage(arm.fk(q_cmd)[:3, 3], ev.neutral) if isinstance(retarget, Retargeter) else \
-                retarget.engage(arm.fk(q_cmd)[:3, 3])
+            retarget.engage(arm.fk(q_cmd)[:3, 3], ev.neutral)
             arbiter.on_intent(Intent(action=Action.follow))
             body_target = last_target = None
 
@@ -152,6 +185,8 @@ def run(cfg: dict, backend: str, seconds: float | None = None):
                                     and msg.wrist[1] < msg.elbow[1] - 0.02)          # MediaPipe y points down
                 left_raised = bool(msg.wrist_other is not None and msg.shoulder_other is not None
                                    and msg.wrist_other[1] < msg.shoulder_other[1] - clutch.raise_m)
+                if session.state in ("positioning", "capturing"):
+                    palm_up_open = left_raised = False   # calibration poses (hand up, open palm) must not engage the arm
                 on_clutch(clutch.update(rel, palm_up_open, left_raised, t0))
                 if msg.visible and clutch.state == "following" and arbiter.mode == Mode.FOLLOW:
                     tgt = retarget(msg)
@@ -159,27 +194,24 @@ def run(cfg: dict, backend: str, seconds: float | None = None):
                         body_target, body_t, last_target = tgt, t0, tgt
                     if grip_from_hand and msg.hand_open is not None:
                         arbiter.on_hand(msg.hand_open)
-                if coach.active:
-                    if coach.step and coach.step[0] == "calib" and clutch.state == "idle":
-                        on_clutch(clutch.toggle(t0))       # the warm-up starts the clutch for you
-                    ev = coach.update(t0, pose=msg, target=last_target if clutch.state == "following" else None,
-                                      grip=arbiter.gripper if clutch.state == "following" else None,
-                                      clutch_state=clutch.state)
-                    if ev:
-                        log.info("warm-up: %s", ev)
-                        if ev.get("mirror"):
-                            set_mirror = True               # tell the body client to flip left/right
-                        coach_msg = (f"Warm-up done: {ev['passed']}/{ev['of']} checks passed" if ev.get("done")
-                                     else f"{ev['step']}: {'OK' if ev['ok'] else 'no response - check'}")
-            elif isinstance(msg, ClutchMsg) and msg.action == "warmup":
-                coach.start(t0)
+                if session.active:
+                    handle_session(session.update(t0, msg, bool(msg.in_position),
+                                                  tcp_meas=arm.fk(robot.read_joints())[:3, 3],
+                                                  camera=camera()))
+            elif isinstance(msg, ClutchMsg) and msg.action in ("warmup", "calibrate"):
+                handle_session(session.start(t0))
+            elif isinstance(msg, ClutchMsg) and msg.action == "redo_axis":
+                bad = (session.result or {}).get("bad_axis")
+                handle_session(session.start(t0, redo_axis=bad))
             elif isinstance(msg, ClutchMsg):
                 on_clutch(clutch.toggle(t0))
                 rx.reply(addr, {"kind": "reply", "text": "clutch", "say": f"clutch: {clutch.state}",
                                 "mode": arbiter.mode.value})
-            elif isinstance(msg, Utterance) and "warm" in msg.text.lower() and "up" in msg.text.lower():
-                coach.start(t0)
-                rx.reply(addr, {"kind": "reply", "text": msg.text, "say": "Warm-up started.", "mode": arbiter.mode.value})
+            elif isinstance(msg, Utterance) and ("calibrat" in msg.text.lower() or
+                                                 ("warm" in msg.text.lower() and "up" in msg.text.lower())):
+                handle_session(session.start(t0))
+                rx.reply(addr, {"kind": "reply", "text": msg.text, "say": "Calibration started.",
+                                "mode": arbiter.mode.value})
             elif isinstance(msg, Utterance):
                 stop = urgent_stop(msg.text)
                 if stop is not None:  # handled in this tick; never queued behind a cloud call
@@ -240,7 +272,8 @@ def run(cfg: dict, backend: str, seconds: float | None = None):
         elif arbiter.mode == Mode.AUTO and p is not None:
             ghost, ghost_state = T_des[:3, 3], "ok"
         ghost_bad = ghost_state in ("clamped", "lost")
-        robot.command(q_cmd, grip, ghost=ghost, ghost_bad=ghost_bad, ghost_state=ghost_state)
+        robot.command(q_cmd, grip, ghost=ghost, ghost_bad=ghost_bad, ghost_state=ghost_state,
+                      vtarget=session.vtarget())
         if t0 >= next_body_status:  # 10 Hz: status to the body client (echo for RTT) + HUD overlay on the VM screen
             next_body_status = t0 + 0.1
             seq_seen[:] = [x for x in seq_seen if t0 - x[0] <= 1.0]
@@ -249,11 +282,12 @@ def run(cfg: dict, backend: str, seconds: float | None = None):
             st = {"kind": "status", "mode": arbiter.mode.value, "tcp": np.round(tcp, 3).tolist(),
                   "target": None if ghost is None else np.round(ghost, 3).tolist(), "ghost": ghost_state,
                   "clipped": ghost_bad, "grip": grip, "clutch": clutch.state, "trigger": clutch.trigger, "release_reason": clutch.release_reason,
-                  "calib": round(clutch.progress, 2), "ws_min": safety.ws_min.tolist(), "ws_max": safety.ws_max.tolist(),
+                  "clutch_progress": round(clutch.progress, 2), "ws_min": safety.ws_min.tolist(), "ws_max": safety.ws_max.tolist(),
                   "echo_seq": last_body.seq if last_body else None, "echo_t": last_body.t if last_body else None,
                   "echo_age": round(t0 - last_body_arrival, 4) if last_body else None,
                   "pkt_s": len(seq_seen), "loss": round(max(0.0, loss), 3),
-                  "coach": coach.view(t0), "coach_msg": coach_msg, "set_mirror": set_mirror}
+                  "calib": session.view(), "mapping": type(retarget).__name__, "set_mirror": set_mirror,
+                  "vtarget": session.vtarget(), "tcp_meas": np.round(tcp, 3).tolist()}
             if body_addr is not None:
                 rx.reply(body_addr, st)
                 set_mirror = None if set_mirror else set_mirror  # sent once

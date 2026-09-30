@@ -64,7 +64,7 @@ class GestureMirror:
     def _cart(self, c):
         return np.array([self.axis_xy[0] + c[1] * np.cos(c[0]), self.axis_xy[1] + c[1] * np.sin(c[0]), c[2]])
 
-    def engage(self, tcp_now):
+    def engage(self, tcp_now, neutral=None):
         self._c0 = self._cyl(np.asarray(tcp_now, float))
         self._h0 = None
         self.filter.reset()

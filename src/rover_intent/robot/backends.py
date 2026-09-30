@@ -20,7 +20,7 @@ class ArmBackend(abc.ABC):
 
     @abc.abstractmethod
     def command(self, q: np.ndarray, gripper: float, ghost=None, ghost_bad: bool = False,
-                ghost_state: str | None = None) -> None: ...
+                ghost_state: str | None = None, vtarget=None) -> None: ...
 
     def reset(self, q_home) -> None:
         """Put the arm at q_home with the gripper open (sim: also restore the objects)."""
@@ -38,7 +38,7 @@ class MockArm(ArmBackend):
     def read_joints(self):
         return self.q.copy()
 
-    def command(self, q, gripper, ghost=None, ghost_bad=False, ghost_state=None):
+    def command(self, q, gripper, ghost=None, ghost_bad=False, ghost_state=None, vtarget=None):
         self.q = np.array(q, float)
         self.gripper = float(gripper)
 
@@ -60,6 +60,7 @@ class IsaacArm(ArmBackend):
         self.rx.setblocking(False)
         self.q = np.array(q0, float)
         self.objects: dict[str, list[float]] = {}
+        self.camera: dict | None = None      # Isaac viewport camera {"eye", "target"} (for the calibration frame)
         self.connected = False
         self._ignore_until = 0.0
 
@@ -73,10 +74,13 @@ class IsaacArm(ArmBackend):
                 continue  # pre-reset states still in flight: drop them
             self.q = np.array(msg["q"], float)
             self.objects = msg.get("objects", self.objects)
+            if msg.get("cam", {}).get("eye"):
+                self.camera = msg["cam"]
             self.connected = True
 
-    def command(self, q, gripper, ghost=None, ghost_bad=False, ghost_state=None):
-        msg = {"q": list(map(float, q)), "g": float(gripper)}
+    def command(self, q, gripper, ghost=None, ghost_bad=False, ghost_state=None, vtarget=None):
+        msg = {"q": list(map(float, q)), "g": float(gripper), "vtarget": None if vtarget is None else
+               list(map(float, vtarget))}
         if ghost is not None:
             msg["ghost"], msg["ghost_bad"] = list(map(float, ghost)), bool(ghost_bad)
             msg["ghost_state"] = ghost_state or ("clamped" if ghost_bad else "ok")
@@ -96,5 +100,5 @@ class RealArm(ArmBackend):
     def read_joints(self):
         raise NotImplementedError
 
-    def command(self, q, gripper, ghost=None, ghost_bad=False, ghost_state=None):
+    def command(self, q, gripper, ghost=None, ghost_bad=False, ghost_state=None, vtarget=None):
         raise NotImplementedError

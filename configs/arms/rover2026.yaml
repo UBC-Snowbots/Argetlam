@@ -16,6 +16,8 @@ arm:
 sim:
   usd: assets/rover2026/usd/rover2026_gripper/rover2026_gripper.usda
   default_view: behind
+  views:
+    behind: {eye: [-0.75, -0.1, 1.0], target: [0.62, 0.0, 0.15]}
   tcp_body: tcp
   finger_joints: [finger_left_joint, finger_right_joint]
   stroke: 0.0425

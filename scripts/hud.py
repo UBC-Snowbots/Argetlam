@@ -61,12 +61,12 @@ def main():
         cl = m.get("clutch") or "idle"
         why = f" ({m['release_reason']})" if m.get("release_reason") else ""
         banner = {"idle": f"FROZEN{why}  -  F / open palm up 1 s / raise LEFT hand",
-                  "calibrating": f"HOLD STILL  {int(100 * (m.get('calib') or 0))}%",
+                  "calibrating": f"HOLD STILL  {int(100 * (m.get('clutch_progress') or 0))}%",
                   "following": f"FOLLOWING  ({m.get('trigger')})"}.get(cl, cl)
         cv.create_rectangle(0, 0, W, 44, fill=C.get(cl, "#555555"), width=0)
         cv.create_text(12, 22, text=banner, anchor="w", fill="white", font=("Helvetica", 15, "bold"))
         if cl == "calibrating":
-            cv.create_rectangle(0, 40, W * (m.get("calib") or 0), 44, fill="white", width=0)
+            cv.create_rectangle(0, 40, W * (m.get("clutch_progress") or 0), 44, fill="white", width=0)
         # skeleton PiP (mirror view)
         box = (20, 60, W - 20, 330)
         cv.create_rectangle(*box, outline="#333a44")
@@ -100,19 +100,31 @@ def main():
         grip = m.get("grip") or 0
         cv.create_text(W - 20, 356, text="gripper CLOSED" if grip >= 0.5 else "gripper open", anchor="e",
                        fill="#ffd166" if grip >= 0.5 else "#8892a0", font=("Helvetica", 13))
-        # warm-up
-        co = m.get("coach")
-        if co:
-            cv.create_text(W / 2, 410, text=co["arrow"], fill="#00e5ff", font=("Helvetica", 44, "bold"))
-            cv.create_text(W / 2, 462, text=co["text"], fill="#00e5ff", font=("Helvetica", 16, "bold"))
-            done = "  ".join(("✔" if v else "✘") + k for k, v in co["results"].items())
-            cv.create_text(W / 2, 492, text=f"warm-up {co['n']}/{co['of']}  ·  {co['left_s']:.0f}s left   {done}",
-                           fill="#8892a0", font=("Helvetica", 11))
-        elif m.get("coach_msg"):
-            cv.create_text(W / 2, 440, text=m["coach_msg"], fill="#00e5ff", font=("Helvetica", 14, "bold"))
+        # calibration
+        cal = m.get("calib")
+        if cal and cal.get("prompt"):
+            cv2t = cal["prompt"]
+            cv.create_text(W / 2, 400, text=cv2t, fill="#00e5ff", font=("Helvetica", 15, "bold"), width=W - 30)
+            if cal.get("progress") is not None:
+                cv.create_rectangle(40, 430, 40 + (W - 80) * cal["progress"], 440, fill="#00e5ff", width=0)
+            if cal.get("n"):
+                cv.create_text(W / 2, 458, text=f"step {cal['n']}/{cal['of']}  {cal.get('note') or ''}",
+                               fill="#f59e0b" if cal.get("note") else "#8892a0", font=("Helvetica", 12))
+            if cal.get("errors"):
+                cv.create_text(W / 2, 482, text="targets (cm): " + ", ".join(map(str, cal["errors"])), fill="#8892a0",
+                               font=("Helvetica", 12))
+        elif cal and cal.get("result"):
+            r = cal["result"]
+            ok = r.get("accepted")
+            cv.create_text(W / 2, 420, fill="#22c55e" if ok else "#f59e0b", font=("Helvetica", 14, "bold"),
+                           text=f"calibration {'ACCEPTED' if ok else 'NOT accepted'}  fit {r.get('residual_deg')} deg")
+            cv.create_text(W / 2, 448, fill="#8892a0", font=("Helvetica", 12),
+                           text=f"targets: {r.get('errors_cm')} cm" + (f"   redo {r['bad_axis']}: X" if r.get("bad_axis") else ""))
         else:
-            cv.create_text(W / 2, 440, text="press W in the webcam window for the 60 s warm-up",
+            cv.create_text(W / 2, 420, text=f"mapping: {m.get('mapping', '?')}   (C in the webcam window = calibrate)",
                            fill="#5b6472", font=("Helvetica", 12))
+        cv.create_text(W / 2, 505, text="white cross = neutral (box centre)   magenta = touch target",
+                       fill="#5b6472", font=("Helvetica", 10))
         # latency / link
         rtt = m.get("rtt_ms")
         rtt_txt = f"{rtt:.0f} ms" if rtt is not None else "?"

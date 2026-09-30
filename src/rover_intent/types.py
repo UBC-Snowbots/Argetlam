@@ -44,6 +44,7 @@ class BodyPose(BaseModel):
     skel2d: Optional[list[tuple[float, float]]] = None            # normalized image points for the overlay skeleton
     seq: int = 0                                                  # for loss / latency measurement
     rtt_ms: Optional[float] = None                                # client-measured round trip, echoed to the HUD
+    in_position: Optional[bool] = None                            # client's stand-here guide is green
     hand_rpy: tuple[float, float, float] = (0.0, 0.0, 0.0)
     hand_open: Optional[float] = None  # 0 fist .. 1 open; None = hand not found (must NOT mean "open": it dropped objects)
     visible: bool = True
@@ -61,7 +62,7 @@ class ClutchMsg(BaseModel):
     """Laptop -> VM: the F key (toggle the clutch)."""
     kind: Literal["clutch"] = "clutch"
     t: float = 0.0
-    action: Literal["toggle", "warmup"] = "toggle"
+    action: Literal["toggle", "warmup", "calibrate", "redo_axis"] = "toggle"
 
 
 class Query(BaseModel):

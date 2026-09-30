@@ -9,7 +9,8 @@ Standalone: needs only this file. Uses the MediaPipe *Tasks* API (mediapipe >= 0
     python body_client.py [--camera 0] [--side right]
 
 In the preview window:  F = clutch (hold still 2 s to calibrate, then the arm follows; F again = freeze)
-                        W = 60 s guided warm-up (checks every direction, auto-detects a mirrored webcam)
+                        C = calibrate (about 30 s): stand on the green guide, follow the prompts, then touch
+                            4 magenta targets. X = redo only the axis that failed. The profile is saved and reused.
                         S = stop   R = reset   M = flip left/right (if the robot goes the wrong way)   Q/Esc = quit
 Hands-free clutch: hold an open palm UP (above your elbow) for 1 s, or keep your LEFT hand raised above your
 shoulder (hold-to-follow: lower it and the arm freezes, so you can reposition yourself).
@@ -201,6 +202,34 @@ class JumpGate:
         return True
 
 
+GUIDE = {"width": (0.18, 0.30), "cx": (0.42, 0.58), "cy": (0.22, 0.45)}   # shoulders: width, centre x, height
+
+
+def stand_guide(frame, pose_res):
+    """Stand-here guide: a target outline for your shoulders; green when you're at the right distance / place.
+    Returns (in_position, hint)."""
+    h, w = frame.shape[:2]
+    gx0, gx1 = 0.5 - sum(GUIDE["width"]) / 4, 0.5 + sum(GUIDE["width"]) / 4
+    gy = sum(GUIDE["cy"]) / 2
+    ok, hint = False, "step into view"
+    if pose_res.pose_landmarks:
+        lm = pose_res.pose_landmarks[0]
+        l, r = lm[11], lm[12]
+        width, cx, cy = abs(l.x - r.x), (l.x + r.x) / 2, (l.y + r.y) / 2
+        checks = [(width < GUIDE["width"][0], "step CLOSER"), (width > GUIDE["width"][1], "step BACK"),
+                  (cx < GUIDE["cx"][0], "move -> (on screen)"), (cx > GUIDE["cx"][1], "move <- (on screen)"),
+                  (cy < GUIDE["cy"][0], "lower the camera / sit up less"), (cy > GUIDE["cy"][1], "raise the camera / stand up")]
+        bad = [t for c, t in checks if c]
+        ok, hint = not bad, (bad[0] if bad else "IN POSITION")
+        cv2.line(frame, (int(l.x * w), int(l.y * h)), (int(r.x * w), int(r.y * h)), (0, 220, 0) if ok else (0, 0, 255), 3)
+    col = (0, 220, 0) if ok else (0, 0, 255)
+    y = int(gy * h)
+    cv2.rectangle(frame, (int(gx0 * w), y - 30), (int(gx1 * w), y + 30), col, 2)          # shoulder target
+    cv2.ellipse(frame, (w // 2, y - 90), (45, 55), 0, 0, 360, col, 2)                      # head outline
+    cv2.putText(frame, hint, (int(gx0 * w), y + 60), cv2.FONT_HERSHEY_SIMPLEX, 0.8, col, 2)
+    return ok, hint
+
+
 def minimap(frame, st):
     """Top view (forward/left) and side view (forward/up) of the reachable box, gripper and steering target."""
     if not st or "ws_min" not in st:
@@ -278,6 +307,9 @@ def main():
                 visible = False  # glitch: skip this frame, the robot holds for a moment
         if rec and fields:
             rec.write(json.dumps({"t": now, "mirror": mirror, **fields}) + "\n")
+        in_pos, _hint = stand_guide(frame, pose_res)
+        if fields:
+            fields["in_position"] = in_pos
         if fields and now - last_send >= 1.0 / args.hz:
             last_send, seq = now, seq + 1
             sent_t[seq] = now
@@ -313,23 +345,30 @@ def main():
         cl = robot.get("clutch", "?")
         why = f" ({robot['release_reason']})" if robot.get("release_reason") else ""
         cl_txt = {"idle": f"FROZEN{why} - press F, hold an open palm up 1 s, or raise your LEFT hand",
-                  "calibrating": f"HOLD STILL... {int(100 * robot.get('calib', 0))}%",
+                  "calibrating": f"HOLD STILL... {int(100 * robot.get('clutch_progress', 0))}%",
                   "following": f"FOLLOWING ({robot.get('trigger')})"}.get(cl, cl)
         cv2.putText(frame, cl_txt, (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7,
                     {"following": (0, 220, 0), "calibrating": (255, 160, 60)}.get(cl, (200, 200, 200)), 2)
         lat = f"rtt {rtt_ms:.0f} ms" if rtt_ms is not None else "rtt ?"
         cv2.putText(frame, f"robot: {status}   {lat}   loss {100 * robot.get('loss', 0):.0f}%   "
                            f"ghost {robot.get('ghost') or '-'}", (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
-        co = robot.get("coach")
-        if co:
-            cv2.putText(frame, f"WARM-UP {co['n']}/{co['of']}: {co['text']}  ({co['left_s']:.0f}s)", (10, 150),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
-        elif robot.get("coach_msg"):
-            cv2.putText(frame, robot["coach_msg"], (10, 150), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+        cal = robot.get("calib")
+        if cal and cal.get("prompt"):
+            cv2.putText(frame, f"CALIBRATION: {cal['prompt']}", (10, 150), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 255, 255), 2)
+            if cal.get("progress") is not None:
+                cv2.rectangle(frame, (10, 160), (10 + int(300 * cal["progress"]), 170), (0, 255, 255), -1)
+            if cal.get("note"):
+                cv2.putText(frame, cal["note"], (10, 195), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 165, 255), 2)
+        elif cal and cal.get("result"):
+            r = cal["result"]
+            txt = (f"calibration {'ACCEPTED' if r.get('accepted') else 'NOT accepted'}: {r.get('errors_cm')} cm, "
+                   f"fit {r.get('residual_deg')} deg" + (f", redo {r['bad_axis']} (X)" if r.get("bad_axis") else ""))
+            cv2.putText(frame, txt, (10, 150), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 255, 255), 2)
         if robot.get("ghost") == "clamped":
             cv2.putText(frame, "OUT OF REACH - the gripper is clamped at the edge", (10, 120),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 165, 255), 2)
-        cv2.putText(frame, "F clutch | W warm-up | S stop | R reset | M flip L/R | Q quit", (10, frame.shape[0] - 15),
+        cv2.putText(frame, "C calibrate | X redo bad axis | F clutch | S stop | R reset | M flip | Q quit",
+                    (10, frame.shape[0] - 15),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
         cv2.imshow("rover body client", frame)
         k = cv2.waitKey(1) & 0xFF
@@ -341,8 +380,10 @@ def main():
             say("stop")
         elif k == ord("r"):
             say("reset")
-        elif k == ord("w"):
-            link.send({"kind": "clutch", "t": time.time(), "action": "warmup"})
+        elif k in (ord("c"), ord("w")):
+            link.send({"kind": "clutch", "t": time.time(), "action": "calibrate"})
+        elif k == ord("x"):
+            link.send({"kind": "clutch", "t": time.time(), "action": "redo_axis"})
         elif k == ord("m"):
             mirror = not mirror
             if robot.get("clutch") == "following":  # re-calibrate so flipping doesn't make the arm jump

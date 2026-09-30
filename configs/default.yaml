@@ -19,7 +19,8 @@ net:                                   # laptop -> VM over the tailnet
   hud_port: 47130       # VM-screen overlay (scripts/hud.py): skeleton PiP, clutch, latency
 
 body:
-  mode: position        # position = wrist-rel-shoulder -> gripper offset, 1:1 direction, clamped (default);
+  profile: data/profiles/{arm}_pranav.json   # calibration profile (created by C / "calibrate"); used when present
+  mode: position        # used until a calibration profile exists. position = wrist-rel-shoulder -> gripper offset;
                         # gesture = swing/raise/reach -> yaw/height/reach (body/mirror.py)
   clutch: {calib_s: 2.0, still_m: 0.03, palm_s: 1.0, raise_m: 0.05}  # F / open palm held up 1 s / left hand up
   gesture_gains: [2.5, 1.0, 0.6]   # rad yaw per m sideways, m height per m up, m reach per unit elbow extension
