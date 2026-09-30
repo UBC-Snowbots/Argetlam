@@ -41,6 +41,8 @@ class Arbiter:
         self._plan: list[Waypoint] = []
         self._eeg_since: float | None = None
         self._wp_since: float | None = None
+        self._carrot: np.ndarray | None = None   # straight-line interpolated target the IK chases
+        self._carrot_t: float | None = None
         self.last_say = ""
 
     # --- inputs -------------------------------------------------------------------
@@ -51,7 +53,7 @@ class Arbiter:
             self.mode, self._plan, self._wp_since, self._wp_started = Mode.HOLD, [], None, None
         elif a == Action.reset:
             self.mode, self._plan, self._wp_since, self._wp_started = Mode.HOLD, [], None, None
-            self.gripper, self.held, self._eeg_since = 0.0, None, None
+            self.gripper, self.held, self._eeg_since, self._carrot = 0.0, None, None, None
         elif a == Action.follow:
             self.mode, self._plan = Mode.FOLLOW, []
         elif a == Action.grasp:
@@ -100,13 +102,23 @@ class Arbiter:
                 return None, self.gripper
             now = time.time() if now is None else now
             wp = self._plan[0]
+            if self._carrot is None:
+                self._carrot, self._carrot_t = np.asarray(tcp_now, float).copy(), now
+            step = wp.speed * max(0.0, min(0.1, now - self._carrot_t))
+            self._carrot_t = now
+            d = wp.pos - self._carrot
+            n = np.linalg.norm(d)
+            self._carrot = wp.pos.copy() if n <= step else self._carrot + d / n * step
             if self._wp_started is None:
                 self._wp_started = now
             if self._wp_since is None and now - self._wp_started > self.waypoint_timeout:
                 self.last_say = f"Couldn't reach {wp.label}; holding."
                 self.mode, self._plan, self._wp_started = Mode.HOLD, [], None
                 return None, self.gripper
-            if np.linalg.norm(tcp_now - wp.pos) < self.waypoint_tol:
+            d = tcp_now - wp.pos
+            reached = (np.linalg.norm(d) < self.waypoint_tol if wp.tol_xy is None
+                       else np.linalg.norm(d[:2]) < wp.tol_xy and abs(d[2]) < self.waypoint_tol)
+            if reached:
                 self.gripper = wp.gripper
                 if self._wp_since is None:
                     self._wp_since = now
@@ -117,7 +129,8 @@ class Arbiter:
                         self.held = None
                     self._plan.pop(0)
                     self._wp_since = self._wp_started = None
-            return wp.pos, self.gripper
+            return self._carrot.copy(), self.gripper
+        self._carrot = None
         if self.mode == Mode.FOLLOW and body_target is not None:
             return self._assist(body_target), self.gripper
         return None, self.gripper

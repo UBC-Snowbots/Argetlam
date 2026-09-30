@@ -59,7 +59,8 @@ def main():
             root.after(100, draw)
             return
         cl = m.get("clutch") or "idle"
-        banner = {"idle": "FROZEN  -  F / open palm up 1 s / raise LEFT hand",
+        why = f" ({m['release_reason']})" if m.get("release_reason") else ""
+        banner = {"idle": f"FROZEN{why}  -  F / open palm up 1 s / raise LEFT hand",
                   "calibrating": f"HOLD STILL  {int(100 * (m.get('calib') or 0))}%",
                   "following": f"FOLLOWING  ({m.get('trigger')})"}.get(cl, cl)
         cv.create_rectangle(0, 0, W, 44, fill=C.get(cl, "#555555"), width=0)

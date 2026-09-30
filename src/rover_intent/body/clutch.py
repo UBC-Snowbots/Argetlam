@@ -30,10 +30,12 @@ class Clutch:
     raise_m: float = 0.05
     state: str = "idle"                     # idle | calibrating | following
     trigger: str | None = None              # "toggle" | "palm" | "left_hand"
+    release_reason: str | None = None       # why the last release happened (shown in the HUD)
     progress: float = 0.0                   # calibration 0..1
     _samples: list = field(default_factory=list)
     _t_calib: float | None = None
     _t_palm: float | None = None
+    _t_start: float = 0.0
 
     def toggle(self, now: float) -> ClutchEvent | None:
         if self.state == "idle":
@@ -67,12 +69,26 @@ class Clutch:
                 return ClutchEvent("engaged", np.mean(self._samples, axis=0))
         return None
 
+    def watchdog(self, now: float, last_packet_t: float, last_visible_t: float,
+                 link_s: float = 0.5, track_s: float = 1.0) -> ClutchEvent | None:
+        """Safety: auto-release (freeze the arm) if body packets stop or the arm isn't visible while engaged.
+        Re-engaging recalibrates, so the arm never jumps when tracking comes back."""
+        if self.state == "idle":
+            return None
+        if now - max(last_packet_t, self._t_start) > link_s:      # grace from the moment the clutch started
+            return self._release("link lost")
+        if now - max(last_visible_t, self._t_start) > track_s:
+            return self._release("tracking lost")
+        return None
+
     def _start(self, trigger, now):
+        self.release_reason, self._t_start = None, now
         self.state, self.trigger, self.progress = "calibrating", trigger, 0.0
         self._samples, self._t_calib, self._t_palm = [], now, None
         return ClutchEvent("calibrating")
 
-    def _release(self):
+    def _release(self, reason: str | None = None):
+        self.release_reason = reason
         self.state, self.trigger, self.progress = "idle", None, 0.0
         self._samples, self._t_calib, self._t_palm = [], None, None
         return ClutchEvent("released")

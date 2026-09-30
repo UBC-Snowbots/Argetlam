@@ -28,8 +28,18 @@ class Waypoint:
     label: str
     obj: str | None = None  # object the waypoint acts on (for close/open bookkeeping)
     dwell: float = 0.0      # s to wait at the waypoint (let the fingers close/open)
+    tol_xy: float | None = None  # m; tighter SIDEWAYS alignment needed before descending (None = default 1 cm, 3D)
+    speed: float = 0.30          # m/s of the straight-line "carrot" the IK chases toward this waypoint
 
 GRIP_DWELL = 0.8
+# Before descending onto / placing an object the gripper must be settled tightly: the bottle is 70 mm wide and the
+# fingers open to 85 mm, so there is only 7.5 mm clearance per side. With the old 10 mm tolerance the arm started
+# down while still 5-8 mm off and a finger landed on the rim (2026-09-30). Sideways only: the drives sit ~3-4 mm
+# low at steady state, so a 3 mm 3D tolerance never settles (gate: 0/9).
+ALIGN_TOL, ALIGN_DWELL = 0.003, 0.3
+# The final descent must be a STRAIGHT line: jumping the IK target 10 cm down made the joints take a curved path that
+# swung the gripper 13 mm sideways into the bottle rim (traced 2026-09-30). Slow carrot for the last 10 cm.
+APPROACH_SPEED = 0.05
 
 
 class SkillError(ValueError):
@@ -45,8 +55,8 @@ def plan(intent: Intent, scene: Scene, held: str | None) -> list[Waypoint]:
         o = _obj(scene, intent.object)
         p = o.pos.copy()
         tz = scene.transit_z
-        return [Waypoint(_transit(p, tz), 0, "above-object"), Waypoint(p + APPROACH * up, 0, "pre-grasp"),
-                Waypoint(p, 0, "grasp-pos"), Waypoint(p, 1, "close", o.name, GRIP_DWELL),
+        return [Waypoint(_transit(p, tz), 0, "above-object"), Waypoint(p + APPROACH * up, 0, "pre-grasp", tol_xy=ALIGN_TOL, dwell=ALIGN_DWELL),
+                Waypoint(p, 0, "grasp-pos", speed=APPROACH_SPEED), Waypoint(p, 1, "close", o.name, GRIP_DWELL),
                 Waypoint(_transit(p, tz), 1, "lift")]
     if intent.action == Action.place:
         if held is None:
@@ -71,8 +81,8 @@ def _place(intent: Intent, scene: Scene, obj) -> list[Waypoint]:
         goal = ref.pos + np.array(_OFFSETS.get(intent.relation or "beside", _OFFSETS["beside"]))
         goal[2] = obj.pos[2]  # same support surface: release at the object's own grasp height
     tz = scene.transit_z
-    return [Waypoint(_transit(goal, tz), 1, "above-goal"), Waypoint(goal + LIFT * up, 1, "pre-place"),
-            Waypoint(goal, 1, "place-pos"), Waypoint(goal, 0, "open", obj.name, GRIP_DWELL),
+    return [Waypoint(_transit(goal, tz), 1, "above-goal"), Waypoint(goal + LIFT * up, 1, "pre-place", tol_xy=ALIGN_TOL, dwell=ALIGN_DWELL),
+            Waypoint(goal, 1, "place-pos", speed=APPROACH_SPEED), Waypoint(goal, 0, "open", obj.name, GRIP_DWELL),
             Waypoint(_transit(goal, tz), 0, "retreat")]
 
 

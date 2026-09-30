@@ -86,7 +86,7 @@ def run(cfg: dict, backend: str, seconds: float | None = None):
     clutch = Clutch(calib_s=c.get("calib_s", 2.0), still_m=c.get("still_m", 0.03), palm_s=c.get("palm_s", 1.0),
                     raise_m=c.get("raise_m", 0.05))
     hud = (cfg["net"].get("hud_host", "127.0.0.1"), cfg["net"].get("hud_port", 47130))
-    last_body, last_target, last_body_arrival = None, None, 0.0
+    last_body, last_target, last_body_arrival, last_visible_t = None, None, 0.0, 0.0
     coach, coach_msg, set_mirror = Coach(), "", None
     seq_seen = []  # (t, seq) over the last second, for packet loss
 
@@ -95,7 +95,8 @@ def run(cfg: dict, backend: str, seconds: float | None = None):
         nonlocal body_target, last_target
         if ev is None:
             return
-        log.info("clutch: %s (trigger=%s)", ev.kind, clutch.trigger)
+        log.info("clutch: %s (trigger=%s%s)", ev.kind, clutch.trigger,
+                 f", reason={clutch.release_reason}" if clutch.release_reason else "")
         if ev.kind in ("calibrating", "released"):
             if arbiter.mode == Mode.FOLLOW:
                 arbiter.mode = Mode.HOLD
@@ -141,6 +142,8 @@ def run(cfg: dict, backend: str, seconds: float | None = None):
             if isinstance(msg, BodyPose):
                 n_body += 1
                 body_addr, last_body, last_body_arrival = addr, msg, t0
+                if msg.visible:
+                    last_visible_t = t0
                 seq_seen.append((t0, msg.seq))
                 rel = np.asarray(msg.wrist) - np.asarray(msg.shoulder) if msg.visible else None
                 palm_up_open = bool(msg.hand_open is not None and msg.hand_open > 0.6 and msg.elbow is not None
@@ -189,10 +192,13 @@ def run(cfg: dict, backend: str, seconds: float | None = None):
             elif isinstance(msg, Query):
                 rx.reply(addr, {"kind": "state", "mode": arbiter.mode.value, "held": arbiter.held,
                                 "gripper": arbiter.gripper, "tcp": np.round(arm.fk(q_cmd)[:3, 3], 4).tolist(),
+                                "tcp_meas": np.round(arm.fk(robot.read_joints())[:3, 3], 4).tolist(),
+                                "q_meas": np.round(robot.read_joints(), 4).tolist(),
                                 "plan_left": len(arbiter._plan), "table_top": scene.support_z,
                                 "objects": {n: {"pos": np.round(o.pos, 4).tolist(),
                                                 "bottom_z": round(float(o.pos[2] - o.grasp_z), 4)}
                                             for n, o in scene.objects.items()}})
+        on_clutch(clutch.watchdog(t0, last_body_arrival, last_visible_t))  # auto-release on link/tracking loss
         for item in [x for x in pending if x[3].done()]:
             pending.remove(item)
             text, addr, t_sub, fut = item
@@ -240,7 +246,7 @@ def run(cfg: dict, backend: str, seconds: float | None = None):
             loss = 1.0 - len(seq_seen) / span if span > 0 else 0.0
             st = {"kind": "status", "mode": arbiter.mode.value, "tcp": np.round(tcp, 3).tolist(),
                   "target": None if ghost is None else np.round(ghost, 3).tolist(), "ghost": ghost_state,
-                  "clipped": ghost_bad, "grip": grip, "clutch": clutch.state, "trigger": clutch.trigger,
+                  "clipped": ghost_bad, "grip": grip, "clutch": clutch.state, "trigger": clutch.trigger, "release_reason": clutch.release_reason,
                   "calib": round(clutch.progress, 2), "ws_min": safety.ws_min.tolist(), "ws_max": safety.ws_max.tolist(),
                   "echo_seq": last_body.seq if last_body else None, "echo_t": last_body.t if last_body else None,
                   "echo_age": round(t0 - last_body_arrival, 4) if last_body else None,

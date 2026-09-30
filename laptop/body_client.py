@@ -311,7 +311,8 @@ def main():
                            f"{fps:.0f} fps{'  MIRRORED' if mirror else ''}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7,
                     (0, 200, 0) if visible else (0, 0, 255), 2)
         cl = robot.get("clutch", "?")
-        cl_txt = {"idle": "FROZEN - press F, hold an open palm up 1 s, or raise your LEFT hand",
+        why = f" ({robot['release_reason']})" if robot.get("release_reason") else ""
+        cl_txt = {"idle": f"FROZEN{why} - press F, hold an open palm up 1 s, or raise your LEFT hand",
                   "calibrating": f"HOLD STILL... {int(100 * robot.get('calib', 0))}%",
                   "following": f"FOLLOWING ({robot.get('trigger')})"}.get(cl, cl)
         cv2.putText(frame, cl_txt, (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7,

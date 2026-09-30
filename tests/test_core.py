@@ -153,22 +153,25 @@ def test_skills_move_plan():
 
 
 def test_arbiter_dwells_and_tracks_held_object():
-    a = Arbiter(Scene(SCENE), waypoint_tol=0.01)
+    """Ideal tracking (the gripper is wherever the carrot is): checks dwell, held bookkeeping, and that the final
+    descent onto the object is a straight vertical line at the slow approach speed."""
+    from rover_intent.planner.skills import APPROACH_SPEED
+    a = Arbiter(Scene(SCENE))
     a.on_intent(Intent(action=Action.pick, object="cup"))
     cup = np.array(SCENE["cup"]["pos"])
-    a.target(np.array([*cup[:2], 0.30]), None, now=0.0)  # above the object -> advances
-    a.target(cup + [0, 0, 0.10], None, now=0.05)      # at pre-grasp -> advances
-    a.target(cup, None, now=0.1)                      # at grasp-pos -> advances
-    p, g = a.target(cup, None, now=0.2)               # at close: gripper closes, dwell starts
-    assert g == 1.0 and a.held is None
-    p, _ = a.target(cup, None, now=0.5)
-    assert np.allclose(p, cup)                        # still waiting for the fingers
-    a.target(cup, None, now=1.1)                      # dwell over
-    assert a.held == "cup"
-    p, _ = a.target(cup, None, now=1.2)
-    assert p[2] > cup[2]                              # lifting
-    with pytest.raises(SkillError):
-        plan(Intent(action=Action.pick, object="banana"), Scene(SCENE), held=None)
+    tcp, t, dt, log = np.array([0.45, 0.0, 0.38]), 0.0, 0.02, []
+    while a.held is None and t < 20:
+        p, g = a.target(tcp, None, now=t)
+        log.append((t, p.copy(), g, a._plan[0].label if a._plan else None))
+        tcp, t = p, t + dt
+    assert a.held == "cup", "never picked"
+    descent = [(t, p) for t, p, g, lab in log if lab == "grasp-pos"]
+    xy_dev = max(np.linalg.norm(p[:2] - cup[:2]) for _, p in descent)
+    assert xy_dev < 1e-6                                          # straight down: no sideways swing
+    speeds = [np.linalg.norm(p2 - p1) / (t2 - t1) for (t1, p1), (t2, p2) in zip(descent, descent[1:])]
+    assert max(speeds) <= APPROACH_SPEED + 1e-6                   # slow final approach
+    closes = [t for t, p, g, lab in log if lab == "close" and g == 1.0]
+    assert closes and log[-1][0] - closes[0] >= 0.8 - 2 * dt      # waited for the fingers before counting as held
 
 
 def test_arbiter_eeg_hysteresis_and_dwell():
@@ -431,3 +434,18 @@ def test_coach_wrong_direction_times_out_as_failed():
     assert c.update(1.0, target=tgt + [0, 0.1, 0]) is None    # moved LEFT: not a pass
     ev = c.update(2.5, target=tgt + [0, 0.1, 0])
     assert ev["step"] == "right" and not ev["ok"]
+
+
+def test_clutch_auto_releases_on_link_or_tracking_loss():
+    from rover_intent.body.clutch import Clutch
+    c, rel = Clutch(calib_s=0.2), np.zeros(3)
+    c.toggle(0.0); c.update(rel, False, False, 0.1); c.update(rel, False, False, 0.35)
+    assert c.state == "following"
+    assert c.watchdog(0.8, last_packet_t=0.4, last_visible_t=0.4) is None        # 0.4 s gap: fine
+    ev = c.watchdog(1.0, last_packet_t=0.4, last_visible_t=0.4)                     # 0.6 s without packets
+    assert ev.kind == "released" and c.release_reason == "link lost" and c.state == "idle"
+    c.toggle(2.0); c.update(rel, False, False, 2.1); c.update(rel, False, False, 2.35)
+    ev = c.watchdog(3.5, last_packet_t=3.45, last_visible_t=2.4)                    # packets, but arm not visible
+    assert ev.kind == "released" and c.release_reason == "tracking lost"
+    c.toggle(10.0)                                                                   # voice "follow me", no pose yet
+    assert c.watchdog(10.3, last_packet_t=0.0, last_visible_t=0.0) is None           # grace from clutch start
