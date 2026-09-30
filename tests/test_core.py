@@ -407,9 +407,13 @@ def test_clutch_palm_needs_one_second_and_left_hand_is_dead_man():
     assert c.update(rel, True, False, 0.7) is None
     assert c.update(rel, True, False, 1.75).kind == "calibrating"  # 1 s of open palm held up
     c = Clutch(calib_s=0.5)
-    assert c.update(rel, False, True, 0.0).kind == "calibrating"  # left hand up
-    assert c.update(rel, False, True, 0.6).kind == "engaged"
-    assert c.update(rel, False, False, 0.7).kind == "released"    # left hand down = freeze
+    assert c.update(rel, False, True, 0.0) is None                # left hand up: debounced
+    assert c.update(rel, False, True, 0.35).kind == "calibrating"
+    for t, up in [(0.5, False), (0.53, True), (0.7, False), (0.75, True)]:   # flicker must NOT release
+        assert c.update(rel, False, up, t) is None or c.state != "idle"
+    assert c.update(rel, False, True, 0.9).kind == "engaged"
+    assert c.update(rel, False, False, 1.0) is None               # lowered, not yet 0.5 s
+    assert c.update(rel, False, False, 1.55).kind == "released"   # left hand down 0.5 s = freeze
 
 
 def test_clutch_auto_releases_on_link_or_tracking_loss():

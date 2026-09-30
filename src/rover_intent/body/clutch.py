@@ -36,6 +36,10 @@ class Clutch:
     _t_calib: float | None = None
     _t_palm: float | None = None
     _t_start: float = 0.0
+    raise_on_s: float = 0.3       # left hand must be up this long to engage (debounce: detection flickers)
+    raise_off_s: float = 0.5      # ... and down this long to release (a flicker killed every hold, 2026-09-30)
+    _t_up: float | None = None
+    _t_down: float | None = None
 
     def toggle(self, now: float) -> ClutchEvent | None:
         if self.state == "idle":
@@ -44,8 +48,17 @@ class Clutch:
 
     def update(self, rel: np.ndarray | None, palm_up_open: bool, left_raised: bool, now: float) -> ClutchEvent | None:
         """Call for every body sample. rel = wrist - shoulder (None if the arm isn't visible)."""
+        # debounce the left-hand signal
+        if left_raised:
+            self._t_up = now if self._t_up is None else self._t_up
+            self._t_down = None
+        else:
+            self._t_down = now if self._t_down is None else self._t_down
+            self._t_up = None
+        left_up = self._t_up is not None and now - self._t_up >= self.raise_on_s
+        left_down = self._t_down is not None and now - self._t_down >= self.raise_off_s
         if self.state == "idle":
-            if left_raised:
+            if left_up:
                 return self._start("left_hand", now)
             if palm_up_open:
                 self._t_palm = now if self._t_palm is None else self._t_palm
@@ -54,8 +67,8 @@ class Clutch:
             else:
                 self._t_palm = None
             return None
-        if self.trigger == "left_hand" and not left_raised:
-            return self._release()
+        if self.trigger == "left_hand" and left_down:
+            return self._release("left hand lowered")
         if self.state == "calibrating":
             if rel is None:
                 return None

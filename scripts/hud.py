@@ -61,7 +61,7 @@ def main():
         cl = m.get("clutch") or "idle"
         why = f" ({m['release_reason']})" if m.get("release_reason") else ""
         banner = {"idle": f"FROZEN{why}  -  F / open palm up 1 s / raise LEFT hand",
-                  "calibrating": f"HOLD STILL  {int(100 * (m.get('clutch_progress') or 0))}%",
+                  "calibrating": f"RE-CENTRE: hold still  {int(100 * (m.get('clutch_progress') or 0))}%",
                   "following": f"FOLLOWING  ({m.get('trigger')})"}.get(cl, cl)
         cv.create_rectangle(0, 0, W, 44, fill=C.get(cl, "#555555"), width=0)
         cv.create_text(12, 22, text=banner, anchor="w", fill="white", font=("Helvetica", 15, "bold"))

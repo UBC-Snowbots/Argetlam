@@ -180,8 +180,10 @@ def extract(pose_res, hand_res, side, mirror=False):
     other_wr = SIDES["left" if track == "right" else "right"][1]
     img = pose_res.pose_landmarks[0] if pose_res.pose_landmarks else None
     skel = [[round(1 - img[i].x if mirror else img[i].x, 3), round(img[i].y, 3)] for i in SKEL] if img else None
+    other_ok = (w[other_wr].visibility or 0.0) > 0.5   # MediaPipe guesses unseen wrists: don't trust those
     return {"wrist": pt(wr_i), "shoulder": pt(sh_i), "elbow": pt(ELBOW[track]),
-            "shoulder_other": pt(OTHER_SHOULDER[track]), "wrist_other": pt(other_wr), "hips": hips, "side": side,
+            "shoulder_other": pt(OTHER_SHOULDER[track]), "wrist_other": pt(other_wr) if other_ok else None,
+            "hips": hips, "side": side,
             "skel2d": skel, "hand_open": openness, "visible": vis}, openness, hand
 
 
@@ -345,7 +347,7 @@ def main():
         cl = robot.get("clutch", "?")
         why = f" ({robot['release_reason']})" if robot.get("release_reason") else ""
         cl_txt = {"idle": f"FROZEN{why} - press F, hold an open palm up 1 s, or raise your LEFT hand",
-                  "calibrating": f"HOLD STILL... {int(100 * robot.get('clutch_progress', 0))}%",
+                  "calibrating": f"RE-CENTRE: hold still... {int(100 * robot.get('clutch_progress', 0))}%",
                   "following": f"FOLLOWING ({robot.get('trigger')})"}.get(cl, cl)
         cv2.putText(frame, cl_txt, (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7,
                     {"following": (0, 220, 0), "calibrating": (255, 160, 60)}.get(cl, (200, 200, 200)), 2)
