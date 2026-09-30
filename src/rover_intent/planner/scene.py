@@ -15,13 +15,21 @@ class SceneObject:
     name: str
     pos: np.ndarray            # grasp point, base frame (m)
     height: float = 0.10       # for place-on offsets
-    grasp_z: float = 0.0       # grasp point height above the object's bottom (from the config pos, objects on z=0)
+    grasp_z: float = 0.0       # grasp point height above the object's bottom
 
 
 class Scene:
-    def __init__(self, objects: dict[str, dict]):
-        self.objects = {n: SceneObject(n, np.array(o["pos"], float), o.get("height", 0.10), o["pos"][2])
+    def __init__(self, objects: dict[str, dict], support_z: float = 0.0):
+        """support_z: height of the surface the objects stand on (table top)."""
+        self.support_z = support_z
+        self.objects = {n: SceneObject(n, np.array(o["pos"], float), o.get("height", 0.10), o["pos"][2] - support_z)
                         for n, o in objects.items()}
+
+    @property
+    def transit_z(self) -> float:
+        """Travel height between objects: above the tallest object's top + fingertips + margin."""
+        tops = [o.pos[2] - o.grasp_z + o.height for o in self.objects.values()]
+        return max([0.30] + [t + 0.08 for t in tops])
 
     def names(self) -> list[str]:
         return list(self.objects)

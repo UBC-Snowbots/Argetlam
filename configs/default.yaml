@@ -11,7 +11,7 @@ arm:
 
 safety:
   # top-down-reachable box from home (measured 2026-09-29: IK from home, 1 cm / 5 deg); outside it the arm stalls
-  workspace_min: [0.35, -0.40, 0.03]  # m, base frame; z floor: fingertips reach ~2 cm below the TCP
+  workspace_min: [0.35, -0.40, 0.15]  # m, base frame; z floor = table top 0.12 + 0.03 (fingertips reach ~2 cm below the TCP)
   workspace_max: [0.80, 0.40, 0.45]
   watchdog_s: 0.25
 
@@ -51,7 +51,14 @@ assist:
   radius: 0.08
   gain: 0.6
 
-scene:  # pos = grasp point (TCP target), objects stand on z=0. PLACEHOLDER positions until ArUco/detection.
-  cup:    {pos: [0.55, 0.15, 0.055], height: 0.09, radius: 0.035, mass: 0.15, shape: cylinder, desc: "short red cup"}
-  bottle: {pos: [0.55, -0.15, 0.11], height: 0.22, radius: 0.035, mass: 0.50, shape: cylinder, desc: "tall blue bottle"}
-  block:  {pos: [0.70, 0.00, 0.035], height: 0.05, radius: 0.025, mass: 0.10, shape: box, desc: "small yellow cube"}
+table:  # static table in front of the arm (the arm stands on the floor, z = 0)
+  top: 0.12                  # m; puts grasp points at 0.155-0.23 m, mid-band of the top-down reach (IK-checked)
+  x: [0.32, 0.86]
+  y: [-0.42, 0.42]
+
+scene:  # pos = grasp point (TCP target) in the arm base frame; objects stand on the table top.
+        # Layout checked with IK (tests/test_core.py::test_scene_is_reachable): grasp, pre-grasp, transit and every
+        # "beside" drop-off are reachable top-down with margin. >= 0.15 m spacing so drop-offs don't collide.
+  cup:    {pos: [0.50, 0.18, 0.175], height: 0.09, radius: 0.035, mass: 0.15, shape: cylinder, desc: "short red cup"}
+  bottle: {pos: [0.50, -0.18, 0.305], height: 0.22, radius: 0.035, mass: 0.50, shape: cylinder, desc: "tall blue bottle"}
+  block:  {pos: [0.64, 0.00, 0.155], height: 0.05, radius: 0.025, mass: 0.10, shape: box, desc: "small yellow cube"}

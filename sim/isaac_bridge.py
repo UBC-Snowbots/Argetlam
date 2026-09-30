@@ -105,6 +105,16 @@ robot = Articulation(ArticulationCfg(
     },
 ))
 
+# Static table in front of the arm (collider only, no rigid body -> it can't move).
+tbl = cfg.get("table")
+table_top = tbl["top"] if tbl else 0.0
+if tbl:
+    tsize = (tbl["x"][1] - tbl["x"][0], tbl["y"][1] - tbl["y"][0], tbl["top"])
+    tcfg = sim_utils.CuboidCfg(size=tsize, collision_props=sim_utils.CollisionPropertiesCfg(),
+                               visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.45, 0.33, 0.22)))
+    tcfg.func("/World/Table", tcfg, translation=((tbl["x"][0] + tbl["x"][1]) / 2, (tbl["y"][0] + tbl["y"][1]) / 2,
+                                                 tbl["top"] / 2))
+
 objects = {}
 for name, o in cfg["scene"].items():
     common = dict(
@@ -119,7 +129,7 @@ for name, o in cfg["scene"].items():
     x, y, _ = o["pos"]
     objects[name] = RigidObject(RigidObjectCfg(
         prim_path=f"/World/Objects/{name}", spawn=spawn,
-        init_state=RigidObjectCfg.InitialStateCfg(pos=(x, y, h / 2 + 0.001))))
+        init_state=RigidObjectCfg.InitialStateCfg(pos=(x, y, table_top + h / 2 + 0.001))))
 heights = {n: cfg["scene"][n]["height"] for n in objects}
 
 # Ghost marker: where the gripper is being steered (green) / can't go (red). Visual only, no physics.
@@ -129,6 +139,12 @@ ghost = VisualizationMarkers(VisualizationMarkersCfg(prim_path="/Visuals/ghost",
     "bad": sim_utils.SphereCfg(radius=0.03, visual_material=sim_utils.PreviewSurfaceCfg(
         diffuse_color=(0.95, 0.15, 0.1), emissive_color=(0.5, 0.05, 0.02), opacity=0.55))}))
 ghost_pos, ghost_bad, ghost_shown = None, False, None
+
+# Faint box = the region the controller lets the gripper go (safety workspace, IK-checked reachable top-down).
+ws_lo, ws_hi = np.array(cfg["safety"]["workspace_min"]), np.array(cfg["safety"]["workspace_max"])
+reach_box = VisualizationMarkers(VisualizationMarkersCfg(prim_path="/Visuals/reach_box", markers={
+    "box": sim_utils.CuboidCfg(size=tuple((ws_hi - ws_lo).tolist()), visual_material=sim_utils.PreviewSurfaceCfg(
+        diffuse_color=(0.3, 0.6, 1.0), opacity=0.08))}))
 
 sim.reset()
 
@@ -151,6 +167,7 @@ def reset_scene():
 
 
 reset_scene()
+reach_box.visualize(translations=np.array([(ws_lo + ws_hi) / 2], dtype=np.float32))
 arm_ids = robot.find_joints(ARM_JOINTS, preserve_order=True)[0]
 finger_ids = robot.find_joints(FINGER_JOINTS, preserve_order=True)[0]
 dev = sim.device
@@ -220,7 +237,7 @@ while app.is_running():
     objs = {}
     for n, o in objects.items():
         p = o.data.root_pos_w.torch[0].tolist()
-        objs[n] = [p[0], p[1], p[2] - heights[n] / 2]
+        objs[n] = [p[0], p[1], p[2] - heights[n] / 2]  # bottom (on the table: table_top)
     tx.sendto(json.dumps({"q": q, "objects": objs}).encode(), state_addr)
     prof["io"][0] += time.time() - ts; prof["io"][1] += 1
 

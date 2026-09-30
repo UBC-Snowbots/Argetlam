@@ -335,3 +335,35 @@ def test_app_loop_end_to_end_mock(mode):
     assert say("reset")["mode"] == "hold"
     th.join(timeout=6)
     assert not th.is_alive()
+
+
+def test_scene_is_reachable():
+    """Every waypoint of every pick and every 'move X beside/on Y' in the configured scene is reachable top-down
+    (IK from home, like the live loop), and the travel height clears the tallest object."""
+    import itertools, yaml
+    cfg = yaml.safe_load(open(Path(__file__).resolve().parents[1] / "configs/default.yaml"))
+    arm = ArmModel(str(Path(__file__).resolve().parents[1] / cfg["arm"]["urdf"]), tcp_offset=cfg["arm"]["tcp_offset"])
+    home = np.array(cfg["arm"]["home"])
+    table = cfg["table"]["top"]
+    scene = Scene(cfg["scene"], support_z=table)
+    lo, hi = np.array(cfg["safety"]["workspace_min"]), np.array(cfg["safety"]["workspace_max"])
+    palm_above_tcp = 0.145 - 0.100   # gripper palm front is 4.5 cm above the TCP (sim/make_gripper_urdf.py)
+    for o in scene.objects.values():
+        assert abs(o.pos[2] - o.grasp_z - table) < 1e-9                      # stands on the table
+        # top-down grasp: the palm must clear the object's top, or the gripper stalls on it (bottle bug, 2026-09-30)
+        assert o.grasp_z + palm_above_tcp >= o.height + 0.005, (o.name, o.grasp_z, o.height)
+        assert o.grasp_z >= 0.02, o.name                                     # fingers must still reach the object
+        assert scene.transit_z > o.pos[2] - o.grasp_z + o.height + 0.05      # travel clears the top
+    def reachable(p):
+        T = np.eye(4); T[:3, :3] = TOP_DOWN; T[:3, 3] = p
+        q = arm.ik(home, T, iters=300); Tq = arm.fk(q)
+        return np.linalg.norm(Tq[:3, 3] - p) < 5e-3 and np.degrees(np.linalg.norm(rot_err(Tq[:3, :3], TOP_DOWN))) < 3
+    intents = [Intent(action=Action.pick, object=n) for n in scene.names()]
+    intents += [Intent(action=Action.move, object=a, relation=r, reference=b)
+                for a, b in itertools.permutations(scene.names(), 2) for r in ("beside",)]
+    bad = []
+    for it in intents:
+        for w in plan(it, scene, held=None):
+            if not reachable(w.pos) or np.any(w.pos < lo - 1e-6) or np.any(w.pos > hi + 1e-6):
+                bad.append((it.action.value, it.object, it.reference, w.label, np.round(w.pos, 3).tolist()))
+    assert not bad, bad

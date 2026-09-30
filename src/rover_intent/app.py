@@ -28,7 +28,8 @@ from .planner.nemotron import IntentParser, urgent_stop
 from .planner.scene import Scene
 from .robot.backends import IsaacArm, MockArm, RealArm
 from .transport.udp import Receiver
-from .types import Action, BodyPose, EEGState, Intent, Utterance
+from .planner.nemotron import fallback_parse
+from .types import Action, BodyPose, EEGState, Intent, Query, Utterance
 
 log = logging.getLogger("rover_intent")
 ROOT = Path(__file__).resolve().parents[2]
@@ -49,7 +50,7 @@ def build(cfg: dict, backend: str):
         robot = IsaacArm(n["isaac_host"], n["isaac_cmd_port"], n["isaac_state_port"], home)
     else:
         robot = RealArm()
-    scene = Scene(cfg["scene"])
+    scene = Scene(cfg["scene"], support_z=cfg.get("table", {}).get("top", 0.0))
     e, s = cfg["eeg"], cfg["assist"]
     arbiter = Arbiter(scene, e["p_on"], e["p_off"], e["hold_s"], s["radius"], s["gain"])
     b = cfg["body"]
@@ -122,11 +123,20 @@ def run(cfg: dict, backend: str, seconds: float | None = None):
                 stop = urgent_stop(msg.text)
                 if stop is not None:  # handled in this tick; never queued behind a cloud call
                     finish(msg.text, addr, stop, 0.0)
+                elif msg.offline:
+                    finish(msg.text, addr, fallback_parse(msg.text, scene.names()), 0.0)
                 else:  # Nemotron takes seconds: run it off the control loop
                     pending.append((msg.text, addr, time.time(),
                                     pool.submit(parser.parse, msg.text, scene.names(), descriptions)))
             elif isinstance(msg, EEGState):
                 arbiter.on_eeg(msg.p_grasp, t0)
+            elif isinstance(msg, Query):
+                rx.reply(addr, {"kind": "state", "mode": arbiter.mode.value, "held": arbiter.held,
+                                "gripper": arbiter.gripper, "tcp": np.round(arm.fk(q_cmd)[:3, 3], 4).tolist(),
+                                "plan_left": len(arbiter._plan), "table_top": scene.support_z,
+                                "objects": {n: {"pos": np.round(o.pos, 4).tolist(),
+                                                "bottom_z": round(float(o.pos[2] - o.grasp_z), 4)}
+                                            for n, o in scene.objects.items()}})
         for item in [x for x in pending if x[3].done()]:
             pending.remove(item)
             text, addr, t_sub, fut = item

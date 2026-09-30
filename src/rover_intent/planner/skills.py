@@ -12,7 +12,7 @@ import numpy as np
 from ..types import Action, Intent
 from .scene import Scene
 
-TRANSIT_Z = 0.30  # m: travel height between objects (tallest object 0.22 + fingertips 0.02 below the TCP + margin)
+TRANSIT_Z = 0.30  # m: minimum travel height; Scene.transit_z raises it above the tallest object on the table
 APPROACH = 0.10   # m above the grasp point
 LIFT = 0.12
 BESIDE = 0.12     # m offset for beside/left/right/front/behind
@@ -44,9 +44,10 @@ def plan(intent: Intent, scene: Scene, held: str | None) -> list[Waypoint]:
             raise SkillError(f"already holding the {held}; say 'let go' or 'put it beside ...' first")
         o = _obj(scene, intent.object)
         p = o.pos.copy()
-        return [Waypoint(_transit(p), 0, "above-object"), Waypoint(p + APPROACH * up, 0, "pre-grasp"),
+        tz = scene.transit_z
+        return [Waypoint(_transit(p, tz), 0, "above-object"), Waypoint(p + APPROACH * up, 0, "pre-grasp"),
                 Waypoint(p, 0, "grasp-pos"), Waypoint(p, 1, "close", o.name, GRIP_DWELL),
-                Waypoint(_transit(p), 1, "lift")]
+                Waypoint(_transit(p, tz), 1, "lift")]
     if intent.action == Action.place:
         if held is None:
             raise SkillError("not holding anything")
@@ -64,19 +65,20 @@ def _place(intent: Intent, scene: Scene, obj) -> list[Waypoint]:
     up = np.array([0, 0, 1.0])
     ref = _obj(scene, intent.reference)
     if intent.relation in ("on", "into"):
-        # objects stand on z=0, so obj.pos[2] is the grasp height above its own bottom
-        goal = np.array([ref.pos[0], ref.pos[1], ref.height + obj.pos[2] + 0.01])
+        ref_bottom = ref.pos[2] - ref.grasp_z
+        goal = np.array([ref.pos[0], ref.pos[1], ref_bottom + ref.height + obj.grasp_z + 0.01])
     else:
         goal = ref.pos + np.array(_OFFSETS.get(intent.relation or "beside", _OFFSETS["beside"]))
         goal[2] = obj.pos[2]  # same support surface: release at the object's own grasp height
-    return [Waypoint(_transit(goal), 1, "above-goal"), Waypoint(goal + LIFT * up, 1, "pre-place"),
+    tz = scene.transit_z
+    return [Waypoint(_transit(goal, tz), 1, "above-goal"), Waypoint(goal + LIFT * up, 1, "pre-place"),
             Waypoint(goal, 1, "place-pos"), Waypoint(goal, 0, "open", obj.name, GRIP_DWELL),
-            Waypoint(_transit(goal), 0, "retreat")]
+            Waypoint(_transit(goal, tz), 0, "retreat")]
 
 
-def _transit(p: np.ndarray) -> np.ndarray:
+def _transit(p: np.ndarray, tz: float = None) -> np.ndarray:
     """Same xy, raised to the travel height (never lowered)."""
-    return np.array([p[0], p[1], max(p[2], TRANSIT_Z)])
+    return np.array([p[0], p[1], max(p[2], TRANSIT_Z if tz is None else tz)])
 
 
 def _obj(scene: Scene, name: str | None):

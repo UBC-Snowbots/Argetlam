@@ -50,6 +50,13 @@ class Utterance(BaseModel):
     kind: Literal["utterance"] = "utterance"
     t: float
     text: str
+    offline: bool = False  # True = keyword parser, no Nemotron (deterministic, for scripted checks)
+
+
+class Query(BaseModel):
+    """-> VM: ask for the current state (mode, held object, object positions, gripper)."""
+    kind: Literal["query"] = "query"
+    t: float = 0.0
 
 
 class EEGState(BaseModel):
