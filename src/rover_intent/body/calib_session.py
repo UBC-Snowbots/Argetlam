@@ -32,8 +32,9 @@ class CalibratedMapper:
         cam = self.camera() or self.profile.camera
         return command_frame(cam["eye"], cam["target"])
 
-    def engage(self, tcp_now, neutral=None):
-        self._recentre, self._carrot, self._gliding, self._t = True, np.asarray(tcp_now, float).copy(), True, None
+    def engage(self, tcp_now, neutral=None, recentre=True):
+        """recentre=False (after a grab assist): keep neutral, just glide from where the arm is to your hand's point."""
+        self._recentre, self._carrot, self._gliding, self._t = recentre, np.asarray(tcp_now, float).copy(), True, None
         self.filter.reset()
 
     def reset(self):

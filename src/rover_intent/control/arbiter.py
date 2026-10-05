@@ -6,6 +6,10 @@ Modes:
   AUTO    a skill's waypoint list drives the TCP (from a Nemotron-parsed voice command).
   HOLD    stay put (after 'stop', on start-up, or when tracking is lost).
 Voice 'stop' always wins; 'follow' returns to FOLLOW.
+
+Grab assist (FOLLOW + hand control): you steer roughly; a fist held HAND_HOLD_S with the gripper within GRAB_RADIUS
+(sideways) of an object hands over to an AUTO "assist" plan (rise -> align over it -> straight descent -> close ->
+short lift) that returns to FOLLOW when done. An open hand held HAND_HOLD_S while holding = open + small retreat.
 """
 from __future__ import annotations
 
@@ -15,8 +19,14 @@ from enum import Enum
 import numpy as np
 
 from ..planner.scene import Scene
-from ..planner.skills import SkillError, Waypoint, plan
+from ..planner.skills import APPROACH, GRIP_DWELL, SkillError, Waypoint, plan
 from ..types import Action, Intent
+
+GRAB_RADIUS = 0.06       # m: sideways gripper->object distance at which a fist means "grab THAT"
+GRAB_BELOW, GRAB_ABOVE = 0.03, 0.18   # m: gripper height window around the object's grasp point
+HAND_HOLD_S = 0.4        # s: a fist / open hand must be held this long (MediaPipe openness flickers frame to frame)
+ASSIST_LIFT = 0.06       # m: lift after an assisted grab
+RELEASE_RETREAT = 0.05   # m: back off upward after letting go
 
 
 class Mode(str, Enum):
@@ -44,18 +54,23 @@ class Arbiter:
         self._carrot: np.ndarray | None = None   # straight-line interpolated target the IK chases
         self._carrot_t: float | None = None
         self.last_say = ""
+        self.assist = False                 # the current AUTO plan is a grab/release assist -> back to FOLLOW after
+        self.events: list[str] = []         # for the app: "assist_done" (re-engage the body mapping)
+        self.z_max = np.inf                 # top of the workspace box (retreat targets stay reachable)
+        self._hand_want: float | None = None
+        self._hand_since: float | None = None
 
     # --- inputs -------------------------------------------------------------------
     def on_intent(self, intent: Intent) -> None:
         self.last_say = intent.say
         a = intent.action
         if a == Action.stop:
-            self.mode, self._plan, self._wp_since, self._wp_started = Mode.HOLD, [], None, None
+            self.mode, self._plan, self._wp_since, self._wp_started, self.assist = Mode.HOLD, [], None, None, False
         elif a == Action.reset:
-            self.mode, self._plan, self._wp_since, self._wp_started = Mode.HOLD, [], None, None
+            self.mode, self._plan, self._wp_since, self._wp_started, self.assist = Mode.HOLD, [], None, None, False
             self.gripper, self.held, self._eeg_since, self._carrot = 0.0, None, None, None
         elif a == Action.follow:
-            self.mode, self._plan = Mode.FOLLOW, []
+            self.mode, self._plan, self.assist = Mode.FOLLOW, [], False
         elif a == Action.grasp:
             self.gripper = 1.0
         elif a == Action.release:
@@ -64,7 +79,7 @@ class Arbiter:
             try:
                 self._plan = plan(intent, self.scene, held=self.held)
                 self._wp_since = self._wp_started = None
-                self.mode = Mode.AUTO
+                self.mode, self.assist = Mode.AUTO, False
             except SkillError as e:
                 self.last_say = f"Can't do that: {e}"
 
@@ -83,14 +98,64 @@ class Arbiter:
         elif now - self._eeg_since >= self.eeg_hold_s:
             self.gripper, self._eeg_since = want, None
 
-    def on_hand(self, hand_open: float, close_below: float = 0.35, open_above: float = 0.6) -> None:
-        """Stand-in for EEG (config body.grip_from_hand): fist closes the gripper, open hand opens it."""
+    def on_hand(self, hand_open: float, now: float | None = None, tcp=None, close_below: float = 0.35,
+                open_above: float = 0.6) -> None:
+        """Stand-in for EEG (config body.grip_from_hand). A fist / open hand must be HELD for HAND_HOLD_S (hysteresis
+        + dwell: openness flickers). Fist near an object = assisted grab; open hand while holding = assisted release."""
         if self.mode != Mode.FOLLOW:
+            self._hand_want = self._hand_since = None
             return
-        if hand_open < close_below:
-            self.gripper = 1.0
-        elif hand_open > open_above:
-            self.gripper = 0.0
+        now = time.time() if now is None else now
+        want = 1.0 if hand_open < close_below else 0.0 if hand_open > open_above else None
+        if want is None:
+            return                                   # dead band: keep any pending change
+        if want == self.gripper:
+            self._hand_want = self._hand_since = None
+            return
+        if want != self._hand_want:
+            self._hand_want, self._hand_since = want, now
+            return
+        if now - self._hand_since < HAND_HOLD_S:
+            return
+        self._hand_want = self._hand_since = None
+        tcp = None if tcp is None else np.asarray(tcp, float)
+        if want == 1.0:
+            o = self.grab_candidate(tcp) if tcp is not None else None
+            if o is None:
+                self.gripper, self.last_say = 1.0, "Gripper closed (nothing in reach to grab)."
+                return
+            pick = plan(Intent(action=Action.pick, object=o.name), self.scene, None)
+            rise = np.array([tcp[0], tcp[1], max(tcp[2], o.pos[2] + APPROACH)])   # up first: never sweep sideways low
+            wps = [Waypoint(rise, 0, "assist-rise")] + pick[1:4] + [Waypoint(o.pos + [0, 0, ASSIST_LIFT], 1, "lift")]
+            self._start_assist(wps, f"Grabbing the {o.name}.")
+        elif tcp is not None and self.held is not None:
+            up = np.array([tcp[0], tcp[1], min(tcp[2] + RELEASE_RETREAT, self.z_max)])
+            self._start_assist([Waypoint(tcp, 0, "open", self.held, GRIP_DWELL), Waypoint(up, 0, "retreat")],
+                               f"Letting go{' of the ' + self.held if self.held else ''}.")
+        else:
+            self.gripper, self.held = 0.0, None
+
+    def grab_candidate(self, tcp):
+        """The object a fist would grab right now (gripper open, close enough sideways, in the height window)."""
+        if self.held is not None or self.gripper > 0.5:
+            return None
+        tcp = np.asarray(tcp, float)
+        best, best_d = None, GRAB_RADIUS
+        for o in self.scene.objects.values():
+            d = float(np.linalg.norm(tcp[:2] - o.pos[:2]))
+            if d <= best_d and -GRAB_BELOW <= tcp[2] - o.pos[2] <= GRAB_ABOVE:
+                best, best_d = o, d
+        return best
+
+    def _start_assist(self, wps, say):
+        self._plan, self._wp_since, self._wp_started, self._carrot = wps, None, None, None
+        self.mode, self.assist, self.last_say = Mode.AUTO, True, say
+
+    def abort(self, say: str = "") -> None:
+        """Clutch released / tracking lost: stop wherever we are (an assist must not keep running)."""
+        self.mode, self._plan, self._wp_since, self._wp_started, self.assist = Mode.HOLD, [], None, None, False
+        if say:
+            self.last_say = say
 
     # --- output -------------------------------------------------------------------
     def target(self, tcp_now: np.ndarray, body_target: np.ndarray | None,
@@ -98,7 +163,12 @@ class Arbiter:
         """Returns (TCP position target or None = hold, gripper command)."""
         if self.mode == Mode.AUTO:
             if not self._plan:
-                self.mode = Mode.HOLD
+                if self.assist:   # assisted grab/release finished: hand control back to the body mapping
+                    self.mode, self.assist = Mode.FOLLOW, False
+                    self.events.append("assist_done")
+                    self.last_say = f"Got the {self.held}." if self.held else "Released."
+                else:
+                    self.mode = Mode.HOLD
                 return None, self.gripper
             now = time.time() if now is None else now
             wp = self._plan[0]
@@ -113,7 +183,7 @@ class Arbiter:
                 self._wp_started = now
             if self._wp_since is None and now - self._wp_started > self.waypoint_timeout:
                 self.last_say = f"Couldn't reach {wp.label}; holding."
-                self.mode, self._plan, self._wp_started = Mode.HOLD, [], None
+                self.mode, self._plan, self._wp_started, self.assist = Mode.HOLD, [], None, False
                 return None, self.gripper
             d = tcp_now - wp.pos
             reached = (np.linalg.norm(d) < self.waypoint_tol if wp.tol_xy is None
@@ -136,10 +206,17 @@ class Arbiter:
         return None, self.gripper
 
     def _assist(self, p: np.ndarray) -> np.ndarray:
+        """Shared autonomy while steering: pull SIDEWAYS toward the object below, only when above its grasp point.
+        (Pulling toward the grasp point in 3D dragged the fingers into objects from the side and tipped them.)"""
         if self.gripper > 0.5:
             return p  # holding something: pure teleop
-        o = self.scene.nearest(p, self.assist_radius)
-        if o is None:
+        o = min(self.scene.objects.values(), key=lambda o: np.linalg.norm(o.pos[:2] - p[:2]), default=None)
+        if o is None or p[2] < o.pos[2] + GRAB_BELOW:
             return p
-        w = self.assist_gain * (1 - np.linalg.norm(o.pos - p) / self.assist_radius)
-        return (1 - w) * p + w * o.pos
+        d = float(np.linalg.norm(o.pos[:2] - p[:2]))
+        if d > self.assist_radius:
+            return p
+        w = self.assist_gain * (1 - d / self.assist_radius)
+        q = p.copy()
+        q[:2] = (1 - w) * p[:2] + w * o.pos[:2]
+        return q

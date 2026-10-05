@@ -58,6 +58,7 @@ def build(cfg: dict, backend: str):
     scene = Scene(cfg["scene"], support_z=cfg.get("table", {}).get("top", 0.0))
     e, s = cfg["eeg"], cfg["assist"]
     arbiter = Arbiter(scene, e["p_on"], e["p_off"], e["hold_s"], s["radius"], s["gain"])
+    arbiter.z_max = cfg["safety"]["workspace_max"][2] - 0.005
     b = cfg["body"]
     oe = b.get("one_euro", {})
     retarget = Retargeter(b["axes"], b["scale"], b["origin"], min_cutoff=oe.get("min_cutoff", 1.0),
@@ -125,6 +126,7 @@ def run(cfg: dict, backend: str, seconds: float | None = None):
         if effects.get("engage") and clutch.state == "idle":
             on_clutch(clutch.toggle(time.time()))
     seq_seen = []  # (t, seq) over the last second, for packet loss
+    vis_seen = []  # (t, arm visible, in position, hand found) over the last second: tracking quality
 
     def on_clutch(ev):
         """Clutch events -> arm modes. Calibrating/released freeze the arm; engaged starts following."""
@@ -134,8 +136,8 @@ def run(cfg: dict, backend: str, seconds: float | None = None):
         log.info("clutch: %s (trigger=%s%s)", ev.kind, clutch.trigger,
                  f", reason={clutch.release_reason}" if clutch.release_reason else "")
         if ev.kind in ("calibrating", "released"):
-            if arbiter.mode == Mode.FOLLOW:
-                arbiter.mode = Mode.HOLD
+            if arbiter.mode == Mode.FOLLOW or arbiter.assist:   # a running grab assist stops too (dead-man)
+                arbiter.abort()
             body_target = None
         elif ev.kind == "engaged":
             retarget.engage(arm.fk(q_cmd)[:3, 3], ev.neutral)
@@ -180,6 +182,7 @@ def run(cfg: dict, backend: str, seconds: float | None = None):
                 if msg.visible:
                     last_visible_t = t0
                 seq_seen.append((t0, msg.seq))
+                vis_seen.append((t0, bool(msg.visible), bool(msg.in_position), msg.hand_open is not None))
                 rel = np.asarray(msg.wrist) - np.asarray(msg.shoulder) if msg.visible else None
                 palm_up_open = bool(msg.hand_open is not None and msg.hand_open > 0.6 and msg.elbow is not None
                                     and msg.wrist[1] < msg.elbow[1] - 0.02)          # MediaPipe y points down
@@ -193,7 +196,10 @@ def run(cfg: dict, backend: str, seconds: float | None = None):
                     if tgt is not None:
                         body_target, body_t, last_target = tgt, t0, tgt
                     if grip_from_hand and msg.hand_open is not None:
-                        arbiter.on_hand(msg.hand_open)
+                        said = arbiter.last_say
+                        arbiter.on_hand(msg.hand_open, t0, arm.fk(robot.read_joints())[:3, 3])
+                        if arbiter.last_say != said:
+                            log.info("arbiter: %s", arbiter.last_say)
                 if session.active:
                     handle_session(session.update(t0, msg, bool(msg.in_position),
                                                   tcp_meas=arm.fk(robot.read_joints())[:3, 3],
@@ -225,6 +231,7 @@ def run(cfg: dict, backend: str, seconds: float | None = None):
                 arbiter.on_eeg(msg.p_grasp, t0)
             elif isinstance(msg, Query):
                 rx.reply(addr, {"kind": "state", "mode": arbiter.mode.value, "held": arbiter.held,
+                                "clutch": clutch.state, "assist": arbiter.assist, "mapping": type(retarget).__name__,
                                 "gripper": arbiter.gripper, "tcp": np.round(arm.fk(q_cmd)[:3, 3], 4).tolist(),
                                 "tcp_meas": np.round(arm.fk(robot.read_joints())[:3, 3], 4).tolist(),
                                 "q_meas": np.round(robot.read_joints(), 4).tolist(),
@@ -251,6 +258,14 @@ def run(cfg: dict, backend: str, seconds: float | None = None):
         p, grip = arbiter.target(tcp, body_target if t0 - body_t < 0.5 else None)
         if arbiter.last_say != said:
             log.info("arbiter: %s", arbiter.last_say)
+        while arbiter.events:
+            if arbiter.events.pop(0) == "assist_done" and clutch.state == "following":
+                # hand control back without a jump: position mode re-anchors at the arm, calibrated mode glides
+                try:
+                    retarget.engage(arm.fk(q_cmd)[:3, 3], None, recentre=False)
+                except TypeError:
+                    retarget.engage(arm.fk(q_cmd)[:3, 3], None)
+                body_target = last_target = None
         if p is not None:
             T_des[:3, 3] = safety.clip_workspace(p)
         else:  # HOLD = stop here: aim at the current commanded pose, the safety layer brakes at max decel
@@ -272,11 +287,15 @@ def run(cfg: dict, backend: str, seconds: float | None = None):
         elif arbiter.mode == Mode.AUTO and p is not None:
             ghost, ghost_state = T_des[:3, 3], "ok"
         ghost_bad = ghost_state in ("clamped", "lost")
-        robot.command(q_cmd, grip, ghost=ghost, ghost_bad=ghost_bad, ghost_state=ghost_state,
-                      vtarget=session.vtarget())
+        cand = (arbiter.grab_candidate(tcp) if grip_from_hand and arbiter.mode == Mode.FOLLOW
+                and clutch.state == "following" else None)
+        vtarget = session.vtarget() or (np.round(cand.pos, 4).tolist() if cand is not None else None)
+        robot.command(q_cmd, grip, ghost=ghost, ghost_bad=ghost_bad, ghost_state=ghost_state, vtarget=vtarget)
         if t0 >= next_body_status:  # 10 Hz: status to the body client (echo for RTT) + HUD overlay on the VM screen
             next_body_status = t0 + 0.1
             seq_seen[:] = [x for x in seq_seen if t0 - x[0] <= 1.0]
+            vis_seen[:] = [x for x in vis_seen if t0 - x[0] <= 1.0]
+            pct = lambda i: round(100 * sum(x[i] for x in vis_seen) / len(vis_seen)) if vis_seen else None
             span = (seq_seen[-1][1] - seq_seen[0][1] + 1) if len(seq_seen) > 1 else len(seq_seen)
             loss = 1.0 - len(seq_seen) / span if span > 0 else 0.0
             st = {"kind": "status", "mode": arbiter.mode.value, "tcp": np.round(tcp, 3).tolist(),
@@ -286,8 +305,10 @@ def run(cfg: dict, backend: str, seconds: float | None = None):
                   "echo_seq": last_body.seq if last_body else None, "echo_t": last_body.t if last_body else None,
                   "echo_age": round(t0 - last_body_arrival, 4) if last_body else None,
                   "pkt_s": len(seq_seen), "loss": round(max(0.0, loss), 3),
+                  "vis_pct": pct(1), "inpos_pct": pct(2), "hand_pct": pct(3),
                   "calib": session.view(), "mapping": type(retarget).__name__, "set_mirror": set_mirror,
-                  "vtarget": session.vtarget(), "tcp_meas": np.round(tcp, 3).tolist()}
+                  "vtarget": vtarget, "grab_ready": cand.name if cand is not None else None,
+                  "assist": arbiter.assist, "held": arbiter.held, "tcp_meas": np.round(tcp, 3).tolist()}
             if body_addr is not None:
                 rx.reply(body_addr, st)
                 set_mirror = None if set_mirror else set_mirror  # sent once
@@ -298,7 +319,10 @@ def run(cfg: dict, backend: str, seconds: float | None = None):
                                 "say": arbiter.last_say})
         if t0 >= next_status:
             next_status = t0 + 1.0
-            log.info("mode=%s tcp=%s grip=%.0f body=%d pkt/s%s%s", arbiter.mode.value, np.round(tcp, 3), grip, n_body,
+            vs = [x for x in vis_seen if t0 - x[0] <= 1.0]
+            q_ = (lambda i: round(100 * sum(x[i] for x in vs) / len(vs)) if vs else -1)
+            log.info("mode=%s tcp=%s grip=%.0f body=%d pkt/s arm-visible=%d%% in-position=%d%% hand=%d%% clutch=%s%s%s",
+                     arbiter.mode.value, np.round(tcp, 3), grip, n_body, q_(1), q_(2), q_(3), clutch.state,
                      f" from {body_addr[0]}" if body_addr else "", " ESTOP:" + safety.reason if safety.estopped else "")
             n_body = 0
         time.sleep(max(0.0, dt - (time.time() - t0)))

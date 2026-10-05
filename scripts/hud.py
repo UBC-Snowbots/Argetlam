@@ -123,7 +123,12 @@ def main():
         else:
             cv.create_text(W / 2, 420, text=f"mapping: {m.get('mapping', '?')}   (C in the webcam window = calibrate)",
                            fill="#5b6472", font=("Helvetica", 12))
-        cv.create_text(W / 2, 505, text="white cross = neutral (box centre)   magenta = touch target",
+        if m.get("assist"):
+            cv.create_text(W / 2, 480, text="ASSIST: grabbing / releasing...", fill="#ff4fd8", font=("Helvetica", 14, "bold"))
+        elif m.get("grab_ready"):
+            cv.create_text(W / 2, 480, text=f"make a FIST to grab the {m['grab_ready']}", fill="#ff4fd8",
+                           font=("Helvetica", 14, "bold"))
+        cv.create_text(W / 2, 505, text="white cross = neutral (box centre)   magenta = grab / touch target",
                        fill="#5b6472", font=("Helvetica", 10))
         # latency / link
         rtt = m.get("rtt_ms")
@@ -132,6 +137,11 @@ def main():
         col = "#ef4444" if (rtt or 0) > 250 or loss > 20 else "#f59e0b" if (rtt or 0) > 120 or loss > 5 else "#22c55e"
         cv.create_text(20, 540, anchor="w", fill=col, font=("Helvetica", 13, "bold"),
                        text=f"round trip {rtt_txt}   loss {loss:.0f}%   {m.get('pkt_s', 0)} pkt/s")
+        if m.get("vis_pct") is not None:
+            v = m["vis_pct"]
+            cv.create_text(W - 20, 540, anchor="e", font=("Helvetica", 12, "bold"),
+                           fill="#22c55e" if v >= 90 else "#f59e0b" if v >= 60 else "#ef4444",
+                           text=f"arm visible {v}%  guide {m.get('inpos_pct')}%  hand {m.get('hand_pct')}%")
         ba = m.get("body_age")
         cv.create_text(20, 566, anchor="w", fill="#8892a0", font=("Helvetica", 11),
                        text=f"last pose {1000 * ba:.0f} ms ago" if ba is not None else "no pose yet")

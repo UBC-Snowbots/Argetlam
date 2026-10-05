@@ -204,12 +204,15 @@ def test_arbiter_stop_beats_auto():
     assert a.mode == Mode.HOLD and a.target(np.zeros(3), np.ones(3))[0] is None
 
 
-def test_arbiter_shared_autonomy_pulls_toward_object():
+def test_arbiter_shared_autonomy_pulls_sideways_only_above_objects():
     a = Arbiter(Scene(SCENE), assist_radius=0.08, assist_gain=0.6)
     a.on_intent(Intent(action=Action.follow))
-    hand = np.array([0.55, 0.15, 0.14])  # 4 cm above the cup
+    cup = np.array(SCENE["cup"]["pos"])
+    hand = cup + [0.04, 0.0, 0.06]                 # above the cup, 4 cm off sideways
     p, _ = a.target(np.zeros(3), hand)
-    assert np.linalg.norm(p - SCENE["cup"]["pos"]) < np.linalg.norm(hand - SCENE["cup"]["pos"])
+    assert np.linalg.norm(p[:2] - cup[:2]) < 0.04 and p[2] == hand[2]   # lined up over it, height untouched
+    low = cup + [0.04, 0.0, -0.05]                 # beside it, below the grasp point: never pulled into it
+    assert np.allclose(a.target(np.zeros(3), low)[0], low)
 
 
 def test_retarget_is_relative_after_engage_and_directions_are_right():
@@ -242,14 +245,93 @@ def test_hand_not_found_is_not_open():
     assert BodyPose(t=0, wrist=(0, 0, 0), shoulder=(0, 0, 0)).hand_open is None
 
 
-def test_hand_grip_only_in_follow_with_hysteresis():
+def test_hand_grip_only_in_follow_with_hysteresis_and_dwell():
+    from rover_intent.control.arbiter import HAND_HOLD_S
     a = Arbiter(Scene(SCENE))
-    a.on_hand(0.1)
-    assert a.gripper == 0.0            # not following: ignored
+    far = np.array([0.40, 0.0, 0.30])           # nothing within grab range: plain close/open
+    a.on_hand(0.1, 0.0, far); a.on_hand(0.1, 1.0, far)
+    assert a.gripper == 0.0                     # not following: ignored
     a.on_intent(Intent(action=Action.follow))
-    a.on_hand(0.1); assert a.gripper == 1.0
-    a.on_hand(0.5); assert a.gripper == 1.0   # dead band keeps it closed
-    a.on_hand(0.8); assert a.gripper == 0.0
+    a.on_hand(0.1, 0.0, far); a.on_hand(0.1, HAND_HOLD_S - 0.05, far)
+    assert a.gripper == 0.0                     # fist not held long enough
+    a.on_hand(0.1, HAND_HOLD_S + 0.01, far)
+    assert a.gripper == 1.0 and a.mode == Mode.FOLLOW and "nothing in reach" in a.last_say
+    for i, h in enumerate([0.8, 0.1, 0.8, 0.5, 0.8]):   # flicker shorter than the dwell never opens it
+        a.on_hand(h, 1.0 + 0.1 * i, far)
+    assert a.gripper == 1.0
+    a.on_hand(0.8, 2.0, far); a.on_hand(0.5, 2.2, far); a.on_hand(0.8, 2.0 + HAND_HOLD_S + 0.01, far)
+    assert a.gripper == 0.0                     # dead band keeps the pending open alive; nothing held -> just opens
+
+
+def _run_assist(a, tcp, t, dt=0.02, limit=30.0):
+    """Ideal tracking: the gripper is wherever the carrot is. Runs until the arbiter is back in FOLLOW."""
+    log = []
+    while a.mode == Mode.AUTO and t < limit:
+        p, g = a.target(tcp, None, now=t)
+        if p is not None:
+            log.append((t, p.copy(), g, a._plan[0].label if a._plan else None))
+            tcp = p
+        t += dt
+    a.target(tcp, None, now=t)
+    return tcp, t, log
+
+
+def test_grab_assist_snaps_to_the_object_and_hands_back():
+    from rover_intent.control.arbiter import ASSIST_LIFT, HAND_HOLD_S
+    from rover_intent.planner.skills import APPROACH_SPEED
+    a = Arbiter(Scene(SCENE))
+    a.on_intent(Intent(action=Action.follow))
+    cup = np.array(SCENE["cup"]["pos"])
+    tcp = cup + [0.04, -0.03, 0.06]             # roughly above the cup: 5 cm off sideways, 6 cm high
+    assert a.grab_candidate(tcp).name == "cup"
+    assert a.grab_candidate(cup + [0.09, 0, 0.06]) is None   # too far sideways
+    assert a.grab_candidate(cup + [0, 0, 0.25]) is None      # too high above it
+    a.on_hand(0.1, 0.0, tcp); a.on_hand(0.1, HAND_HOLD_S + 0.01, tcp)
+    assert a.mode == Mode.AUTO and a.assist and "cup" in a.last_say
+    tcp, t, log = _run_assist(a, tcp, 1.0)
+    assert a.mode == Mode.FOLLOW and not a.assist and a.held == "cup" and a.gripper == 1.0
+    assert a.events == ["assist_done"]
+    assert np.allclose(tcp, cup + [0, 0, ASSIST_LIFT], atol=1e-6)
+    pre = [p for _, p, _, lab in log if lab == "assist-rise"]
+    assert all(np.allclose(p[:2], [cup[0] + 0.04, cup[1] - 0.03]) for p in pre)   # rises straight up first
+    descent = [(t, p) for t, p, _, lab in log if lab == "grasp-pos"]
+    assert max(np.linalg.norm(p[:2] - cup[:2]) for _, p in descent) < 1e-6        # straight down onto it
+    speeds = [np.linalg.norm(p2 - p1) / (t2 - t1) for (t1, p1), (t2, p2) in zip(descent, descent[1:])]
+    assert max(speeds) <= APPROACH_SPEED + 1e-6
+    # body targets drive again after hand-back; holding = no shared-autonomy pull
+    hand = cup + [0.0, 0.05, 0.10]
+    assert np.allclose(a.target(tcp, hand, now=t + 1)[0], hand)
+
+
+def test_grab_assist_release_opens_and_backs_off():
+    from rover_intent.control.arbiter import HAND_HOLD_S, RELEASE_RETREAT
+    a = Arbiter(Scene(SCENE))
+    a.on_intent(Intent(action=Action.follow))
+    a.gripper, a.held = 1.0, "cup"
+    tcp = np.array([0.50, 0.0, 0.20])
+    a.on_hand(0.9, 0.0, tcp); a.on_hand(0.9, HAND_HOLD_S + 0.01, tcp)
+    assert a.mode == Mode.AUTO and a.assist
+    tcp, t, log = _run_assist(a, tcp, 1.0)
+    assert a.mode == Mode.FOLLOW and a.held is None and a.gripper == 0.0
+    assert np.allclose(tcp, [0.50, 0.0, 0.20 + RELEASE_RETREAT], atol=0.01)   # waypoint tolerance
+    opens = [t for t, _, g, lab in log if lab == "open" and g == 0.0]
+    retreat = [t for t, _, _, lab in log if lab == "retreat"]
+    assert retreat[0] - opens[0] >= 0.8 - 0.05   # fingers open before backing off
+    a.z_max = 0.21                               # retreat never targets above the workspace box
+    a.gripper, a.held = 1.0, "cup"
+    a.on_hand(0.9, 10.0, tcp); a.on_hand(0.9, 10.0 + HAND_HOLD_S + 0.01, tcp)
+    assert a._plan[-1].pos[2] <= 0.21
+
+
+def test_grab_assist_aborts_on_clutch_release():
+    from rover_intent.control.arbiter import HAND_HOLD_S
+    a = Arbiter(Scene(SCENE))
+    a.on_intent(Intent(action=Action.follow))
+    tcp = np.array(SCENE["cup"]["pos"]) + [0, 0, 0.08]
+    a.on_hand(0.1, 0.0, tcp); a.on_hand(0.1, HAND_HOLD_S + 0.01, tcp)
+    assert a.mode == Mode.AUTO
+    a.abort()
+    assert a.mode == Mode.HOLD and not a.assist and a.target(tcp, None, now=1.0)[0] is None
 
 
 def test_app_and_laptop_scripts_compile():

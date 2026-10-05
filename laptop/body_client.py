@@ -14,7 +14,8 @@ In the preview window:  F = clutch (hold still 2 s to calibrate, then the arm fo
                         S = stop   R = reset   M = flip left/right (if the robot goes the wrong way)   Q/Esc = quit
 Hands-free clutch: hold an open palm UP (above your elbow) for 1 s, or keep your LEFT hand raised above your
 shoulder (hold-to-follow: lower it and the arm freezes, so you can reposition yourself).
-Make a fist to close the gripper, open your hand to release (stand-in until EEG is live).
+Grab assist: steer the gripper roughly above an object (it turns magenta in Isaac), then hold a FIST ~0.5 s: the arm
+lines up, grabs and lifts it, then hands control back. Hold an OPEN hand ~0.5 s to let go (stand-in until EEG is live).
 Stand ~1.5-2 m from the camera with your shoulders, elbow, wrist and hips in view. Gesture mode (default on the VM):
   swing your hand left/right -> the arm rotates left/right
   raise/lower your hand      -> the gripper goes up/down
@@ -366,6 +367,11 @@ def main():
             txt = (f"calibration {'ACCEPTED' if r.get('accepted') else 'NOT accepted'}: {r.get('errors_cm')} cm, "
                    f"fit {r.get('residual_deg')} deg" + (f", redo {r['bad_axis']} (X)" if r.get("bad_axis") else ""))
             cv2.putText(frame, txt, (10, 150), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 255, 255), 2)
+        if robot.get("assist"):
+            cv2.putText(frame, "ASSIST: grabbing / releasing...", (10, 230), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 80, 220), 2)
+        elif robot.get("grab_ready"):
+            cv2.putText(frame, f"make a FIST to grab the {robot['grab_ready']}", (10, 230), cv2.FONT_HERSHEY_SIMPLEX,
+                        0.9, (255, 80, 220), 2)
         if robot.get("ghost") == "clamped":
             cv2.putText(frame, "OUT OF REACH - the gripper is clamped at the edge", (10, 120),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 165, 255), 2)
