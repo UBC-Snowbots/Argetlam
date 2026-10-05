@@ -306,7 +306,7 @@ rover-intent/
 ├── scripts/                    tcp_relay.py, hud.py, check_grasps.py, gate.sh, fake_laptop.py
 ├── assets/                     dev_arm (team model, see SOURCE.md), rover2026
 ├── tests/                      unit + integration tests (control loop, calibration flow, decoder streaming)
-└── docs/                       PLAN.md, LOG.md (dated engineering log), EEG.md, GRIPPER.md, REAL_ARM.md
+└── docs/                       PLAN.md, EEG.md, GRIPPER.md, REAL_ARM.md
 ```
 
 ---
