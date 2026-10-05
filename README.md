@@ -6,7 +6,7 @@ NVIDIA Nemotron on Nebius Token Factory turns speech into structured robot comma
 grasp intent. Everything is developed against a physics simulation of the team's real arm in NVIDIA Isaac Sim /
 Isaac Lab, and designed to drive the physical arm through the same safety layer.
 
-Built by UBC Rover (Ptolemy) for the **Nebius × NVIDIA Global AI Hackathon** (Physical AI track).
+Built by UBC Rover for the **Nebius × NVIDIA Global AI Hackathon** (Physical AI track).
 
 > Status (2026-10): simulation stack, teleop, calibration, voice and the EEG research are working and tested in sim.
 > The physical-arm driver is the next milestone (see [Roadmap](#roadmap)). All numbers below are from the
@@ -33,7 +33,7 @@ Built by UBC Rover (Ptolemy) for the **Nebius × NVIDIA Global AI Hackathon** (P
 - [Results so far](#results-so-far)
 - [Known limitations](#known-limitations)
 - [Roadmap](#roadmap)
-- [Credits and licensing](#credits-and-licensing)
+- [License](#license)
 
 ---
 
@@ -444,13 +444,7 @@ Everything above is simulation, scripted input or offline data. Live operator se
 
 ---
 
-## Credits and licensing
+## License
 
-- UBC Rover (Ptolemy) software team.
-- `assets/dev_arm/` is the team's development-arm description from the UBC-Snowbots RoverFlake2 repository
-  (see `assets/dev_arm/SOURCE.md`); that repository has no license file, so these assets are not covered by this
-  project's license and need the team's permission before any public release.
-- EEG data: PhysioNet EEG Motor Movement/Imagery Dataset (Schalk et al.); BNCI Horizon 2020 dataset 001-2020
-  (Schwarz et al. 2020, CC BY 4.0). Datasets are downloaded at run time, not stored here.
-- NVIDIA Isaac Sim / Isaac Lab, MediaPipe, faster-whisper, MNE, pyRiemann, scikit-learn.
-- Code license: Apache-2.0 (see `LICENSE`), excluding third-party assets as noted above.
+Apache-2.0 (see `LICENSE`). `assets/dev_arm/` is the team's development-arm description from the UBC-Snowbots
+RoverFlake2 repository (see `assets/dev_arm/SOURCE.md`).
