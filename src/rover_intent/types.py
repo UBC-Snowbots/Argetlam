@@ -76,3 +76,11 @@ class EEGState(BaseModel):
     kind: Literal["eeg"] = "eeg"
     t: float
     p_grasp: float
+
+
+class GripToggle(BaseModel):
+    """One-shot gripper toggle (close if open, open if closed), e.g. a Muse 2 double jaw clench (eeg/clench.py).
+    An event, not a level, so it can't fight voice / reset / assist changes to the gripper."""
+    kind: Literal["grip_toggle"] = "grip_toggle"
+    t: float
+    source: str = "clench"

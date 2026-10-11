@@ -2,7 +2,7 @@
 
   laptop (body pose, transcripts) --UDP--> Receiver
   transcripts -> Nemotron -> Intent -> Arbiter
-  EEG decoder p_grasp -> Arbiter
+  EEG decoder p_grasp -> Arbiter;  Muse 2 double jaw clench (eeg/clench.py) -> GripToggle -> Arbiter
   Arbiter -> TCP target -> IK step -> SafetyLayer -> backend
 
 Run:  python -m rover_intent.app --config configs/default.yaml [--backend mock|isaac] [--seconds N]
@@ -33,7 +33,7 @@ from .body.clutch import Clutch
 from .config import load_config
 from .body.calib_session import CalibratedMapper, CalibrationSession
 from .body.calibration import Profile
-from .types import Action, BodyPose, ClutchMsg, EEGState, Intent, Query, Utterance
+from .types import Action, BodyPose, ClutchMsg, EEGState, GripToggle, Intent, Query, Utterance
 
 log = logging.getLogger("rover_intent")
 ROOT = Path(__file__).resolve().parents[2]
@@ -229,6 +229,11 @@ def run(cfg: dict, backend: str, seconds: float | None = None):
                                     pool.submit(parser.parse, msg.text, scene.names(), descriptions)))
             elif isinstance(msg, EEGState):
                 arbiter.on_eeg(msg.p_grasp, t0)
+            elif isinstance(msg, GripToggle):
+                said = arbiter.last_say
+                arbiter.on_grip_toggle(arm.fk(robot.read_joints())[:3, 3])
+                log.info("grip toggle (%s) in %s: %s", msg.source, arbiter.mode.value,
+                         arbiter.last_say if arbiter.last_say != said else f"gripper={arbiter.gripper:.0f}")
             elif isinstance(msg, Query):
                 rx.reply(addr, {"kind": "state", "mode": arbiter.mode.value, "held": arbiter.held,
                                 "clutch": clutch.state, "assist": arbiter.assist, "mapping": type(retarget).__name__,

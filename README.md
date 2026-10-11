@@ -277,6 +277,38 @@ real arbiter): at ≤ 1 false close per idle minute it catches only ~19 % of gra
 Window accuracy does not survive continuous use yet; context gating (only listen near an object) is the next step.
 EEG therefore *assists* grasping in this project; it is not the primary trigger.
 
+### Muse 2: double jaw clench toggles the gripper
+
+We have a Muse 2 headband. Its 4 dry sensors (TP9, AF7, AF8, TP10) sit behind the ears and on the forehead, with
+nothing over the motor strip, so the imagined-grasp decoders above can't run on it. What it picks up very well is
+**jaw-muscle (EMG) activity**, so the Muse drives a hands-free **grip toggle**: clench twice quickly to close the
+gripper, twice again to open it. It is a muscle signal from the headband, not decoded brain activity, and we label it
+that way.
+
+How it works (`src/rover_intent/eeg/clench.py`): each channel is notch-filtered (60 Hz), band-passed 30-100 Hz and
+turned into a loudness envelope. The score is the median over channels of loudness / that channel's relaxed level, so
+one loose electrode can't trigger it. A toggle needs **exactly two** short clenches with the second starting within
+0.8 s of the first, then 0.5 s of quiet. Three or more in a row count as chewing and are ignored; a clench held over
+1.5 s is ignored. The detector sends a one-shot `GripToggle` message (not a level), so it never fights voice
+"release", resets or grab assists. In FOLLOW mode a toggle behaves like a held fist / open hand: near an object it
+starts the grab assist, while holding it starts the release.
+
+```bash
+# laptop with the Muse (Bluetooth on); clench.py also works as a single copied file
+pip install numpy scipy brainflow
+python -m rover_intent.eeg.clench calibrate --out data/profiles/clench_pranav.json   # ~1.5 min, guided:
+#   relax 20 s -> 8 x "CLENCH" -> talk + chew 20 s; prints GOOD / MARGINAL / POOR
+python -m rover_intent.eeg.clench run --profile data/profiles/clench_pranav.json --host <vm>   # --dry to just print
+python -m rover_intent.eeg.clench replay --profile ... --file data/eeg_recordings/clench_*.npz  # offline re-check
+```
+Set `body.grip_from_hand: false` while using it (otherwise an open hand re-opens the gripper). `--board muse2-bled
+--serial COM3` uses a BLED112 dongle instead of native Bluetooth.
+
+Results so far are on **synthetic** Muse-like signals only (assumed levels: a clench is tens to hundreds of uV of
+EMG vs a few uV of background above 30 Hz): 60/60 random double clenches caught (relax gaps down to 0.15 s), 0 false
+toggles in 10 min of talking + blinking + chewing, toggle fires ~1.6 s after the first clench starts. Not yet run on
+the real headband.
+
 ---
 
 ## Repository layout
@@ -336,6 +368,7 @@ The laptop scripts are standalone (copy the single file):
 python -m venv rover-body && rover-body/Scripts/activate      # or: source rover-body/bin/activate
 pip install mediapipe opencv-python numpy                      # body_client.py (MediaPipe Tasks API)
 pip install faster-whisper sounddevice numpy                   # voice_client.py
+pip install numpy scipy brainflow                              # eeg/clench.py (Muse 2 jaw-clench toggle)
 ```
 
 ---

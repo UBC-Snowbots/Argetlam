@@ -118,6 +118,17 @@ class Arbiter:
         if now - self._hand_since < HAND_HOLD_S:
             return
         self._hand_want = self._hand_since = None
+        self._commit_grip(want, tcp)
+
+    def on_grip_toggle(self, tcp=None) -> None:
+        """One-shot close/open (Muse 2 double jaw clench, eeg/clench.py). The detector already debounced it, so no dwell
+        here. Same behaviour as a held fist / open hand: near an object = assisted grab; holding = assisted release."""
+        if self.mode != Mode.FOLLOW:
+            return
+        closed = self.gripper > 0.5 or self.held is not None
+        self._commit_grip(0.0 if closed else 1.0, tcp)
+
+    def _commit_grip(self, want: float, tcp=None) -> None:
         tcp = None if tcp is None else np.asarray(tcp, float)
         if want == 1.0:
             o = self.grab_candidate(tcp) if tcp is not None else None
