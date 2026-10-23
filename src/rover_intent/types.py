@@ -14,6 +14,7 @@ class Action(str, Enum):
     grasp = "grasp"        # close the gripper where it is
     release = "release"    # open the gripper where it is
     home = "home"
+    preset = "preset"      # move to a named joint-space pose from the arm profile (presets.py); needs confirm
     stop = "stop"
     follow = "follow"      # hand control back to body mirroring
     reset = "reset"        # arm home, gripper open, objects back to their start poses (sim)
@@ -27,6 +28,7 @@ class Intent(BaseModel):
     object: Optional[str] = Field(None, description="object to act on, e.g. 'cup'")
     relation: Optional[Literal["beside", "left_of", "right_of", "in_front_of", "behind", "on", "into"]] = None
     reference: Optional[str] = Field(None, description="reference object for the relation, e.g. 'bottle'")
+    preset: Optional[str] = Field(None, description="named pose for action 'preset' (e.g. 'base', 'ready', 'return')")
     say: str = Field("", description="short spoken confirmation for the user")
 
 
