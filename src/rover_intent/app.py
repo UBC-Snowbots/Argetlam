@@ -34,6 +34,7 @@ from .config import load_config
 from .body.calib_session import CalibratedMapper, CalibrationSession
 from .body.calibration import Profile
 from .control.presets import HOME_HW, at_goal, plan_preset, preset_names, request_hw_home
+from .session import SessionRecorder
 from .types import Action, ArmPreset, BodyPose, ClutchMsg, EEGState, GripToggle, Intent, Query, Utterance
 
 log = logging.getLogger("rover_intent")
@@ -78,9 +79,10 @@ def build(cfg: dict, backend: str):
     return arm, safety, robot, scene, arbiter, retarget, parser
 
 
-def run(cfg: dict, backend: str, seconds: float | None = None):
+def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = True):
     arm, safety, robot, scene, arbiter, retarget, parser = build(cfg, backend)
     rx = Receiver(cfg["net"]["listen_port"])
+    recorder = SessionRecorder(ROOT / "logs" / "sessions", enabled=record)
     dt = 1.0 / cfg["loop"]["hz"]
     log.info("backend=%s nemotron=%s objects=%s", backend, "online" if parser.online else "OFFLINE fallback",
              scene.names())
@@ -119,7 +121,7 @@ def run(cfg: dict, backend: str, seconds: float | None = None):
                  cfg["body"].get("mode"))
 
     def say(text):
-        arbiter.last_say = text
+        arbiter._last_say = text   # calibration channel: set directly (its own "calibration:" log), not the say_log
         rx.reply(bubble, {"state": "reply", "text": text})   # Pranav's voice bubble on the VM screen
         log.info("calibration: %s", text)
 
@@ -177,8 +179,6 @@ def run(cfg: dict, backend: str, seconds: float | None = None):
             safety.reset()
             retarget.reset()
             q_cmd, T_des, body_target = home.copy(), arm.fk(home), None
-        if arbiter.last_say and arbiter.last_say != intent.say:
-            log.info("arbiter: %s", arbiter.last_say)
         rx.reply(addr, {"kind": "reply", "text": text, "latency_s": round(latency, 2),
                         "intent": intent.model_dump(mode="json", exclude_none=True),
                         "say": arbiter.last_say or intent.say, "mode": arbiter.mode.value})
@@ -188,7 +188,8 @@ def run(cfg: dict, backend: str, seconds: float | None = None):
     body_addr, n_body = None, 0
     while t_end is None or time.time() < t_end:
         t0 = time.time()
-        for _, msg, addr in rx.poll():
+        for t_recv, msg, addr in rx.poll():
+            recorder.record(t_recv, msg)   # every incoming message except Query, for offline replay (issue 9)
             if isinstance(msg, BodyPose):
                 n_body += 1
                 body_addr, last_body, last_body_arrival = addr, msg, t0
@@ -209,10 +210,7 @@ def run(cfg: dict, backend: str, seconds: float | None = None):
                     if tgt is not None:
                         body_target, body_t, last_target = tgt, t0, tgt
                     if grip_from_hand and msg.hand_open is not None:
-                        said = arbiter.last_say
                         arbiter.on_hand(msg.hand_open, t0, arm.fk(robot.read_joints())[:3, 3])
-                        if arbiter.last_say != said:
-                            log.info("arbiter: %s", arbiter.last_say)
                 if session.active:
                     handle_session(session.update(t0, msg, bool(msg.in_position),
                                                   tcp_meas=arm.fk(robot.read_joints())[:3, 3],
@@ -267,10 +265,8 @@ def run(cfg: dict, backend: str, seconds: float | None = None):
                 rx.reply(addr, {"kind": "reply", "text": f"preset {msg.name}", "ok": ok, "say": why,
                                 "mode": arbiter.mode.value})
             elif isinstance(msg, GripToggle):
-                said = arbiter.last_say
                 arbiter.on_grip_toggle(arm.fk(robot.read_joints())[:3, 3])
-                log.info("grip toggle (%s) in %s: %s", msg.source, arbiter.mode.value,
-                         arbiter.last_say if arbiter.last_say != said else f"gripper={arbiter.gripper:.0f}")
+                log.info("grip toggle (%s) in %s: gripper=%.0f", msg.source, arbiter.mode.value, arbiter.gripper)
             elif isinstance(msg, Query):
                 rx.reply(addr, {"kind": "state", "mode": arbiter.mode.value, "held": arbiter.held,
                                 "clutch": clutch.state, "assist": arbiter.assist, "mapping": type(retarget).__name__,
@@ -298,10 +294,10 @@ def run(cfg: dict, backend: str, seconds: float | None = None):
             for name, bottom in robot.objects.items():
                 scene.update_from_bottom(name, bottom)
         tcp = arm.fk(q)[:3, 3]
-        said = arbiter.last_say
         p, grip = arbiter.target(tcp, body_target if t0 - body_t < 0.5 else None)
-        if arbiter.last_say != said:
-            log.info("arbiter: %s", arbiter.last_say)
+        for s in arbiter.say_log:   # drain the arbiter's say queue: each message logged once, when it happened
+            log.info("arbiter: %s", s)
+        arbiter.say_log.clear()
         if grip != last_grip:
             log.info("gripper %s (%.0f -> %.0f) in %s%s", "CLOSE" if grip > last_grip else "OPEN",
                      last_grip, grip, arbiter.mode.value, f", holding {arbiter.held}" if arbiter.held else "")
@@ -394,6 +390,7 @@ def run(cfg: dict, backend: str, seconds: float | None = None):
                      f" from {body_addr[0]}" if body_addr else "", " ESTOP:" + safety.reason if safety.estopped else "")
             n_body = 0
         time.sleep(max(0.0, dt - (time.time() - t0)))
+    recorder.close()
 
 
 def load_dotenv(path: Path) -> None:
@@ -411,12 +408,13 @@ def main():
     ap.add_argument("--arm", default=None, help="arm profile (configs/arms/<name>.yaml); default: ROVER_ARM or config")
     ap.add_argument("--backend", default=None, choices=["mock", "isaac", "real"])
     ap.add_argument("--seconds", type=float, default=None)
+    ap.add_argument("--no-record", action="store_true", help="do not record this session to logs/sessions/")
     args = ap.parse_args()
     load_dotenv(ROOT / ".env")
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     cfg = load_config(args.config, args.arm)
     log.info("arm profile: %s (%s)", cfg["arm_profile"], cfg["arm"]["urdf"])
-    run(cfg, args.backend or cfg["loop"]["backend"], args.seconds)
+    run(cfg, args.backend or cfg["loop"]["backend"], args.seconds, record=not args.no_record)
 
 
 if __name__ == "__main__":

@@ -53,13 +53,25 @@ class Arbiter:
         self._wp_since: float | None = None
         self._carrot: np.ndarray | None = None   # straight-line interpolated target the IK chases
         self._carrot_t: float | None = None
-        self.last_say = ""
+        self.say_log: list[str] = []   # new say-messages, in order; the app drains and logs them once per tick (issue 9)
+        self._last_say = ""
         self.assist = False                 # the current AUTO plan is a grab/release assist -> back to FOLLOW after
         self.events: list[str] = []         # for the app: "assist_done" (re-engage the body mapping)
         self.z_max = np.inf                 # top of the workspace box (retreat targets stay reachable)
         self._hand_want: float | None = None
         self._hand_since: float | None = None
         self._hand_ema: float | None = None   # smoothed hand openness (issue 5): cuts the frame-to-frame flicker
+
+    @property
+    def last_say(self) -> str:
+        return self._last_say
+
+    @last_say.setter
+    def last_say(self, value: str) -> None:
+        """Every distinct, non-empty say is pushed onto say_log so the app logs it once, when it happens (issue 9)."""
+        if value and value != self._last_say:
+            self.say_log.append(value)
+        self._last_say = value
 
     # --- inputs -------------------------------------------------------------------
     def on_intent(self, intent: Intent) -> None:
