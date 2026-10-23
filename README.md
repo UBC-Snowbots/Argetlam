@@ -304,6 +304,23 @@ python -m rover_intent.eeg.clench replay --profile ... --file data/eeg_recording
 Set `body.grip_from_hand: false` while using it (otherwise an open hand re-opens the gripper). `--board muse2-bled
 --serial COM3` uses a BLED112 dongle instead of native Bluetooth.
 
+### Muse 2: genuine-EEG controls (research, offline)
+
+Jaw clench is EMG, not brain activity. For a real brain-signal control we characterised two options offline on public
+datasets, restricted to the electrode sites nearest the Muse's, before the headband arrives. Full tables, caveats and
+a day-one checklist are in [`docs/muse_readiness.md`](docs/muse_readiness.md).
+
+- **Alpha / eyes-closed** ("close your eyes to confirm") works on the Muse's own electrodes: on EEGMMIDB (109
+  subjects, chance 50 %) the Muse-proxy sites reach ~0.84-0.86 balanced accuracy calibrated and ~0.73-0.76 cold at a
+  2-3 s window. This is the recommended day-one control.
+- **SSVEP** ("look at a flickering box") is near chance on the Muse's temporal electrodes (Wang2016, 9 subjects:
+  2-class <= 0.68), but a single occipital electrode takes it to ~0.94 (2-class) / ~0.90 (4-class). It is the stretch
+  goal, only if the Muse AUX port can drive an occipital electrode (unverified).
+
+Tools (standalone on the laptop, `pip install -e '.[muse]'`): `eeg/muse_session.py` records a guided ~10 min session
+(alpha blocks + frame-locked SSVEP flicker, `--check-display` to test the screen), `eeg/muse_report.py` turns it into
+a readiness report, and `eeg/muse_detect.py` runs the live SSVEP/alpha detector and emits a confirm/grab over UDP.
+
 Results so far are on **synthetic** Muse-like signals only (assumed levels: a clench is tens to hundreds of uV of
 EMG vs a few uV of background above 30 Hz): 60/60 random double clenches caught (relax gaps down to 0.15 s), 0 false
 toggles in 10 min of talking + blinking + chewing, toggle fires ~1.6 s after the first clench starts. Not yet run on

@@ -17,6 +17,8 @@ dependencies = [
 laptop = ["mediapipe>=0.10", "opencv-python>=4.9", "faster-whisper>=1.0", "sounddevice>=0.4"]
 # EEG motor-imagery training + live decoding
 eeg = ["mne>=1.7", "moabb>=1.1", "pyriemann>=0.6", "scikit-learn>=1.4", "brainflow>=5.12"]
+# Muse 2 laptop session recorder: full-screen SSVEP flicker (frame-locked) + guided alpha blocks
+muse = ["brainflow>=5.12", "scipy>=1.11", "pygame>=2.5"]
 dev = ["pytest>=8"]
 
 [build-system]
