@@ -52,7 +52,7 @@ class OneEuro:
 
 class Retargeter:
     def __init__(self, axes, scale, origin, alpha: float = 0.3, min_cutoff: float = 1.0, beta: float = 0.7,
-                 ws_min=None, ws_max=None):
+                 ws_min=None, ws_max=None, glide_mps: float = 0.15):
         self.ws_min = None if ws_min is None else np.asarray(ws_min, float)
         self.ws_max = None if ws_max is None else np.asarray(ws_max, float)
         self.clipped = False
@@ -61,13 +61,22 @@ class Retargeter:
         self.anchor = np.asarray(origin, float)
         self.filter = OneEuro(min_cutoff, beta)
         self._neutral: np.ndarray | None = None
+        self.glide_mps = glide_mps
+        self._carrot = None
+        self._gliding = False
+        self._t = None
 
     def engage(self, tcp_now, neutral=None) -> None:
-        """neutral: calibrated wrist-shoulder vector (from the clutch); None = the next sample."""
+        """neutral: calibrated wrist-shoulder vector (from the clutch); None = the next sample. The arm then GLIDES
+        from where it is (tcp_now) toward the mapped point at glide_mps, so engaging never snaps/jumps (issue 1).
+        Signature kept at two positionals so app.py's engage(..., recentre=False) still falls back via TypeError."""
         self.anchor = np.asarray(tcp_now, float).copy()
         self._neutral = None if neutral is None else np.asarray(neutral, float)
         self.filter.reset()
         self.clipped = False
+        self._carrot = np.asarray(tcp_now, float).copy()
+        self._gliding = True
+        self._t = None
 
     def __call__(self, pose: BodyPose) -> np.ndarray:
         rel = np.asarray(pose.wrist) - np.asarray(pose.shoulder)
@@ -78,8 +87,20 @@ class Retargeter:
             c = np.clip(p, self.ws_min, self.ws_max)
             self.clipped = bool(np.max(np.abs(c - p)) > 0.005)  # > 5 mm outside the box = really out of reach
             p = c
+        if self._gliding and self._carrot is not None:   # ease from the current TCP toward the mapped point
+            dt = 0.0 if self._t is None else max(0.0, min(0.1, pose.t - self._t))
+            d = p - self._carrot
+            n = float(np.linalg.norm(d))
+            step = self.glide_mps * dt
+            if n <= max(step, 0.01):
+                self._gliding = False
+            else:
+                self._carrot = self._carrot + d / n * step
+                p = self._carrot
+        self._t = pose.t
         return p
 
     def reset(self):
         self._neutral = None
         self.filter.reset()
+        self._carrot, self._gliding, self._t = None, False, None

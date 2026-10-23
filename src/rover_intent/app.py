@@ -44,7 +44,11 @@ WINDUP = 0.25  # rad: max gap between the commanded and the measured joint posit
 def build(cfg: dict, backend: str):
     a = cfg["arm"]
     arm = ArmModel(str(ROOT / a["urdf"]), base=a.get("base_link", "base_link"), tip=a["tip_link"],
-                   tcp_offset=a["tcp_offset"])
+                   tcp_offset=a["tcp_offset"], tool_axis=a.get("tool_axis"))
+    if a.get("joint_limits_lower") is not None and a.get("joint_limits_upper") is not None:
+        # profile override (e.g. dev_arm_real): real firmware + URDF joint travel, tighter than the URDF alone (issue 3)
+        arm.lower = np.array(a["joint_limits_lower"], float)
+        arm.upper = np.array(a["joint_limits_upper"], float)
     safety = SafetyLayer(arm.lower, arm.upper, a["max_vel"], a["max_acc"],
                          cfg["safety"]["workspace_min"], cfg["safety"]["workspace_max"],
                          cfg["safety"]["watchdog_s"])
@@ -83,6 +87,7 @@ def run(cfg: dict, backend: str, seconds: float | None = None):
     descriptions = {n: o.get("desc", "") for n, o in cfg["scene"].items()}
     home = np.array(cfg["arm"]["home"], float)
     grip_from_hand = cfg["body"].get("grip_from_hand", False)
+    teleop_orient = cfg["arm"].get("teleop_orient", "full")  # "axis" frees the wrist roll while teleoperating (issue 2)
     body_target, body_t = None, 0.0
     q_cmd = robot.read_joints()  # commanded trajectory state (the drives track it; see WINDUP)
     T_des = arm.fk(q_cmd)
@@ -313,8 +318,10 @@ def run(cfg: dict, backend: str, seconds: float | None = None):
             log.info("preset %s cancelled: %s took over", goal_name,
                      "the clutch" if clutch.state != "idle" else f"{arbiter.mode.value} mode")
             joint_goal = None
-        # button-panel preset: joint-space target straight into the SafetyLayer (vel/acc limits), no IK
-        q_des = joint_goal if joint_goal is not None else arm.ik_step(q_cmd, T_des)
+        # button-panel preset: joint-space target straight into the SafetyLayer (vel/acc limits), no IK.
+        # teleop (FOLLOW) can free the wrist roll (orient="axis"); AUTO grasps keep full orientation.
+        orient = teleop_orient if arbiter.mode == Mode.FOLLOW else "full"
+        q_des = joint_goal if joint_goal is not None else arm.ik_step(q_cmd, T_des, orient=orient)
         q_cmd = safety.step(q_cmd, q_des, dt, input_age)
         q_cmd = np.clip(q_cmd, q - WINDUP, q + WINDUP)  # anti-windup: never run far ahead of the real joints
         if joint_goal is not None and at_goal(q_cmd, q, joint_goal):

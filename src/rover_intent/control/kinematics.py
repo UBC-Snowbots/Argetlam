@@ -43,6 +43,25 @@ def rot_err(R_cur: np.ndarray, R_des: np.ndarray) -> np.ndarray:
     return angle * v / (2 * np.sin(angle))
 
 
+def axis_err(a_cur: np.ndarray, a_des: np.ndarray) -> np.ndarray:
+    """Rotation vector (world frame) that aligns the current tool-pointing direction with the desired one, leaving
+    the roll about that direction free. Used by ik_step(orient="axis") so the wrist doesn't spin to chase a roll."""
+    a_cur = np.asarray(a_cur, float); a_des = np.asarray(a_des, float)
+    a_cur = a_cur / (np.linalg.norm(a_cur) + 1e-12)
+    a_des = a_des / (np.linalg.norm(a_des) + 1e-12)
+    v = np.cross(a_cur, a_des)
+    s = np.linalg.norm(v)
+    c = float(np.clip(np.dot(a_cur, a_des), -1.0, 1.0))
+    angle = np.arctan2(s, c)
+    if s < 1e-9:
+        if c > 0:
+            return np.zeros(3)
+        helper = np.array([1.0, 0, 0]) if abs(a_cur[0]) < 0.9 else np.array([0, 1.0, 0])
+        perp = np.cross(a_cur, helper)
+        return np.pi * perp / (np.linalg.norm(perp) + 1e-12)   # antiparallel: flip about any perpendicular
+    return angle * v / s
+
+
 @dataclass
 class Joint:
     name: str
@@ -54,7 +73,7 @@ class Joint:
 
 class ArmModel:
     def __init__(self, urdf_path: str, base: str = "base_link", tip: str = "a6_EE_holder",
-                 tcp_offset=(0.0, 0.0, 0.0)):
+                 tcp_offset=(0.0, 0.0, 0.0), tool_axis=None):
         root = ET.parse(urdf_path).getroot()
         by_child = {j.find("child").get("link"): j for j in root.findall("joint")}
         chain, link = [], tip
@@ -80,6 +99,11 @@ class ArmModel:
             self.joints.append(Joint(j.get("name"), T, ax / np.linalg.norm(ax), lo, hi))
         self.tcp = np.eye(4)
         self.tcp[:3, 3] = tcp_offset
+        # tool-pointing direction in the TCP frame (for ik_step orient="axis"); default: along the tcp_offset, else +z
+        ta = np.asarray(tool_axis, float) if tool_axis is not None else np.asarray(tcp_offset, float)
+        if np.linalg.norm(ta) < 1e-9:
+            ta = np.array([0.0, 0.0, 1.0])
+        self.tool_axis = ta / np.linalg.norm(ta)
         self.names = [j.name for j in self.joints]
         self.lower = np.array([j.lower for j in self.joints])
         self.upper = np.array([j.upper for j in self.joints])
@@ -111,10 +135,18 @@ class ArmModel:
         return J
 
     def ik_step(self, q: np.ndarray, T_des: np.ndarray, damping: float = 0.05,
-                rot_weight: float = 0.3, max_dq: float = 0.1) -> np.ndarray:
-        """One DLS step toward T_des. Returns the new q (clipped to joint limits)."""
+                rot_weight: float = 0.3, max_dq: float = 0.1, orient: str = "full") -> np.ndarray:
+        """One DLS step toward T_des. Returns the new q (clipped to joint limits).
+
+        orient="full" (default): match the full target orientation (grasps, unchanged behaviour).
+        orient="axis": constrain only the tool-pointing direction (self.tool_axis), leaving the roll about it free,
+        so teleop that only moves the target position doesn't make the wrist spin to chase a fixed roll (issue 2)."""
         T = self.fk(q)
-        err = np.concatenate([T_des[:3, 3] - T[:3, 3], rot_weight * rot_err(T[:3, :3], T_des[:3, :3])])
+        if orient == "axis":
+            r = axis_err(T[:3, :3] @ self.tool_axis, T_des[:3, :3] @ self.tool_axis)
+        else:
+            r = rot_err(T[:3, :3], T_des[:3, :3])
+        err = np.concatenate([T_des[:3, 3] - T[:3, 3], rot_weight * r])
         J = self.jacobian(q)
         J[3:] *= rot_weight
         dq = J.T @ np.linalg.solve(J @ J.T + damping ** 2 * np.eye(6), err)
