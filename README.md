@@ -326,6 +326,14 @@ EMG vs a few uV of background above 30 Hz): 60/60 random double clenches caught 
 toggles in 10 min of talking + blinking + chewing, toggle fires ~1.6 s after the first clench starts. Not yet run on
 the real headband.
 
+**Day one, one command** (`eeg/sunday.py`, see [`docs/SUNDAY.md`](docs/SUNDAY.md)): `python -m rover_intent.eeg.sunday
+--board muse2 --name pranav` records a short labelled session (signal-quality gate, rest, single/double clenches,
+negatives, eyes-open/closed), fits YOUR clench + eyes-closed-alpha calibration on a held-out split, writes the
+profiles where the tools load them (old ones backed up), and runs a live double-clench -> gripper toggle into the SIM
+(spare port, never the real arm). It is resumable and re-runs a single block with `--only <stage>`. Saturday dry run
+with no headband: `python -m rover_intent.eeg.sunday --preflight` (synthetic board, end to end, < 3 min). Your EEG
+stays on local disk and is never committed or uploaded.
+
 ---
 
 ## Repository layout
