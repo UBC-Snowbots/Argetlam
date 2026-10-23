@@ -260,6 +260,93 @@ def minimap(frame, st):
             cv2.circle(frame, px(st["tcp"]), 4, (255, 255, 255), -1)
 
 
+class ButtonPanel:
+    """Clickable buttons on the right edge of the window: STOP, then the presets the app reports in its status
+    ("return", profile presets, "home_hw" when a real arm is configured). HOME needs a second click within
+    CONFIRM_S. The app does all the safety checks (clutch idle, joint limits, workspace box, speed limits)."""
+    CONFIRM_S = 3.0
+    W, H, GAP = 170, 44, 8
+
+    def __init__(self):
+        self.names: list[str] = []
+        self.rects: list[tuple[str, int, int, int, int]] = []
+        self.clicks: list[tuple[int, int]] = []
+        self.home_armed_until = 0.0
+        self.note = ""
+
+    @staticmethod
+    def label(name: str) -> str:
+        return {"return": "RETURN", "home_hw": "HOME (arm)", "stop": "STOP"}.get(name, name.upper())
+
+    def on_mouse(self, event, x, y, flags, param):
+        if event == cv2.EVENT_LBUTTONDOWN:
+            self.clicks.append((x, y))
+
+    def layout(self, width: int):
+        x0 = width - self.W - 10
+        self.rects = [(n, x0, 40 + i * (self.H + self.GAP), self.W, self.H)
+                      for i, n in enumerate(["stop"] + self.names)]
+
+    def hit(self, x: int, y: int) -> str | None:
+        for n, rx, ry, rw, rh in self.rects:
+            if rx <= x <= rx + rw and ry <= y <= ry + rh:
+                return n
+        return None
+
+    def press(self, name: str, now: float) -> dict | None:
+        """The message for a click on `name` (None = nothing to send yet)."""
+        if name == "stop":
+            self.note = "STOP sent"
+            return {"kind": "utterance", "t": now, "text": "stop"}
+        if name == "home_hw":
+            if now > self.home_armed_until:
+                self.home_armed_until = now + self.CONFIRM_S
+                self.note = "click HOME again within 3 s to confirm (all axes drive to their limit switches)"
+                return None
+            self.home_armed_until = 0.0
+            self.note = "HOME confirmed"
+            return {"kind": "preset", "t": now, "name": "home_hw", "confirm": True}
+        self.note = f"{self.label(name)} requested"
+        return {"kind": "preset", "t": now, "name": name, "confirm": False}
+
+    def take(self, now: float) -> list[dict]:
+        out = []
+        while self.clicks:
+            n = self.hit(*self.clicks.pop(0))
+            if n is not None:
+                msg = self.press(n, now)
+                if msg:
+                    out.append(msg)
+        return out
+
+    def draw(self, frame, robot: dict, now: float):
+        names = [n for n in robot.get("presets", []) if isinstance(n, str)]
+        if names != self.names:
+            self.names = names
+        self.layout(frame.shape[1])
+        busy = robot.get("hw_busy") or 0.0
+        active = robot.get("preset")
+        for n, x, y, w, h in self.rects:
+            if n == "stop":
+                col = (0, 0, 200)
+            elif n == "home_hw":
+                col = (0, 140, 255) if now <= self.home_armed_until else (60, 60, 140)
+            else:
+                col = (0, 160, 0) if n == active else (90, 90, 90) if busy else (120, 80, 40)
+            cv2.rectangle(frame, (x, y), (x + w, y + h), col, -1)
+            cv2.rectangle(frame, (x, y), (x + w, y + h), (255, 255, 255), 1)
+            txt = "CONFIRM HOME" if n == "home_hw" and now <= self.home_armed_until else self.label(n)
+            cv2.putText(frame, txt, (x + 8, y + 29), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+        y = 40 + len(self.rects) * (self.H + self.GAP) + 10
+        x = frame.shape[1] - self.W - 10
+        if busy:
+            cv2.putText(frame, f"ARM HOMING {busy:.0f}s", (x, y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 140, 255), 2)
+        elif active:
+            cv2.putText(frame, f"moving: {self.label(active)}", (x, y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 220, 0), 2)
+        if self.note:
+            cv2.putText(frame, self.note[:60], (10, 260), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 200, 255), 2)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--host", default=DEFAULT_HOST)
@@ -295,6 +382,9 @@ def main():
     if not cap.isOpened():
         raise SystemExit(f"camera {args.camera} did not open (try --camera 1)")
     track = Tracker(video=True)
+    panel = ButtonPanel()
+    cv2.namedWindow("rover body client")
+    cv2.setMouseCallback("rover body client", panel.on_mouse)
     last_send, fps_t, frames, fps = 0.0, time.time(), 0, 0.0
     while True:
         ok, frame = cap.read()
@@ -378,6 +468,9 @@ def main():
         cv2.putText(frame, "C calibrate | X redo bad axis | F clutch | S stop | R reset | M flip | Q quit",
                     (10, frame.shape[0] - 15),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+        for msg in panel.take(time.time()):  # button clicks -> app (it does the safety checks)
+            link.send(msg)
+        panel.draw(frame, robot, time.time())
         cv2.imshow("rover body client", frame)
         k = cv2.waitKey(1) & 0xFF
         if k in (ord("q"), 27):

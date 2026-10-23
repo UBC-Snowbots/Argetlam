@@ -38,6 +38,12 @@ nemotron:
   # 2026-09-28 on 7 test phrases: Nano 7/7, Super 5/7 (heard "whoa hold on" as grasp); 1.4-3.9 s per call
   model: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B
 
+real_arm:        # the button panel's HOME button (control/presets.py); off unless a real arm is attached
+  enabled: false
+  # Rowan's stepper_arm_driver home-all (cmd_type 'H' = 72, value 0xAA = all axes except the gripper)
+  home_cmd: "source /opt/ros/jazzy/setup.bash && source ~/projects/ubc-rover-arm/RoverFlake2/install/setup.bash && ros2 topic pub --once /arm/command rover_msgs/msg/ArmCommand '{cmd_type: 72, cmd_value: 170}'"
+  busy_s: 120    # presets refused for this long after a home; then the sim resets to arm.home
+
 eeg:
   p_on: 0.7      # p_grasp above this -> close (after hold_s)
   p_off: 0.3     # below this -> open

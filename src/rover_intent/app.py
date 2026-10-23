@@ -33,7 +33,8 @@ from .body.clutch import Clutch
 from .config import load_config
 from .body.calib_session import CalibratedMapper, CalibrationSession
 from .body.calibration import Profile
-from .types import Action, BodyPose, ClutchMsg, EEGState, GripToggle, Intent, Query, Utterance
+from .control.presets import HOME_HW, at_goal, plan_preset, preset_names, request_hw_home
+from .types import Action, ArmPreset, BodyPose, ClutchMsg, EEGState, GripToggle, Intent, Query, Utterance
 
 log = logging.getLogger("rover_intent")
 ROOT = Path(__file__).resolve().parents[2]
@@ -92,6 +93,9 @@ def run(cfg: dict, backend: str, seconds: float | None = None):
     hud = (cfg["net"].get("hud_host", "127.0.0.1"), cfg["net"].get("hud_port", 47130))
     last_body, last_target, last_body_arrival, last_visible_t = None, None, 0.0, 0.0
     set_mirror = None
+    presets = cfg["arm"].get("presets", {}) or {}
+    real_arm = cfg.get("real_arm", {}) or {}
+    joint_goal, goal_name, hw_busy_until = None, None, 0.0  # button-panel preset move / real-arm homing window
     lo_ws, hi_ws = cfg["safety"]["workspace_min"], cfg["safety"]["workspace_max"]
     sim = cfg.get("sim", {})
     default_cam = sim.get("views", {}).get(sim.get("default_view", "behind"))
@@ -145,8 +149,11 @@ def run(cfg: dict, backend: str, seconds: float | None = None):
             body_target = last_target = None
 
     def finish(text, addr, intent, latency):
-        nonlocal q_cmd, T_des, body_target
+        nonlocal q_cmd, T_des, body_target, joint_goal
         log.info("heard %r -> %s (%.1fs)", text, intent.model_dump(exclude_none=True), latency)
+        if intent.action in (Action.stop, Action.reset) and joint_goal is not None:
+            log.info("preset %s cancelled by %s", goal_name, intent.action.value)
+            joint_goal = None
         if intent.action in (Action.stop, Action.reset):  # a slow cloud result must not restart the arm
             for p_text, p_addr, _, fut in pending:
                 fut.cancel()
@@ -229,6 +236,30 @@ def run(cfg: dict, backend: str, seconds: float | None = None):
                                     pool.submit(parser.parse, msg.text, scene.names(), descriptions)))
             elif isinstance(msg, EEGState):
                 arbiter.on_eeg(msg.p_grasp, t0)
+            elif isinstance(msg, ArmPreset):
+                if msg.name == HOME_HW:
+                    if t0 < hw_busy_until:
+                        ok, why = False, f"refused: the real arm is already homing ({hw_busy_until - t0:.0f} s left)"
+                    else:
+                        ok, why = request_hw_home(real_arm, msg.confirm)
+                    if ok:
+                        if clutch.state != "idle":
+                            on_clutch(clutch._release())
+                        arbiter.on_intent(Intent(action=Action.stop))
+                        joint_goal, goal_name = None, None
+                        hw_busy_until = t0 + float(real_arm.get("busy_s", 120.0))
+                elif t0 < hw_busy_until:
+                    ok, why = False, f"refused: the real arm is homing ({hw_busy_until - t0:.0f} s left)"
+                else:
+                    goal, why = plan_preset(msg.name, presets, home, q_cmd, clutch.state, arm, safety.ws_min,
+                                            safety.ws_max)
+                    ok = goal is not None
+                    if ok:
+                        arbiter.on_intent(Intent(action=Action.stop))  # HOLD: the preset move owns the arm
+                        joint_goal, goal_name = goal, msg.name
+                log.info("preset %s%s: %s", msg.name, " (confirmed)" if msg.confirm else "", why)
+                rx.reply(addr, {"kind": "reply", "text": f"preset {msg.name}", "ok": ok, "say": why,
+                                "mode": arbiter.mode.value})
             elif isinstance(msg, GripToggle):
                 said = arbiter.last_say
                 arbiter.on_grip_toggle(arm.fk(robot.read_joints())[:3, 3])
@@ -241,6 +272,8 @@ def run(cfg: dict, backend: str, seconds: float | None = None):
                                 "tcp_meas": np.round(arm.fk(robot.read_joints())[:3, 3], 4).tolist(),
                                 "q_meas": np.round(robot.read_joints(), 4).tolist(),
                                 "plan_left": len(arbiter._plan), "table_top": scene.support_z,
+                                "preset": goal_name if joint_goal is not None else None,
+                                "hw_busy": round(max(0.0, hw_busy_until - t0), 1) if hw_busy_until else 0.0,
                                 "objects": {n: {"pos": np.round(o.pos, 4).tolist(),
                                                 "bottom_z": round(float(o.pos[2] - o.grasp_z), 4)}
                                             for n, o in scene.objects.items()}})
@@ -276,9 +309,24 @@ def run(cfg: dict, backend: str, seconds: float | None = None):
         else:  # HOLD = stop here: aim at the current commanded pose, the safety layer brakes at max decel
             T_des = arm.fk(q_cmd)
         input_age = 0.0 if arbiter.mode == Mode.AUTO or p is None else t0 - body_t
-        q_des = arm.ik_step(q_cmd, T_des)
+        if joint_goal is not None and (arbiter.mode != Mode.HOLD or clutch.state != "idle"):
+            log.info("preset %s cancelled: %s took over", goal_name,
+                     "the clutch" if clutch.state != "idle" else f"{arbiter.mode.value} mode")
+            joint_goal = None
+        # button-panel preset: joint-space target straight into the SafetyLayer (vel/acc limits), no IK
+        q_des = joint_goal if joint_goal is not None else arm.ik_step(q_cmd, T_des)
         q_cmd = safety.step(q_cmd, q_des, dt, input_age)
         q_cmd = np.clip(q_cmd, q - WINDUP, q + WINDUP)  # anti-windup: never run far ahead of the real joints
+        if joint_goal is not None and at_goal(q_cmd, q, joint_goal):
+            log.info("preset %s reached", goal_name)
+            joint_goal = None
+        if hw_busy_until and t0 >= hw_busy_until:  # real-arm homing window over: put the sim at the start pose
+            hw_busy_until = 0.0
+            robot.reset(home)
+            safety.reset()
+            retarget.reset()
+            q_cmd, T_des, body_target = home.copy(), arm.fk(home), None
+            log.info("real-arm homing window over: sim reset to the start pose")
         # sync cues: ghost at the target. ok = green, clamped = amber, lost = red, calib = blue
         ghost, ghost_state = None, None
         if clutch.state == "calibrating":
@@ -313,7 +361,10 @@ def run(cfg: dict, backend: str, seconds: float | None = None):
                   "vis_pct": pct(1), "inpos_pct": pct(2), "hand_pct": pct(3),
                   "calib": session.view(), "mapping": type(retarget).__name__, "set_mirror": set_mirror,
                   "vtarget": vtarget, "grab_ready": cand.name if cand is not None else None,
-                  "assist": arbiter.assist, "held": arbiter.held, "tcp_meas": np.round(tcp, 3).tolist()}
+                  "assist": arbiter.assist, "held": arbiter.held, "tcp_meas": np.round(tcp, 3).tolist(),
+                  "presets": preset_names(presets, bool(real_arm.get("enabled"))),
+                  "preset": goal_name if joint_goal is not None else None,
+                  "hw_busy": round(max(0.0, hw_busy_until - t0), 1) if hw_busy_until else 0.0}
             if body_addr is not None:
                 rx.reply(body_addr, st)
                 set_mirror = None if set_mirror else set_mirror  # sent once

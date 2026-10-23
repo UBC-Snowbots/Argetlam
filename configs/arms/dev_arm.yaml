@@ -11,6 +11,11 @@ arm:
   joints: [joint_1, joint_2, joint_3, joint_4, joint_5, joint_6]
   # gripper straight down at (0.45, 0, 0.25); IK solution with the most joint-limit margin (0.37 rad)
   home: [0.144, -1.131, -1.007, -0.003, 0.679, -2.957]
+  # body-client button panel poses (joint angles, rad). "return" = home above. A preset whose joint-space path
+  # leaves the workspace box further than its ends do is refused (control/presets.py).
+  presets:
+    ready: [0.144, -1.131, -1.007, -0.003, 0.679, -2.957]     # gripper straight down over the table (= home)
+    base: [0.104, -1.415, -0.997, -0.229, -0.482, -3.142]     # Rowan's return-to-base pose {61,30,20,125,94,180} fw deg
   # HALF the firmware max speeds (FirmFlake main.cpp: 80, 40, 60, 110, 90, 90 deg/s), for demos
   max_vel: [0.698, 0.349, 0.524, 0.960, 0.785, 0.785]   # rad/s
   max_acc: [1.5, 1.0, 1.5, 3.0, 3.0, 3.0]               # rad/s^2  PLACEHOLDER (stepper accel not documented)

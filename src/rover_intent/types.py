@@ -78,6 +78,15 @@ class EEGState(BaseModel):
     p_grasp: float
 
 
+class ArmPreset(BaseModel):
+    """Body-client button: move the arm to a named pose ("return", a profile preset) or, with confirm, home the
+    real arm ("home_hw"). Preset moves run through the SafetyLayer in HOLD and only while the clutch is idle."""
+    kind: Literal["preset"] = "preset"
+    t: float
+    name: str
+    confirm: bool = False
+
+
 class GripToggle(BaseModel):
     """One-shot gripper toggle (close if open, open if closed), e.g. a Muse 2 double jaw clench (eeg/clench.py).
     An event, not a level, so it can't fight voice / reset / assist changes to the gripper."""
