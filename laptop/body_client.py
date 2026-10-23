@@ -55,9 +55,12 @@ class Link:
 
     def __init__(self, host, port, tunnel=None):
         self.tunnel = tunnel
+        self.reconnects = 0           # tunnel drops we recovered from (shown in the 1 Hz log line)
+        self._th = self._tp = None
         if tunnel:
             th, tp = tunnel.rsplit(":", 1)
-            self.sock = socket.create_connection((th, int(tp)), timeout=5)
+            self._th, self._tp = th, int(tp)
+            self.sock = socket.create_connection((self._th, self._tp), timeout=5)
             self.sock.setblocking(False)
             self._buf = b""
         else:
@@ -65,12 +68,32 @@ class Link:
             self.sock.setblocking(False)
             self.addr = (host, port)
 
+    def _reconnect(self):
+        """Tunnel only: re-open a dropped TCP connection to the relay (the SSH tunnel bounced, the relay restarted)."""
+        if not self.tunnel:
+            return False
+        try:
+            self.sock.close()
+        except OSError:
+            pass
+        try:
+            self.sock = socket.create_connection((self._th, self._tp), timeout=5)
+            self.sock.setblocking(False)
+            self._buf = b""
+            self.reconnects += 1
+            return True
+        except OSError:
+            return False
+
     def send(self, msg: dict):
         data = json.dumps(msg).encode()
         if self.tunnel:
-            self.sock.setblocking(True)
-            self.sock.sendall(data + b"\n")
-            self.sock.setblocking(False)
+            try:
+                self.sock.setblocking(True)
+                self.sock.sendall(data + b"\n")
+                self.sock.setblocking(False)
+            except OSError:
+                self._reconnect()
         else:
             self.sock.sendto(data, self.addr)
 
@@ -80,10 +103,15 @@ class Link:
         while True:
             try:
                 data = self.sock.recv(65536) if self.tunnel else self.sock.recvfrom(65536)[0]
-            except (BlockingIOError, ConnectionResetError, OSError):
+            except BlockingIOError:
+                break
+            except (ConnectionResetError, OSError):
+                if self.tunnel:
+                    self._reconnect()
                 break
             if self.tunnel:
-                if not data:
+                if not data:          # peer closed: relay or tunnel went away
+                    self._reconnect()
                     break
                 self._buf += data
                 *lines, self._buf = self._buf.split(b"\n")
@@ -386,6 +414,7 @@ def main():
     cv2.namedWindow("rover body client")
     cv2.setMouseCallback("rover body client", panel.on_mouse)
     last_send, fps_t, frames, fps = 0.0, time.time(), 0, 0.0
+    tracked, last_f = 0, 0.0          # frames with the arm visible this second; last F toggle (for debounce)
     while True:
         ok, frame = cap.read()
         if not ok:
@@ -429,8 +458,13 @@ def main():
         if args.minimap:
             minimap(frame, robot)
         frames += 1
+        tracked += 1 if visible else 0
         if now - fps_t >= 1.0:
-            fps, frames, fps_t = frames / (now - fps_t), 0, now
+            fps = frames / (now - fps_t)
+            lat = f"{rtt_ms:.0f} ms" if rtt_ms is not None else "?"
+            print(f"[body] {fps:4.1f} fps  tracking {100 * tracked / max(frames, 1):3.0f}%  "
+                  f"reconnects {link.reconnects}  clutch {robot.get('clutch', '?')}  rtt {lat}", flush=True)
+            frames, tracked, fps_t = 0, 0, now
         grip = "no hand" if openness is None else "FIST" if openness < 0.30 else "open" if openness > 0.65 else "..."
         cv2.putText(frame, f"{args.side} arm {'TRACKED' if visible else 'NOT VISIBLE'}  hand:{grip}  "
                            f"{fps:.0f} fps{'  MIRRORED' if mirror else ''}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7,
@@ -476,7 +510,9 @@ def main():
         if k in (ord("q"), 27):
             break
         if k == ord("f"):
-            link.send({"kind": "clutch", "t": time.time(), "action": "toggle"})
+            if time.time() - last_f >= 0.3:   # debounce: a key repeat / double tap must not toggle twice
+                last_f = time.time()
+                link.send({"kind": "clutch", "t": time.time(), "action": "toggle"})
         elif k == ord("s"):
             say("stop")
         elif k == ord("r"):
