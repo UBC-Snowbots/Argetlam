@@ -24,7 +24,7 @@ from ..types import Action, Intent
 
 GRAB_RADIUS = 0.06       # m: sideways gripper->object distance at which a fist means "grab THAT"
 GRAB_BELOW, GRAB_ABOVE = 0.03, 0.18   # m: gripper height window around the object's grasp point
-HAND_HOLD_S = 0.4        # s: a fist / open hand must be held this long (MediaPipe openness flickers frame to frame)
+HAND_HOLD_S = 0.6        # s: a fist / open hand must be held this long (MediaPipe openness flickers frame to frame)
 ASSIST_LIFT = 0.06       # m: lift after an assisted grab
 RELEASE_RETREAT = 0.05   # m: back off upward after letting go
 
@@ -59,6 +59,7 @@ class Arbiter:
         self.z_max = np.inf                 # top of the workspace box (retreat targets stay reachable)
         self._hand_want: float | None = None
         self._hand_since: float | None = None
+        self._hand_ema: float | None = None   # smoothed hand openness (issue 5): cuts the frame-to-frame flicker
 
     # --- inputs -------------------------------------------------------------------
     def on_intent(self, intent: Intent) -> None:
@@ -98,15 +99,19 @@ class Arbiter:
         elif now - self._eeg_since >= self.eeg_hold_s:
             self.gripper, self._eeg_since = want, None
 
-    def on_hand(self, hand_open: float, now: float | None = None, tcp=None, close_below: float = 0.35,
-                open_above: float = 0.6) -> None:
+    def on_hand(self, hand_open: float, now: float | None = None, tcp=None, close_below: float = 0.30,
+                open_above: float = 0.65, ema_alpha: float = 0.5) -> None:
         """Stand-in for EEG (config body.grip_from_hand). A fist / open hand must be HELD for HAND_HOLD_S (hysteresis
-        + dwell: openness flickers). Fist near an object = assisted grab; open hand while holding = assisted release."""
+        + dwell: openness flickers). The openness is EMA-smoothed first (issue 5), and the band is widened to
+        0.30/0.65 so a half-open hand stays in the dead band. Fist near an object = assisted grab; open hand while
+        holding = assisted release. The EMA resets whenever we are not FOLLOWing, so a stale value can't carry over."""
         if self.mode != Mode.FOLLOW:
-            self._hand_want = self._hand_since = None
+            self._hand_want = self._hand_since = self._hand_ema = None
             return
         now = time.time() if now is None else now
-        want = 1.0 if hand_open < close_below else 0.0 if hand_open > open_above else None
+        self._hand_ema = hand_open if self._hand_ema is None else ema_alpha * hand_open + (1 - ema_alpha) * self._hand_ema
+        h = self._hand_ema
+        want = 1.0 if h < close_below else 0.0 if h > open_above else None
         if want is None:
             return                                   # dead band: keep any pending change
         if want == self.gripper:
@@ -165,6 +170,7 @@ class Arbiter:
     def abort(self, say: str = "") -> None:
         """Clutch released / tracking lost: stop wherever we are (an assist must not keep running)."""
         self.mode, self._plan, self._wp_since, self._wp_started, self.assist = Mode.HOLD, [], None, None, False
+        self._hand_want = self._hand_since = self._hand_ema = None   # leaving FOLLOW: drop the smoothed openness
         if say:
             self.last_say = say
 
@@ -193,8 +199,16 @@ class Arbiter:
             if self._wp_started is None:
                 self._wp_started = now
             if self._wp_since is None and now - self._wp_started > self.waypoint_timeout:
-                self.last_say = f"Couldn't reach {wp.label}; holding."
-                self.mode, self._plan, self._wp_started, self.assist = Mode.HOLD, [], None, False
+                if self.assist:
+                    # a failed grab/release assist must NOT leave the arbiter in HOLD while the clutch still says
+                    # "following" (that left the arm stuck). Hand control back to the body mapping instead.
+                    self.last_say = f"Couldn't reach {wp.label}; back to following."
+                    self.mode, self._plan, self._wp_since, self._wp_started, self.assist = \
+                        Mode.FOLLOW, [], None, None, False
+                    self.events.append("assist_done")
+                else:
+                    self.last_say = f"Couldn't reach {wp.label}; holding."
+                    self.mode, self._plan, self._wp_started, self.assist = Mode.HOLD, [], None, False
                 return None, self.gripper
             d = tcp_now - wp.pos
             reached = (np.linalg.norm(d) < self.waypoint_tol if wp.tol_xy is None

@@ -91,6 +91,7 @@ def run(cfg: dict, backend: str, seconds: float | None = None):
     body_target, body_t = None, 0.0
     q_cmd = robot.read_joints()  # commanded trajectory state (the drives track it; see WINDUP)
     T_des = arm.fk(q_cmd)
+    last_grip = arbiter.gripper  # log every gripper open/close (issue 5): hand, EEG, clench, skills and resets
     pool, pending = ThreadPoolExecutor(max_workers=1), []
     c = cfg["body"].get("clutch", {})
     clutch = Clutch(calib_s=c.get("calib_s", 2.0), still_m=c.get("still_m", 0.03), palm_s=c.get("palm_s", 1.0),
@@ -301,6 +302,10 @@ def run(cfg: dict, backend: str, seconds: float | None = None):
         p, grip = arbiter.target(tcp, body_target if t0 - body_t < 0.5 else None)
         if arbiter.last_say != said:
             log.info("arbiter: %s", arbiter.last_say)
+        if grip != last_grip:
+            log.info("gripper %s (%.0f -> %.0f) in %s%s", "CLOSE" if grip > last_grip else "OPEN",
+                     last_grip, grip, arbiter.mode.value, f", holding {arbiter.held}" if arbiter.held else "")
+            last_grip = grip
         while arbiter.events:
             if arbiter.events.pop(0) == "assist_done" and clutch.state == "following":
                 # hand control back without a jump: position mode re-anchors at the arm, calibrated mode glides

@@ -431,7 +431,7 @@ def main():
         frames += 1
         if now - fps_t >= 1.0:
             fps, frames, fps_t = frames / (now - fps_t), 0, now
-        grip = "no hand" if openness is None else "FIST" if openness < 0.35 else "open" if openness > 0.6 else "..."
+        grip = "no hand" if openness is None else "FIST" if openness < 0.30 else "open" if openness > 0.65 else "..."
         cv2.putText(frame, f"{args.side} arm {'TRACKED' if visible else 'NOT VISIBLE'}  hand:{grip}  "
                            f"{fps:.0f} fps{'  MIRRORED' if mirror else ''}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7,
                     (0, 200, 0) if visible else (0, 0, 255), 2)
