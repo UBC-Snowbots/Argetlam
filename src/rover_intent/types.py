@@ -101,8 +101,9 @@ class ArmPreset(BaseModel):
 
 
 class GripToggle(BaseModel):
-    """One-shot gripper toggle (close if open, open if closed), e.g. a Muse 2 double jaw clench (eeg/clench.py).
-    An event, not a level, so it can't fight voice / reset / assist changes to the gripper."""
+    """One-shot gripper toggle (close if open, open if closed), e.g. a Muse 2 double jaw clench (eeg/clench.py)
+    or a Muse SSVEP/alpha confirm (eeg/muse_detect.py). An event, not a level, so it can't fight voice / reset /
+    assist changes to the gripper."""
     kind: Literal["grip_toggle"] = "grip_toggle"
     t: float
     source: str = "clench"
@@ -143,3 +144,17 @@ class MirrorMsg(BaseModel):
     kind: Literal["mirror"] = "mirror"
     t: float = 0.0
     on: bool = True
+
+
+class EEGSelect(BaseModel):
+    """One-shot discrete EEG selection, e.g. which SSVEP flicker target the user looked at. An EVENT (like
+    GripToggle), carrying WHICH option was chosen plus confidence, for cases a bare toggle cannot express
+    (multi-target SSVEP: confirm vs cancel, or a 4-way menu). The arbiter does not consume this yet; see
+    docs/muse_readiness.md for how it would map `label` to an action. `freq` is the flicker frequency in Hz
+    (0 for the alpha/eyes-closed detector); `source` is the detector that produced it."""
+    kind: Literal["eeg_select"] = "eeg_select"
+    t: float
+    label: str                     # e.g. "confirm", "cancel", "grab", or a target name
+    freq: float = 0.0              # SSVEP flicker frequency in Hz (0 = not frequency-based)
+    confidence: float = 0.0        # 0..1, detector-reported
+    source: str = "ssvep"

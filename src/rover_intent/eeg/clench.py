@@ -29,7 +29,13 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 import numpy as np
-from scipy.signal import butter, iirnotch, sosfilt, sosfilt_zi, tf2sos
+try:
+    from scipy.signal import butter, iirnotch, sosfilt, sosfilt_zi, tf2sos
+except ImportError:  # e.g. Windows Smart App Control blocks SciPy's DLLs on the laptop: numpy-only stand-ins
+    try:
+        from rover_intent.eeg.np_signal import butter, iirnotch, sosfilt, sosfilt_zi, tf2sos
+    except ImportError:  # this file copied on its own: keep np_signal.py next to it
+        from np_signal import butter, iirnotch, sosfilt, sosfilt_zi, tf2sos
 
 MUSE_CHANNELS = ["TP9", "AF7", "AF8", "TP10"]
 

@@ -5,6 +5,10 @@ __pycache__/
 .env
 models/
 data/
+# EEG is personal biometric data: local disk only, never committed, never uploaded (redundant with data/ above)
+data/eeg_sessions/
+data/eeg_recordings/
+data/profiles/
 *.mp4
 logs/
 .pytest_cache/
