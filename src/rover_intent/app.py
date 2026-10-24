@@ -40,6 +40,7 @@ from .types import Action, ArmPreset, BodyPose, ClutchMsg, EEGState, GripToggle,
 log = logging.getLogger("rover_intent")
 ROOT = Path(__file__).resolve().parents[2]
 WINDUP = 0.25  # rad: max gap between the commanded and the measured joint positions
+DROP_REASONS = ("tracking lost",)  # clutch releases that count as "the arm dropped" for arm.on_drop
 
 
 def build(cfg: dict, backend: str):
@@ -102,6 +103,9 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
     last_body, last_target, last_body_arrival, last_visible_t = None, None, 0.0, 0.0
     set_mirror = None
     presets = cfg["arm"].get("presets", {}) or {}
+    on_drop = cfg["arm"].get("on_drop")  # preset to go to when the body drops out of view (None = freeze)
+    if on_drop and on_drop not in presets:
+        raise ValueError(f"arm.on_drop {on_drop!r} is not one of the arm's presets {list(presets)}")
     real_arm = cfg.get("real_arm", {}) or {}
     joint_goal, goal_name, hw_busy_until = None, None, 0.0  # button-panel preset move / real-arm homing window
     lo_ws, hi_ws = cfg["safety"]["workspace_min"], cfg["safety"]["workspace_max"]
@@ -141,8 +145,11 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
     vis_seen = []  # (t, arm visible, in position, hand found) over the last second: tracking quality
 
     def on_clutch(ev):
-        """Clutch events -> arm modes. Calibrating/released freeze the arm; engaged starts following."""
-        nonlocal body_target, last_target, retarget
+        """Clutch events -> arm modes. Calibrating/released freeze the arm; engaged starts following.
+        If the arm profile sets `on_drop: <preset>`, losing the body ("tracking lost": your arm dropped out of view)
+        sends the arm to that preset instead of freezing it. F / left-hand releases (deliberate re-centring) and
+        "link lost" (nobody watching) still freeze in place."""
+        nonlocal body_target, last_target, retarget, joint_goal, goal_name
         if ev is None:
             return
         log.info("clutch: %s (trigger=%s%s)", ev.kind, clutch.trigger,
@@ -151,6 +158,15 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
             if arbiter.mode == Mode.FOLLOW or arbiter.assist:   # a running grab assist stops too (dead-man)
                 arbiter.abort()
             body_target = None
+        if ev.kind == "released" and on_drop and clutch.release_reason in DROP_REASONS:
+            if time.time() < hw_busy_until:
+                log.info("on_drop %s skipped: the real arm is homing", on_drop)
+                return
+            goal, why = plan_preset(on_drop, presets, home, q_cmd, clutch.state, arm, safety.ws_min, safety.ws_max)
+            if goal is not None:
+                arbiter.on_intent(Intent(action=Action.stop))  # HOLD: the preset move owns the arm
+                joint_goal, goal_name = goal, on_drop
+            log.info("on_drop (%s): %s", clutch.release_reason, why)
         elif ev.kind == "engaged":
             retarget.engage(arm.fk(q_cmd)[:3, 3], ev.neutral)
             arbiter.on_intent(Intent(action=Action.follow))
