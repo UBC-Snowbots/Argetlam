@@ -15,7 +15,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 import numpy as np
-from scipy.signal import welch
+try:
+    from scipy.signal import welch
+except ImportError:  # e.g. Windows Smart App Control blocks SciPy's DLLs on the laptop: numpy-only stand-in
+    from rover_intent.eeg.np_signal import welch
 
 ALPHA_BAND = (8.0, 12.0)
 BROAD_BAND = (4.0, 30.0)

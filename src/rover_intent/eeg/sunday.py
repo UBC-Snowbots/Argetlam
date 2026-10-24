@@ -578,12 +578,18 @@ def preflight(session_dir: Path | None = None) -> dict:
 
     _say("Saturday preflight (no Muse needed).")
     check("python>=3.10", sys.version_info >= (3, 10), f"{sys.version.split()[0]}")
-    for mod in ("numpy", "scipy", "brainflow"):  # the Sunday session needs only these (+ pygame for --with-ssvep)
+    for mod in ("numpy", "brainflow"):  # the Sunday session needs only these (+ pygame for --with-ssvep)
         try:
             __import__(mod)
             check(f"import {mod}", True, "present")
         except Exception as e:  # noqa: BLE001
             check(f"import {mod}", False, f"MISSING ({e}); run the pip install below")
+    try:  # optional: Windows Smart App Control can block SciPy's DLLs; numpy stand-ins (eeg/np_signal.py) take over
+        import scipy.signal  # noqa: F401
+        check("import scipy.signal", True, "present")
+    except Exception as e:  # noqa: BLE001
+        check("import scipy.signal", False, f"unavailable ({str(e)[:80]}); using the numpy-only filters instead",
+              fatal=False)
     try:                                          # sklearn is only for the offline MI studies, not the session
         import sklearn  # noqa: F401
         check("import sklearn (offline studies only)", True, "present", fatal=False)
