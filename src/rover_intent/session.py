@@ -2,7 +2,8 @@
 replayed offline through the app (scripts/replay_session.py). On by default; the app's --no-record turns it off.
 
 Query messages are skipped (the follower and tools poll the app many times a second; they are not inputs worth
-replaying). A size cap stops a long session from filling the disk; once hit, recording stops and says so once.
+replaying). CameraFrame messages are skipped too (a 10 Hz base64 JPEG stream is huge and is not a control input).
+A size cap stops a long session from filling the disk; once hit, recording stops and says so once.
 """
 from __future__ import annotations
 
@@ -11,7 +12,7 @@ import logging
 import time
 from pathlib import Path
 
-from .types import Query
+from .types import CameraFrame, Query
 
 log = logging.getLogger("rover_intent")
 
@@ -34,7 +35,7 @@ class SessionRecorder:
 
     def record(self, recv_t: float, msg) -> None:
         """Append one message. recv_t is when the app received it (poll time); msg is a pydantic message model."""
-        if not self.enabled or self._capped or self._f is None or isinstance(msg, Query):
+        if not self.enabled or self._capped or self._f is None or isinstance(msg, (Query, CameraFrame)):
             return
         line = json.dumps({"t": round(float(recv_t), 4), "msg": msg.model_dump(mode="json")}) + "\n"
         enc = line.encode()

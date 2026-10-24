@@ -24,6 +24,7 @@ The green ghost ball in Isaac shows where the gripper is heading (red = out of r
 Only the chosen arm's hand is used (--side, default right); the other hand is ignored.
 """
 import argparse
+import base64
 import json
 import socket
 import time
@@ -134,6 +135,52 @@ class Link:
                     return m
             _t.sleep(0.02)
         return None
+
+
+def encode_video_frame(frame, width: int, height: int, quality: int):
+    """Downscale `frame` and JPEG-encode it. Returns (base64 str, w, h, jpeg byte count)."""
+    small = cv2.resize(frame, (width, height), interpolation=cv2.INTER_AREA)
+    ok, buf = cv2.imencode(".jpg", small, [cv2.IMWRITE_JPEG_QUALITY, int(quality)])
+    if not ok:
+        raise RuntimeError("JPEG encode failed")
+    data = buf.tobytes() if hasattr(buf, "tobytes") else bytes(buf)
+    return base64.b64encode(data).decode(), width, height, len(data)
+
+
+class VideoStreamer:
+    """Turns the annotated webcam frame into throttled `camera_frame` messages for the HUD video panel.
+
+    Rate-limited to `hz`: frames in between are DROPPED, never queued, so the pose packets' latency is untouched.
+    Over plain UDP a frame larger than `max_udp_bytes` would IP-fragment and likely drop, so it warns once and tells
+    the operator to lower the quality/size or use --tunnel (the TCP relay has no datagram limit)."""
+
+    def __init__(self, width: int, height: int, quality: int, hz: float, tunnel: bool = False,
+                 max_udp_bytes: int = 60000):
+        self.width, self.height, self.quality = int(width), int(height), int(quality)
+        self.min_dt = 1.0 / max(hz, 0.1)
+        self.tunnel, self.max_udp_bytes = bool(tunnel), int(max_udp_bytes)
+        self.last = 0.0
+        self.seq = self.sent = self.dropped = 0
+        self.last_bytes = 0
+        self._warned_big = False
+
+    def maybe(self, frame, now: float):
+        """A camera_frame dict to send, or None to drop this frame (rate limit)."""
+        if now - self.last < self.min_dt:
+            self.dropped += 1
+            return None
+        b64, w, h, nbytes = encode_video_frame(frame, self.width, self.height, self.quality)
+        msg = {"kind": "camera_frame", "t": now, "jpeg_b64": b64, "width": w, "height": h,
+               "seq": self.seq, "source": "body_cam"}
+        approx = len(b64) + 80  # base64 payload plus the small JSON envelope
+        if not self.tunnel and approx > self.max_udp_bytes and not self._warned_big:
+            self._warned_big = True
+            print(f"WARNING: video frame ~{approx} B > UDP safe size; lower --video-quality/--video-width "
+                  f"or use --tunnel", flush=True)
+        self.last, self.last_bytes = now, nbytes
+        self.seq += 1
+        self.sent += 1
+        return msg
 
 
 def model_path(name: str) -> str:
@@ -306,12 +353,13 @@ class ButtonPanel:
     CONFIRM_S = 3.0
     W, H, GAP = 170, 44, 8
 
-    def __init__(self):
+    def __init__(self, margin: int = 10):
         self.names: list[str] = []
         self.rects: list[tuple[str, int, int, int, int]] = []
         self.clicks: list[tuple[int, int]] = []
         self.home_armed_until = 0.0
         self.note = ""
+        self.margin = margin   # gap from the right edge; bigger keeps the buttons off the screen edge
 
     @staticmethod
     def label(name: str) -> str:
@@ -322,7 +370,7 @@ class ButtonPanel:
             self.clicks.append((x, y))
 
     def layout(self, width: int):
-        x0 = width - self.W - 10
+        x0 = width - self.W - self.margin
         self.rects = [(n, x0, 40 + i * (self.H + self.GAP), self.W, self.H)
                       for i, n in enumerate(["stop"] + self.names)]
 
@@ -377,7 +425,7 @@ class ButtonPanel:
             txt = "CONFIRM HOME" if n == "home_hw" and now <= self.home_armed_until else self.label(n)
             cv2.putText(frame, txt, (x + 8, y + 29), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
         y = 40 + len(self.rects) * (self.H + self.GAP) + 10
-        x = frame.shape[1] - self.W - 10
+        x = frame.shape[1] - self.W - self.margin
         if busy:
             cv2.putText(frame, f"ARM HOMING {busy:.0f}s", (x, y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 140, 255), 2)
         elif active:
@@ -398,6 +446,16 @@ def main():
     ap.add_argument("--mirror", action="store_true", help="flip left/right (webcams that mirror the image); M toggles")
     ap.add_argument("--record", help="append every frame's landmarks to this .jsonl (for debugging the mapping)")
     ap.add_argument("--minimap", action="store_true", help="show the old top/side mini-map (the ghost in Isaac replaces it)")
+    ap.add_argument("--stream-video", dest="stream_video", action="store_true", default=True,
+                    help="send the annotated webcam frame to the HUD video panel in Isaac (default ON)")
+    ap.add_argument("--no-video", dest="stream_video", action="store_false", help="do not send the video stream")
+    ap.add_argument("--video-width", type=int, default=480)
+    ap.add_argument("--video-height", type=int, default=360)
+    ap.add_argument("--video-quality", type=int, default=60, help="JPEG quality for the stream (lower -> smaller)")
+    ap.add_argument("--video-hz", type=float, default=10.0, help="stream frame rate (separate from the pose rate)")
+    ap.add_argument("--window-width", type=int, default=960, help="client window width (smaller keeps it off the screen edge)")
+    ap.add_argument("--window-height", type=int, default=540)
+    ap.add_argument("--panel-margin", type=int, default=40, help="gap from the right edge to the button panel")
     args = ap.parse_args()
 
     if args.image:
@@ -413,6 +471,9 @@ def main():
     mirror, gate = args.mirror, JumpGate()
     seq, sent_t, rtt_ms = 0, {}, None
     rec = open(args.record, "a") if args.record else None
+    streamer = (VideoStreamer(args.video_width, args.video_height, args.video_quality, args.video_hz,
+                              tunnel=bool(args.tunnel)) if args.stream_video else None)
+    toast_text, toast_until, toast_ok = "", 0.0, True   # transient ack/refusal banner from the app's reply
 
     def say(text):
         link.send({"kind": "utterance", "t": time.time(), "text": text})
@@ -421,7 +482,7 @@ def main():
     if not cap.isOpened():
         raise SystemExit(f"camera {args.camera} did not open (try --camera 1)")
     track = Tracker(video=True)
-    panel = ButtonPanel()
+    panel = ButtonPanel(margin=args.panel_margin)
     cv2.namedWindow("rover body client")
     cv2.setMouseCallback("rover body client", panel.on_mouse)
     last_send, fps_t, frames, fps = 0.0, time.time(), 0, 0.0
@@ -430,7 +491,8 @@ def main():
         ok, frame = cap.read()
         if not ok:
             break
-        pose_res, hand_res = track(frame)
+        pose_res, hand_res = track(frame)        # track on the full-res camera frame (best accuracy)
+        frame = cv2.resize(frame, (args.window_width, args.window_height))  # smaller display / overlay / stream canvas
         fields, openness, hand = extract(pose_res, hand_res, args.side, mirror)
         visible = bool(fields and fields["visible"])
         now = time.time()
@@ -454,6 +516,10 @@ def main():
             draw(frame, pose_res.pose_landmarks[0], vision.PoseLandmarksConnections.POSE_LANDMARKS, (0, 200, 0))
         if hand is not None:
             draw(frame, hand, vision.HandLandmarksConnections.HAND_CONNECTIONS, (255, 128, 0))
+        if streamer is not None:  # separate, rate-limited, dropped-not-queued: pose latency is never affected
+            vmsg = streamer.maybe(frame, now)
+            if vmsg is not None:
+                link.send(vmsg)
         for msg in link.poll():  # replies (to F/S/R) and 10 Hz robot status
             if msg.get("kind") == "status":
                 robot = msg
@@ -466,6 +532,10 @@ def main():
                     rtt_ms = r if rtt_ms is None else 0.8 * rtt_ms + 0.2 * r
             else:
                 status = msg.get("say", status)
+                if msg.get("kind") == "reply" and msg.get("say"):  # ack / refusal toast for a button or voice action
+                    toast_text = msg["say"]
+                    toast_until = time.time() + 3.0
+                    toast_ok = bool(msg.get("ok", True)) and not msg.get("busy")
         if args.minimap:
             minimap(frame, robot)
         frames += 1
@@ -513,9 +583,34 @@ def main():
         cv2.putText(frame, "C calibrate | X redo bad axis | F clutch | S stop | R reset | M flip | Q quit",
                     (10, frame.shape[0] - 15),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+        # active preset banner + progress (clear feedback that a move is running; status carries preset/preset_progress)
+        left_w = frame.shape[1] - ButtonPanel.W - panel.margin - 20
+        active = robot.get("preset")
+        if active:
+            prog = robot.get("preset_progress")
+            txt = f"MOVING: {ButtonPanel.label(active)}" + (f"   {int(100 * prog)}%" if prog is not None else "")
+            cv2.rectangle(frame, (10, 100), (left_w, 138), (0, 120, 0), -1)
+            cv2.rectangle(frame, (10, 100), (left_w, 138), (255, 255, 255), 1)
+            cv2.putText(frame, txt, (18, 126), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+            if prog is not None:
+                cv2.rectangle(frame, (10, 141), (10 + int(max(0, left_w - 20) * prog), 149), (0, 220, 0), -1)
+        # real arm following? None = no follower ever seen (pure sim); red = it stopped polling (not following)
+        rf = robot.get("real_following")
+        if rf is not None:
+            yb = frame.shape[0] - 48
+            if rf:
+                cv2.putText(frame, "real arm: FOLLOWING", (10, yb), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 220, 0), 2)
+            else:
+                cv2.rectangle(frame, (6, yb - 22), (left_w, yb + 8), (0, 0, 200), -1)
+                cv2.putText(frame, "REAL ARM NOT FOLLOWING - start the follower", (12, yb),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
         for msg in panel.take(time.time()):  # button clicks -> app (it does the safety checks)
             link.send(msg)
         panel.draw(frame, robot, time.time())
+        if time.time() < toast_until and toast_text:   # transient ack / refusal, drawn on top
+            col = (0, 160, 0) if toast_ok else (0, 90, 220)
+            cv2.rectangle(frame, (0, 0), (frame.shape[1], 40), col, -1)
+            cv2.putText(frame, toast_text[:70], (16, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
         cv2.imshow("rover body client", frame)
         k = cv2.waitKey(1) & 0xFF
         if k in (ord("q"), 27):

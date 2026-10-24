@@ -338,7 +338,7 @@ rover-intent/
 ├── scripts/                    tcp_relay.py, hud.py, check_grasps.py, gate.sh, fake_laptop.py
 ├── assets/                     dev_arm (team model, see SOURCE.md), rover2026
 ├── tests/                      unit + integration tests (control loop, calibration flow, decoder streaming)
-└── docs/                       PLAN.md, EEG.md, GRIPPER.md, REAL_ARM.md
+└── docs/                       PLAN.md, EEG.md, GRIPPER.md, REAL_ARM.md, VIDEO_HUD.md
 ```
 
 ---
@@ -396,6 +396,11 @@ fist to grab, or just say what you want done.
 
 Camera views can be switched live: send `{"view": "behind"|"operator"|"high"|"top"|"side"}` to the bridge's command port.
 
+The body client also streams its annotated webcam to a panel **under** the HUD, so the operator can glance at one VM
+screen instead of the laptop window. It is **on by default**; `python body_client.py --no-video` turns it off. The HUD
+needs Pillow for the decode (`pip install pillow`); without it the panel shows a hint and the rest of the HUD still
+works. See `docs/VIDEO_HUD.md` for the flags, sizing and the UDP-vs-tunnel size note.
+
 ---
 
 ## Testing and the regression gate
@@ -432,6 +437,7 @@ Key settings: `body.mode` (position / gesture, used until a calibration profile 
 | 47111 | UDP | app | joint states, object poses, camera pose from the bridge |
 | 47120 | TCP | tcp_relay | newline-JSON ↔ UDP 47100 (for SSH tunnels) |
 | 47130 | UDP | HUD | status for the on-screen overlay |
+| 47131 | UDP | HUD video | live webcam JPEG stream, forwarded by the app to the video panel under the HUD |
 | 47101 | UDP | speech bubble | prompts / replies shown on screen |
 
 ---

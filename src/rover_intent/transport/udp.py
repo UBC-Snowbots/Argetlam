@@ -10,10 +10,11 @@ import time
 
 from pydantic import TypeAdapter
 
-from ..types import ArmPreset, BodyPose, ClutchMsg, EEGState, GripToggle, MirrorMsg, Query, RealJoints, Utterance
+from ..types import (ArmPreset, BodyPose, CameraFrame, ClutchMsg, EEGState, GripToggle, MirrorMsg, Query, RealJoints,
+                     Utterance)
 
 _MSG = TypeAdapter(BodyPose | Utterance | EEGState | GripToggle | ArmPreset | Query | ClutchMsg | RealJoints |
-                   MirrorMsg)
+                   MirrorMsg | CameraFrame)
 
 
 class Sender:
