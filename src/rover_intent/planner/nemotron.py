@@ -20,9 +20,15 @@ pick (grasp and lift an object), place (put the held object relative to a refere
 grasp (close the gripper), release (open it),
 preset (move to a named stored pose: set "preset" to one of {presets}; "stow"/"rest" mean "base", and "go back" means "{ret}"),
 home (treat as preset "{ret}": go back to the start pose in the simulation - this NEVER homes the physical hardware),
+jog (nudge the tool a short distance WITHOUT a camera: set "direction" to one of left/right/up/down/forward/back in the
+  robot base frame as the operator faces it, and "distance_cm" to the centimetres asked for - omit it for a small default),
+joint_jog (turn ONE joint: set "joint" to base/shoulder/elbow/forearm/wrist/tool, "direction" to a word like
+  left/right/up/down/in/out/clockwise, and "angle_deg" to the degrees - omit it for a small default),
+speed (set "speed" to slower/faster/normal to change how fast voice moves run),
 stop, follow (mirror the user's arm), reset,
 clarify (you are not sure what the user means: ask them in "say", and nothing moves), unknown (not a robot command).
-Use your own judgement. "say" is spoken back to the user; keep it short."""
+Only use jog/joint_jog for a direct nudge with no object; to move an OBJECT use pick/place/move. "say" is spoken back
+to the user; keep it short. Use your own judgement."""
 
 # Spoken aliases -> preset name. The targets must be real profile presets (RETURN is always valid; presets.py
 # refuses an unknown name). Voice "home" means RETURN (the sim start pose), NEVER the hardware home_hw button.
@@ -108,17 +114,27 @@ _REL = {"beside": "beside", "next to": "beside", "left of": "left_of", "right of
         "in front of": "in_front_of", "behind": "behind", "on": "on", "onto": "on", "into": "into", "in": "into"}
 
 
+# Common faster-whisper (base.en) mishearings of the short pose words, folded onto the real word BEFORE matching.
+# Applied only inside quick_pose, which first defers any clause that names a scene object, so "store the cup" (a
+# skill) still goes to Nemotron and only an object-free clause like "store it" folds onto "stow". Kept OUT of
+# _POSE_ALIASES so the offline fallback / Nemotron-normalize path can never fold an object command onto a pose.
+_POSE_MISHEARS = {"store": "stow", "stove": "stow", "stowe": "stow", "stoe": "stow", "stoic": "stow",
+                  "reddy": "ready", "readi": "ready"}
+
+
 def quick_pose(text: str, objects: list[str], presets: list[str] | None = None) -> Intent | None:
     """Instant local match for SHORT named-pose commands ("go to the ready pose", "stow it", "go back"), so they skip
     the 2-4 s cloud call. Anything longer, naming a scene object, or chaining steps ("then") returns None and goes
-    to Nemotron as before. Returns a preset Intent or None."""
+    to Nemotron as before. Common whisper mishearings (_POSE_MISHEARS) are folded first. Returns a preset Intent
+    or None."""
     t = text.lower().strip()
     words = re.findall(r"[a-z']+", t)
     if not words or len(words) > 6 or "then" in words:
         return None
     if any(re.search(rf"\b{re.escape(o.lower())}\b", t) for o in objects):
         return None
-    intent = fallback_parse(text, [], presets)
+    norm = " ".join(_POSE_MISHEARS.get(w, w) for w in words)   # object-free here, so folding a mishear is safe
+    intent = fallback_parse(norm, [], presets)
     return intent if intent.action == Action.preset else None
 
 
