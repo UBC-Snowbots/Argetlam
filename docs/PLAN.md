@@ -1,4 +1,4 @@
-# Plan: rover-intent (Nebius x NVIDIA Global AI Hackathon, Physical AI track)
+# Plan: Argetlam (Nebius x NVIDIA Global AI Hackathon, Physical AI track)
 
 Deadline **2026-10-30 13:00 EDT**. Submission: public repo + OSS license, ≤3 min YouTube video with
 **≥1 min of the real arm operating**, description, Nebius/NVIDIA feedback, and a note on what's new vs prior work.

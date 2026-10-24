@@ -63,7 +63,7 @@ def _file_logger():
 
 
 class SimQuery:
-    """Polls the rover-intent app for the sim arm's measured joints and the hw_busy window."""
+    """Polls the Argetlam app for the sim arm's measured joints and the hw_busy window."""
 
     def __init__(self, host="127.0.0.1", port=47100):
         self.addr = (host, port)

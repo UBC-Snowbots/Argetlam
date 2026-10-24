@@ -1,4 +1,6 @@
-# rover-intent
+# Argetlam
+
+*Silver Hand. In Irish myth, King Nuada lost his arm in battle and ruled again with one made of silver.*
 
 **Drive a 6-axis rover arm with your body, your voice and (experimentally) your brain.**
 A webcam tracks your arm and drives the gripper in the plane you see on screen, NVIDIA Nemotron on Nebius Token
@@ -388,7 +390,7 @@ stays on local disk and is never committed or uploaded.
 ## Repository layout
 
 ```
-rover-intent/
+argetlam/
 ├── configs/
 │   ├── default.yaml            shared settings (loop, network, body mapping, Nemotron, EEG, clutch)
 │   └── arms/{dev_arm,dev_arm_real,rover2026}.yaml   arm-specific: URDF, joints, home, limits, reach box, scene, modes

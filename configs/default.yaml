@@ -1,4 +1,4 @@
-# rover-intent shared config. Arm-specific settings (URDF, joints, home, limits, workspace, table, objects, Isaac
+# Argetlam shared config. Arm-specific settings (URDF, joints, home, limits, workspace, table, objects, Isaac
 # actuators) live in configs/arms/<arm_profile>.yaml and are merged over this file by rover_intent.config.load_config.
 # Override the profile with the ROVER_ARM environment variable. PLACEHOLDER values are marked.
 

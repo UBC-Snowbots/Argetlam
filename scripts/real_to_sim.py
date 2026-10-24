@@ -3,7 +3,7 @@
 
   real joints <- Rowan's stepper_arm_driver /arm/feedback (RAW firmware degrees, index 6 = EE)
   convert     <- control.stepper_map (single source of truth)
-  send        -> the rover-intent app over UDP, message kind "real_joints" {t, fw[7], q[6], table}, capped at --hz
+  send        -> the Argetlam app over UDP, message kind "real_joints" {t, fw[7], q[6], table}, capped at --hz
 
 On start it sends a MirrorMsg{on:true} so the app enters its "mirror real" state (sim joint targets come straight
 from q, no IK, body/voice motion refused), and then RE-ASSERTS mirror on every ~2 s while running; on exit it sends
