@@ -4,7 +4,8 @@ Drive the dev_arm with your hands moving PARALLEL to the camera image plane, wit
 MediaPipe depth (the z axis, motion toward/away from the camera) is never read, because on the first real run depth
 was the noisy axis: ~28 mm std while holding still, versus ~3 mm in the image plane. So every control is read from
 image-plane landmarks (x, y) only, normalized by your shoulder width so it does not matter how far you stand from the
-camera. This is the dev_arm_real default; `arm_mirror`, `position` and `gesture` modes are still selectable.
+camera. This is the default body teleop mode everywhere; the only other mode is `arm_mirror` (full-arm joint
+mirroring, see docs/ARM_MIRROR.md and docs/BODY_TELEOP.md).
 
 ## Control mapping (5 lines)
 - robot **y (lateral)** <- your RIGHT hand horizontal. Move your right hand to YOUR right -> the gripper goes to your

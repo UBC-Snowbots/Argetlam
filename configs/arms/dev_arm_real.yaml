@@ -60,9 +60,8 @@ confirm:
                  # bounded to the measured joint limits + the workspace box, so no spoken yes is needed either
 
 body:
-  mode: plane        # image-plane TCP teleop, depth ignored (body/plane.py). Switch to arm_mirror / position /
-                     # gesture to pick another body mode. A saved calibration profile is NOT loaded in plane or
-                     # arm_mirror mode (they are not TCP calibrations).
+  mode: plane        # image-plane TCP teleop, depth ignored (body/plane.py). Switch to arm_mirror for the full-arm
+                     # joint-mirroring fallback. (plane and arm_mirror are the only body teleop modes.)
   clutch: {calib_s: 2.0, still_m: 0.03, palm_s: 1.0, raise_m: 0.05}
 
 # Plane teleop (body.mode = plane). Every control is PARALLEL to the camera image plane; MediaPipe depth (z) is

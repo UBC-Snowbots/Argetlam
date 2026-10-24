@@ -19,9 +19,8 @@ uncalibrated, and the clutch thrashed. Mirroring joints instead of a boxed TCP s
    mirror use), never through IK.
 
 Module: `src/rover_intent/body/arm_mirror.py` (`arm_angles()` pure function + `ArmMirror` mapper). Enabled by
-`body.mode: arm_mirror` (set in `configs/arms/dev_arm_real.yaml`). The other profiles keep `position` / `gesture` /
-calibrated modes unchanged. A saved calibration profile is NOT loaded in arm_mirror mode (it is a joint map, not a
-TCP calibration).
+`body.mode: arm_mirror`; the only other body teleop mode is `plane` (the default, see docs/PLANE_TELEOP.md). The
+legacy position / calibrated / gesture modes were removed (see docs/BODY_TELEOP.md).
 
 ## Kinematics (verified against assets/dev_arm/dev_arm_gripper.urdf)
 | joint | motion | driven by |

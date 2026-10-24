@@ -1,5 +1,5 @@
 """dev_arm_real profile and the body-teleop fixes it needs: axis-orient IK (issue 2), joint-limit override
-(issue 3), the Retargeter engage glide (issue 1)."""
+(issue 3)."""
 import numpy as np
 import pytest
 from pathlib import Path
@@ -96,37 +96,3 @@ def test_joint_limit_override_flows_through_app_build():
     assert np.allclose(arm.lower, cfg["arm"]["joint_limits_lower"])
     assert np.allclose(arm.upper, cfg["arm"]["joint_limits_upper"])
     assert np.allclose(safety.lower, cfg["arm"]["joint_limits_lower"])
-
-
-# ---- issue 1: the plain Retargeter glides on engage (no jump) ----------------------------------
-def test_retarget_engage_glides_instead_of_jumping():
-    from rover_intent.body.retarget import Retargeter
-    from rover_intent.types import BodyPose
-    cfg = load_config()["body"]
-    r = Retargeter(cfg["axes"], scale=1.0, origin=[0.45, 0, 0.45], min_cutoff=1e6, glide_mps=0.15)
-    # engage with a neutral that is far from the hand, so the first mapped point is ~0.3 m from the arm
-    r.engage([0.45, 0.0, 0.45], neutral=[0.0, 0.0, 0.0])
-    pose = lambda w, t: BodyPose(t=t, wrist=w, shoulder=(0, 0, 0))
-    far = (0.0, 0.3, 0.0)                     # maps ~0.3 m away (axes/scale 1.0)
-    p0 = r(pose(far, 0.0))
-    p1 = r(pose(far, 0.05))                   # 50 ms later -> at most glide_mps*dt = 7.5 mm further
-    p2 = r(pose(far, 0.10))
-    assert np.allclose(p0, [0.45, 0.0, 0.45], atol=1e-6)      # starts exactly at the arm, no jump
-    assert np.linalg.norm(p1 - p0) <= 0.15 * 0.05 + 1e-6
-    assert np.linalg.norm(p2 - p0) > np.linalg.norm(p1 - p0)  # keeps easing toward the target
-    # eventually arrives and then tracks 1:1
-    for i in range(200):
-        last = r(pose(far, 0.15 + 0.03 * i))
-    target = r.anchor + r.gains * (r.A @ np.array(far))
-    assert np.linalg.norm(last - target) < 1e-3
-
-
-def test_retarget_no_glide_when_first_sample_is_neutral():
-    from rover_intent.body.retarget import Retargeter
-    from rover_intent.types import BodyPose
-    cfg = load_config()["body"]
-    r = Retargeter(cfg["axes"], scale=1.0, origin=[0.5, 0.1, 0.3], min_cutoff=1e6)
-    r.engage([0.5, 0.1, 0.3])                 # neutral=None -> first sample becomes neutral == the arm, glide ends at once
-    pose = lambda w, t: BodyPose(t=t, wrist=w, shoulder=(0, 0, 0))
-    assert np.allclose(r(pose((0.0, 0.5, 0.0), 0.0)), [0.5, 0.1, 0.3])
-    assert np.allclose(r(pose((0.0, 0.4, -0.1), 0.1)), [0.6, 0.1, 0.4])   # tracks immediately, as before

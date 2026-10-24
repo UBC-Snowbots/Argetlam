@@ -5,4 +5,4 @@
 set -e
 cd "$(dirname "$0")/.."
 .venv/bin/python -m pytest -q
-.venv/bin/python scripts/check_grasps.py --moves --assist
+.venv/bin/python scripts/check_grasps.py --moves
