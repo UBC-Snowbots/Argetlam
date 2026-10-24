@@ -1,0 +1,44 @@
+camera:
+  K:
+  - - 554.2562584220408
+    - 0.0
+    - 320.0
+  - - 0.0
+    - 554.2562584220408
+    - 240.0
+  - - 0.0
+    - 0.0
+    - 1.0
+  dist:
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.0
+  rvec:
+  - 1.8445353365700763
+  - -1.1399855314505343
+  - 0.6558813562794241
+  tvec:
+  - -0.22360679774997896
+  - 0.3112249773830584
+  - 0.9568902828709855
+  width: 640
+  height: 480
+  frame: base
+  model: opencv_pinhole
+z_table: 0.0
+meta:
+  source: sim
+  arm: dev_arm
+  view: behind
+  hfov_deg: 60.0
+  eye:
+  - -0.5
+  - -0.5
+  - 0.75
+  target:
+  - 0.5
+  - 0.0
+  - 0.1
+  note: synthetic sim calibration; replace with a real ChArUco calibration

@@ -95,3 +95,18 @@ class GripToggle(BaseModel):
     kind: Literal["grip_toggle"] = "grip_toggle"
     t: float
     source: str = "clench"
+
+
+class CameraFrame(BaseModel):
+    """Laptop (table camera) -> VM: one JPEG frame for table-plane perception.
+
+    The JPEG is base64-encoded so the frame rides the same JSON transport as every other message
+    (UDP, or newline-JSON over the SSH tunnel). Detection + projection run on the VM GPU; the laptop
+    only captures and sends. `seq`/`t` are for latency and drop accounting like BodyPose."""
+    kind: Literal["camera_frame"] = "camera_frame"
+    t: float
+    jpeg_b64: str
+    width: int = 0
+    height: int = 0
+    seq: int = 0
+    source: str = "table_cam"

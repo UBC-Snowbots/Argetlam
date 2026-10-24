@@ -17,7 +17,11 @@ dependencies = [
 laptop = ["mediapipe>=0.10", "opencv-python>=4.9", "faster-whisper>=1.0", "sounddevice>=0.4"]
 # EEG motor-imagery training + live decoding
 eeg = ["mne>=1.7", "moabb>=1.1", "pyriemann>=0.6", "scikit-learn>=1.4", "brainflow>=5.12"]
-dev = ["pytest>=8"]
+# single-RGB-camera table-plane perception (VM side): calibration (opencv aruco) + open-vocab
+# detector (torch + transformers). The control host .venv needs only opencv for calibration; the
+# detector runs on a torch python (e.g. the Isaac env) or install torch+transformers here.
+vision = ["opencv-contrib-python-headless>=4.9", "scipy>=1.10", "torch>=2.2", "transformers>=4.40", "pillow>=10"]
+dev = ["pytest>=8", "opencv-contrib-python-headless>=4.9"]
 
 [build-system]
 requires = ["hatchling"]

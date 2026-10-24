@@ -58,3 +58,15 @@ eeg:
 assist:
   radius: 0.08
   gain: 0.6
+
+perception:                 # where object positions come from. Default sim = unchanged behaviour.
+  source: sim               # sim (Isaac ground truth / config) | camera (single RGB webcam, table-plane)
+  calib: configs/calib/table_cam.yaml   # saved camera intrinsics + base-frame extrinsics + table z
+  min_conf: 0.25            # reject detections below this score
+  method: refine            # refine (silhouette-fit, default) | pushback (fast, oblique only)
+  loc_noise_px: 2.0         # assumed detector box localisation noise, for the per-object error estimate
+  detector:
+    backend: owlv2          # owlv2 | gdino (needs the `vision` extra / a torch python; runs on the GPU)
+    model: null             # null -> backend default (owlv2: google/owlv2-base-patch16-ensemble)
+    device: cuda
+    dtype: float32

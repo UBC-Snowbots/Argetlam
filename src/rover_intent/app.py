@@ -35,7 +35,8 @@ from .body.calib_session import CalibratedMapper, CalibrationSession
 from .body.calibration import Profile
 from .control.presets import HOME_HW, RETURN, at_goal, plan_preset, preset_names, request_hw_home
 from .session import SessionRecorder
-from .types import Action, ArmPreset, BodyPose, ClutchMsg, EEGState, GripToggle, Intent, Query, Utterance
+from .types import (Action, ArmPreset, BodyPose, CameraFrame, ClutchMsg, EEGState, GripToggle, Intent, Query,
+                    Utterance)
 
 log = logging.getLogger("rover_intent")
 ROOT = Path(__file__).resolve().parents[2]
@@ -87,6 +88,22 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
     log.info("backend=%s nemotron=%s objects=%s", backend, "online" if parser.online else "OFFLINE fallback",
              scene.names())
     descriptions = {n: o.get("desc", "") for n, o in cfg["scene"].items()}
+    # Perception source: "sim" (Isaac ground truth / config) keeps the existing behaviour. "camera"
+    # fills object positions from a single RGB webcam via the table-plane path (perception/). The
+    # detector runs on the GPU off the control loop; needs the `vision` extra / a torch python.
+    perc_source = cfg.get("perception", {}).get("source", "sim")
+    perception, vpool, cam_future, cam_seq = None, None, None, -1
+    if perc_source == "camera":
+        try:
+            from .perception.source import build_from_config
+            perception = build_from_config(cfg, with_detector=True)
+            vpool = ThreadPoolExecutor(max_workers=1)
+            log.info("perception: CAMERA (detector=%s, objects from webcam); calib %s",
+                     cfg["perception"].get("detector", {}).get("backend", "owlv2"),
+                     cfg["perception"].get("calib"))
+        except Exception as e:  # missing calib / torch: do not crash the control loop, fall back to sim
+            log.warning("perception: camera source requested but unavailable (%s); falling back to sim", e)
+            perc_source = "camera_unavailable"
     home = np.array(cfg["arm"]["home"], float)
     grip_from_hand = cfg["body"].get("grip_from_hand", False)
     teleop_orient = cfg["arm"].get("teleop_orient", "full")  # "axis" frees the wrist roll while teleoperating (issue 2)
@@ -323,6 +340,18 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
                 log.info("preset %s%s: %s", msg.name, " (confirmed)" if msg.confirm else "", why)
                 rx.reply(addr, {"kind": "reply", "text": f"preset {msg.name}", "ok": ok, "say": why,
                                 "mode": arbiter.mode.value})
+            elif isinstance(msg, CameraFrame):
+                # table-camera frame: decode (PIL, no cv2 needed) and detect off the control loop.
+                if perception is not None and (cam_future is None or cam_future.done()) and msg.seq != cam_seq:
+                    cam_seq = msg.seq
+                    try:
+                        import base64
+                        import io
+                        from PIL import Image
+                        rgb = np.asarray(Image.open(io.BytesIO(base64.b64decode(msg.jpeg_b64))).convert("RGB"))
+                        cam_future = vpool.submit(perception.detect, rgb)
+                    except Exception as e:
+                        log.warning("camera frame decode failed: %s", e)
             elif isinstance(msg, GripToggle):
                 arbiter.on_grip_toggle(arm.fk(robot.read_joints())[:3, 3])
                 log.info("grip toggle (%s) in %s: gripper=%.0f", msg.source, arbiter.mode.value, arbiter.gripper)
@@ -354,7 +383,17 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
                 intent = Intent(action=Action.unknown, say="Language service error.")
             finish(text, addr, intent, time.time() - t_sub)
         q = robot.read_joints()
-        if hasattr(robot, "objects"):
+        if perception is not None:
+            # camera perception: when a detection completes, move the scene objects to the detected
+            # table positions (names/positions the planner sees now come from the webcam, not sim).
+            if cam_future is not None and cam_future.done():
+                try:
+                    for d in cam_future.result():
+                        scene.update_from_bottom(d.name, d.xyz)
+                except Exception as e:
+                    log.warning("perception detect failed: %s", e)
+                cam_future = None
+        elif hasattr(robot, "objects"):
             for name, bottom in robot.objects.items():
                 scene.update_from_bottom(name, bottom)
         tcp = arm.fk(q)[:3, 3]
