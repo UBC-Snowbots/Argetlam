@@ -36,9 +36,13 @@ arm-link watch
 # 4. home the arm so the open-loop creep is gone (confirms the e-stop first)
 arm-link home
 
-# 5. bring the sim stack up (or restart it if it is stale). Isaac takes ~30-60 s to appear on the Moonlight screen.
+# 5. bring the stack up. Default for real-arm work: NO Isaac (mock backend, no GPU), so Thoth/other GPU jobs keep
+#    the shared GPU lock and nothing waits. The real arm follows the app the same way; the HUD (skeleton, buttons,
+#    camera panel) still works; you only lose the 3D Isaac view on Moonlight and sim grasp physics.
 rover-stack status
-rover-stack restart        # or: rover-stack on --arm dev_arm_real
+rover-stack restart --no-isaac --arm dev_arm_real
+#    Want the 3D view? Check the GPU is free first (tsp; nvidia-smi), then: rover-stack restart --arm dev_arm_real
+#    Isaac launches OUTSIDE the tsp queue but still takes the GPU lock (gpu-run), so it waits if a GPU job runs.
 
 # 6. put the SIM where the real arm is (the real arm homed to 'base'); this does NOT move the real arm
 rover-follow align         # moves the sim to 'base' and waits until it settles
