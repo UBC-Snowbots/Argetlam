@@ -108,6 +108,20 @@ _REL = {"beside": "beside", "next to": "beside", "left of": "left_of", "right of
         "in front of": "in_front_of", "behind": "behind", "on": "on", "onto": "on", "into": "into", "in": "into"}
 
 
+def quick_pose(text: str, objects: list[str], presets: list[str] | None = None) -> Intent | None:
+    """Instant local match for SHORT named-pose commands ("go to the ready pose", "stow it", "go back"), so they skip
+    the 2-4 s cloud call. Anything longer, naming a scene object, or chaining steps ("then") returns None and goes
+    to Nemotron as before. Returns a preset Intent or None."""
+    t = text.lower().strip()
+    words = re.findall(r"[a-z']+", t)
+    if not words or len(words) > 6 or "then" in words:
+        return None
+    if any(re.search(rf"\b{re.escape(o.lower())}\b", t) for o in objects):
+        return None
+    intent = fallback_parse(text, [], presets)
+    return intent if intent.action == Action.preset else None
+
+
 def fallback_parse(text: str, objects: list[str], presets: list[str] | None = None) -> Intent:
     t = text.lower()
     found = sorted((m.start(), o) for o in objects for m in [re.search(rf"\b{re.escape(o)}\b", t)] if m)

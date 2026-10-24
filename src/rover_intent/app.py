@@ -28,7 +28,7 @@ from .planner.nemotron import IntentParser, urgent_stop
 from .planner.scene import Scene
 from .robot.backends import IsaacArm, MockArm, RealArm
 from .transport.udp import Receiver
-from .planner.nemotron import fallback_parse, is_confirm
+from .planner.nemotron import fallback_parse, is_confirm, quick_pose
 from .body.clutch import Clutch
 from .config import load_config
 from .body.calib_session import CalibratedMapper, CalibrationSession
@@ -117,6 +117,7 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
     conf = cfg.get("confirm", {}) or {}
     confirm_window_s = float(conf.get("window_s", 5.0))
     confirm_skills = bool(conf.get("skills", False))   # also gate the autonomous pick/place/move voice skills
+    confirm_presets = bool(conf.get("presets", True))  # named poses ask "say yes" first (false: move at once)
     confirm_pending = None   # a voice move waiting for a spoken yes: {"kind", ..., "deadline", "addr", "say"}
     lo_ws, hi_ws = cfg["safety"]["workspace_min"], cfg["safety"]["workspace_max"]
     sim = cfg.get("sim", {})
@@ -228,6 +229,13 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
             pending.clear()
         # a named pose (voice) or the autonomous skills (when confirm.skills is on): ask first, do not move yet.
         want = RETURN if intent.action == Action.home else intent.preset if intent.action == Action.preset else None
+        if want is not None and not confirm_presets:   # "just push it" (dev_arm_real): move now, no spoken yes
+            ok, why = do_preset(want, time.time())
+            log.info("voice preset %s (no confirm): %s", want, why)
+            rx.reply(addr, {"kind": "reply", "text": text, "latency_s": round(latency, 2), "ok": ok,
+                            "intent": intent.model_dump(mode="json", exclude_none=True),
+                            "say": why, "mode": arbiter.mode.value})
+            return
         if want is not None:
             label = "the start pose" if want == RETURN else want
             say = f"Moving to {label}. Say yes to confirm."
@@ -330,7 +338,10 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
                         rx.reply(confirm_pending["addr"], {"kind": "reply", "text": "confirm", "ok": False,
                                                            "say": "Cancelled.", "mode": arbiter.mode.value})
                         confirm_pending = None
-                    if msg.offline:
+                    quick = quick_pose(msg.text, scene.names(), list(presets))
+                    if quick is not None:   # short "go to ready" / "stow it": parsed here in ms, no cloud round trip
+                        finish(msg.text, addr, quick, 0.0)
+                    elif msg.offline:
                         finish(msg.text, addr, fallback_parse(msg.text, scene.names(), list(presets)), 0.0)
                     else:  # Nemotron takes seconds: run it off the control loop
                         pending.append((msg.text, addr, time.time(),
