@@ -37,6 +37,7 @@ Built by UBC Rover for the **Nebius × NVIDIA Global AI Hackathon** (Physical AI
 - [Results so far](#results-so-far)
 - [Known limitations](#known-limitations)
 - [Roadmap](#roadmap)
+- [Credits](#credits)
 - [License](#license)
 
 ---
@@ -568,6 +569,14 @@ is simulation, scripted input or offline data.
 3. Context-gated EEG (listen only near an object) and per-user calibration.
 4. Perception for the real scene (ArUco / detection) to replace sim ground truth.
 5. Demo video and submission.
+
+---
+
+## Credits
+
+Made by **Pranav Rajesh Krishnan**, with love from **UBC Rover**.
+
+Special thanks to **Rowan** and the incredible **arm and extended hardware team at UBC Rover**.
 
 ---
 
