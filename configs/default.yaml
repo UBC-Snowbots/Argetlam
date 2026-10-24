@@ -22,8 +22,9 @@ body:
   profile: data/profiles/{arm}_pranav.json   # calibration profile (created by C / "calibrate"); used when present
   mode: position        # used until a calibration profile exists. position = wrist-rel-shoulder -> gripper offset;
                         # gesture = swing/raise/reach -> yaw/height/reach (body/mirror.py);
-                        # arm_mirror = full-arm joint mirroring, no IK (body/arm_mirror.py; dev_arm_real default).
-                        # A saved calibration profile is NOT loaded in arm_mirror mode (it is a joint, not a TCP, map).
+                        # arm_mirror = full-arm joint mirroring, no IK (body/arm_mirror.py);
+                        # plane = image-plane TCP teleop, depth ignored (body/plane.py; dev_arm_real default).
+                        # A saved calibration profile is NOT loaded in arm_mirror / plane mode (not TCP maps).
   clutch: {calib_s: 2.0, still_m: 0.03, palm_s: 1.0, raise_m: 0.05}  # F / open palm held up 1 s / left hand up
   gesture_gains: [2.5, 1.0, 0.6]   # rad yaw per m sideways, m height per m up, m reach per unit elbow extension
   # MediaPipe world axes (x image-right, y down, z toward camera = smaller) -> arm base (x fwd, y left, z up).
@@ -47,6 +48,20 @@ arm_mirror:
   j1_hold_vert_deg: 20.0     # hold J1 (base yaw) when the upper arm is within this of vertical (azimuth undefined)
   ramp_s: 2.0                # on engage, ease from the current pose to the mirrored pose over this long (no jump)
   conf_gate: true            # skip a pose that is not visible (the arm holds)
+
+# Image-plane TCP teleop (body.mode = plane). Defaults here; dev_arm_real.yaml tunes gain/sign. Every control is
+# read from IMAGE-plane landmarks (x, y) only, normalized by shoulder width, so depth (MediaPipe z, the noisy axis)
+# is never used. target = tcp0 + ramp * gain * (hand - hand0). gains are metres of TCP per shoulder-width of hand
+# motion. See src/rover_intent/body/plane.py and docs/PLANE_TELEOP.md.
+plane:
+  side: right                # the operator's CONTROL hand (lateral + vertical); the other hand drives reach
+  gain:    {lateral: 0.20, vertical: 0.15, reach: 0.15}  # m of TCP per shoulder-width (y, z, x)
+  sign:    {lateral: 1.0, vertical: 1.0, reach: 1.0}     # flip one if a control drives the wrong way (or press M)
+  one_euro: {min_cutoff: 1.0, beta: 0.05}   # on the NORMALIZED hand coords
+  deadband: 0.015            # shoulder-widths: hold a coord until it drifts this far (cuts micro-jitter when still)
+  ramp_s: 2.0                # on engage, ease the gain in from 0 over this long (no jump)
+  drop_below_hip_s: 0.7      # control wrist below the hip line this long -> "right arm dropped" -> on_drop preset
+  conf_gate: true            # skip a pose that is not visible (the TCP holds)
 
 nemotron:
   base_url: https://api.tokenfactory.nebius.com/v1/

@@ -15,6 +15,7 @@ from test_core import _synthetic_arm
 
 def _run(port, lose):
     cfg = load_config(arm="dev_arm_real")
+    cfg["body"]["mode"] = "arm_mirror"   # plane is the dev_arm_real default now; this on_drop test drives arm_mirror
     cfg["net"].update(listen_port=port, hud_port=port + 50, bubble_port=port + 51)
     cfg["body"]["clutch"] = {"calib_s": 0.5, "still_m": 0.03, "palm_s": 1.0, "raise_m": 0.05}
     cfg["nemotron"]["api_key_env"] = "NO_SUCH_KEY_FOR_TESTS"

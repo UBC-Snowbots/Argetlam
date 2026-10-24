@@ -60,9 +60,28 @@ confirm:
                  # bounded to the measured joint limits + the workspace box, so no spoken yes is needed either
 
 body:
-  mode: arm_mirror   # full-arm joint mirroring, no IK (body/arm_mirror.py). The old position/calibrated modes stay
-                     # available on the other profiles. A saved calibration profile is NOT loaded in this mode.
+  mode: plane        # image-plane TCP teleop, depth ignored (body/plane.py). Switch to arm_mirror / position /
+                     # gesture to pick another body mode. A saved calibration profile is NOT loaded in plane or
+                     # arm_mirror mode (they are not TCP calibrations).
   clutch: {calib_s: 2.0, still_m: 0.03, palm_s: 1.0, raise_m: 0.05}
+
+# Plane teleop (body.mode = plane). Every control is PARALLEL to the camera image plane; MediaPipe depth (z) is
+# never read, because on the first real run depth was the noisy axis (~28 mm std still vs ~3 mm in-plane). RIGHT hand
+# horizontal -> robot y (lateral), RIGHT hand vertical -> robot z, LEFT hand height -> robot x (reach). Relative /
+# clutched (captured on engage). gains are metres of TCP per shoulder-width of hand motion, picked so a comfortable
+# human range covers the reachable box: lateral +/-1.0 sw -> +/-0.20 m (covers y -0.22..0.18 around home -0.027);
+# vertical +/-0.9 sw -> +/-0.135 m (z 0.38..0.60 around 0.52); reach raise +0.6 / lower -0.5 sw -> +0.09/-0.075 m
+# (x 0.47..0.64 around 0.545). Flip a sign if a control drives the wrong way (or press M for a mirrored webcam).
+# See docs/PLANE_TELEOP.md.
+plane:
+  side: right                 # the operator's CONTROL hand (lateral + vertical); the other hand drives reach
+  gain:    {lateral: 0.20, vertical: 0.15, reach: 0.15}
+  sign:    {lateral: 1.0, vertical: 1.0, reach: 1.0}
+  one_euro: {min_cutoff: 1.0, beta: 0.05}
+  deadband: 0.015             # shoulder-widths
+  ramp_s: 2.0
+  drop_below_hip_s: 0.7       # control wrist below the hip line this long -> "right arm dropped" -> base
+  conf_gate: true
 
 # Full-arm mirror mapping for the real dev_arm. neutral = the raw arm angle (rad) that maps to the base pose
 # (home). Defaults are Pranav's 2026-10-23 session medians (camera in FRONT). Tune per docs/ARM_MIRROR.md; with the

@@ -21,6 +21,7 @@ import yaml
 
 from .body.mirror import GestureMirror
 from .body.arm_mirror import ArmMirror
+from .body.plane import PlaneMapper, DropWatch, plane_coords
 from .body.retarget import Retargeter
 from .control.arbiter import Arbiter, Mode
 from .control.kinematics import ArmModel
@@ -81,6 +82,9 @@ def build(cfg: dict, backend: str):
                                  min_cutoff=oe.get("min_cutoff", 1.0), beta=oe.get("beta", 0.5))
     elif b.get("mode", "position") == "arm_mirror":   # full-arm joint mirroring, no IK (body/arm_mirror.py)
         retarget = ArmMirror(arm, home, a["max_vel"], cfg.get("arm_mirror"))
+    elif b.get("mode", "position") == "plane":   # image-plane TCP teleop, depth ignored, IK path (body/plane.py)
+        retarget = PlaneMapper(arm, home, cfg.get("plane"), cfg["safety"]["workspace_min"],
+                               cfg["safety"]["workspace_max"])
     n = cfg["nemotron"]
     parser = IntentParser(n["model"], n["base_url"], n["api_key_env"])
     return arm, safety, robot, scene, arbiter, retarget, parser
@@ -98,6 +102,9 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
     grip_from_hand = cfg["body"].get("grip_from_hand", False)
     teleop_orient = cfg["arm"].get("teleop_orient", "full")  # "axis" frees the wrist roll while teleoperating (issue 2)
     arm_mirror_on = isinstance(retarget, ArmMirror)   # full-arm joint mirroring: joints straight in, no IK
+    plane_on = isinstance(retarget, PlaneMapper)      # image-plane TCP teleop (IK path); left-hand clutch disabled
+    plain_gripper = arm_mirror_on or plane_on         # teleop modes: plain open/close gripper, no AUTO grab-assist
+    plane_drop = DropWatch(float((cfg.get("plane") or {}).get("drop_below_hip_s", 0.7)))
     body_target, body_t = None, 0.0
     body_joint_target = None   # arm_mirror: the 6-vector joint target (instead of body_target's TCP)
     q_cmd = robot.read_joints()  # commanded trajectory state (the drives track it; see WINDUP)
@@ -114,9 +121,11 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
     on_drop = cfg["arm"].get("on_drop")  # preset to go to when the body drops out of view (None = freeze)
     if on_drop and on_drop not in presets:
         raise ValueError(f"arm.on_drop {on_drop!r} is not one of the arm's presets {list(presets)}")
-    # which clutch releases send the arm to the on_drop preset. arm_mirror adds "disable" (F / left hand lowered):
-    # Pranav: "when I drop my arm return it to base". Voice stop/STOP release with reason None -> freeze (unchanged).
-    drop_reasons = DROP_REASONS + (("left hand lowered", "disabled") if arm_mirror_on and on_drop else ())
+    # which clutch releases send the arm to the on_drop preset. arm_mirror adds "disable" (F / left hand lowered),
+    # plane adds "right arm dropped" (control wrist held below the hip) + "disable" (F off): Pranav "when I drop my
+    # arm return it to base". Voice stop/STOP release with reason None -> freeze (unchanged).
+    drop_reasons = DROP_REASONS + (("left hand lowered", "disabled") if arm_mirror_on and on_drop else ()) \
+        + (("right arm dropped", "disabled") if plane_on and on_drop else ())
     real_arm = cfg.get("real_arm", {}) or {}
     joint_goal, goal_name, hw_busy_until = None, None, 0.0  # button-panel preset move / real-arm homing window
     # "mirror real" state: the sim arm's joint targets come straight from the PHYSICAL arm (real_to_sim -> real_joints),
@@ -140,13 +149,16 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
     profile_path = ROOT / cfg["body"].get("profile", "data/profiles/{arm}_pranav.json").format(arm=cfg["arm_profile"])
     session = CalibrationSession(lo_ws, hi_ws, profile_path, cfg["arm_profile"], default_cam)
     bubble = (cfg["net"].get("bubble_host", "127.0.0.1"), cfg["net"].get("bubble_port", 47101))
-    if profile_path.exists() and not arm_mirror_on:   # arm_mirror is a joint map, not a TCP calibration
+    if profile_path.exists() and not arm_mirror_on and not plane_on:   # these are joint/image maps, not a TCP calib
         prof = Profile.load(profile_path)
         retarget = CalibratedMapper(prof, lo_ws, hi_ws, camera)
         log.info("calibration profile loaded: %s (%s, residual %.1f deg, verify %s)", profile_path.name, prof.created,
                  prof.residual_deg, prof.verify)
     elif arm_mirror_on:
         log.info("body mode: arm_mirror (full-arm joint mirroring, no IK; side=%s)", retarget.side)
+    elif plane_on:
+        log.info("body mode: plane (image-plane TCP teleop, depth ignored, IK orient=%s; control hand=%s)",
+                 teleop_orient, retarget.side)
     else:
         log.info("no calibration profile yet (%s): using %s mode until you calibrate (C)", profile_path.name,
                  cfg["body"].get("mode"))
@@ -451,7 +463,16 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
                                        and msg.wrist_other[1] < msg.shoulder_other[1] - clutch.raise_m)
                     if session.state in ("positioning", "capturing"):
                         palm_up_open = left_raised = False   # calibration poses (hand up, open palm) must not engage
+                    if plane_on:
+                        left_raised = False   # plane mode drives REACH from the left hand, so it can't be the clutch
                     on_clutch(clutch.update(rel, palm_up_open, left_raised, t0))
+                    if plane_on and clutch.state == "following":   # control wrist held below the hip line -> stow
+                        pc = plane_coords(msg, retarget.side) if msg.visible else None
+                        if pc is not None and plane_drop.update(pc["below_hip"], t0):
+                            plane_drop.reset()
+                            on_clutch(clutch._release("right arm dropped"))
+                    else:
+                        plane_drop.reset()
                     if msg.visible and clutch.state == "following" and arbiter.mode == Mode.FOLLOW:
                         tgt = retarget(msg)
                         if tgt is not None and arm_mirror_on:
@@ -459,8 +480,8 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
                         elif tgt is not None:
                             body_target, body_t, last_target = tgt, t0, tgt
                         if grip_from_hand and msg.hand_open is not None:
-                            # arm_mirror keeps the gripper a plain open/close (tcp=None -> no grab-assist AUTO plan)
-                            arbiter.on_hand(msg.hand_open, t0, None if arm_mirror_on else arm.fk(robot.read_joints())[:3, 3])
+                            # teleop modes keep the gripper a plain open/close (tcp=None -> no grab-assist AUTO plan)
+                            arbiter.on_hand(msg.hand_open, t0, None if plain_gripper else arm.fk(robot.read_joints())[:3, 3])
                     if session.active:
                         handle_session(session.update(t0, msg, bool(msg.in_position),
                                                       tcp_meas=arm.fk(robot.read_joints())[:3, 3],
@@ -475,8 +496,9 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
                 handle_session(session.start(t0, redo_axis=bad))
             elif isinstance(msg, ClutchMsg):
                 ev = clutch.toggle(t0)
-                if arm_mirror_on and ev is not None and ev.kind == "released" and clutch.release_reason is None:
-                    clutch.release_reason = "disabled"   # deliberate F toggle off in arm_mirror -> return to base
+                if (arm_mirror_on or plane_on) and ev is not None and ev.kind == "released" \
+                        and clutch.release_reason is None:
+                    clutch.release_reason = "disabled"   # deliberate F toggle off in a teleop mode -> return to base
                 on_clutch(ev)
                 rx.reply(addr, {"kind": "reply", "text": "clutch", "say": f"clutch: {clutch.state}",
                                 "mode": arbiter.mode.value})
@@ -541,7 +563,7 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
                 rx.reply(addr, {"kind": "reply", "text": f"preset {msg.name}", "ok": ok, "say": why,
                                 "mode": arbiter.mode.value})
             elif isinstance(msg, GripToggle):
-                arbiter.on_grip_toggle(None if arm_mirror_on else arm.fk(robot.read_joints())[:3, 3])
+                arbiter.on_grip_toggle(None if plain_gripper else arm.fk(robot.read_joints())[:3, 3])
                 log.info("grip toggle (%s) in %s: gripper=%.0f", msg.source, arbiter.mode.value, arbiter.gripper)
             elif isinstance(msg, RealJoints):
                 # one sample of the PHYSICAL arm (real_to_sim). Stamp it with the VM receive time (the shared clock),

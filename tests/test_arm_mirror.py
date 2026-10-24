@@ -143,7 +143,7 @@ def test_rate_limit_respected():
 class _App:
     def __init__(self, port, seconds):
         cfg = load_config(arm="dev_arm_real")
-        assert cfg["body"]["mode"] == "arm_mirror"
+        cfg["body"]["mode"] = "arm_mirror"   # plane is the dev_arm_real default now; this test exercises arm_mirror
         cfg["net"].update(listen_port=port, hud_port=port + 50, bubble_port=port + 51)
         cfg["body"]["clutch"] = {"calib_s": 0.5, "still_m": 0.05, "palm_s": 1.0, "raise_m": 0.05}
         cfg["nemotron"]["api_key_env"] = "NO_SUCH_KEY_FOR_TESTS"
