@@ -149,6 +149,7 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
     # moves off it). STOP does not clear this: a new command after STOP still sees the history.
     motion_history = deque(maxlen=5)   # each: {"steps": [step, ...]} (preset steps carry their from_pose)
     current_pose = RETURN              # the sim starts at arm.home, which is the RETURN pose
+    bubble = (cfg["net"].get("bubble_host", "127.0.0.1"), cfg["net"].get("bubble_port", 47101))   # VM voice bubble (say replies)
     if arm_mirror_on:
         log.info("body mode: arm_mirror (full-arm joint mirroring, no IK; side=%s)", retarget.side)
     else:
