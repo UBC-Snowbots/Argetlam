@@ -67,21 +67,32 @@ body:
 
 # Plane teleop (body.mode = plane). Every control is PARALLEL to the camera image plane; MediaPipe depth (z) is
 # never read, because on the first real run depth was the noisy axis (~28 mm std still vs ~3 mm in-plane). RIGHT hand
-# horizontal -> robot y (lateral), RIGHT hand vertical -> robot z, LEFT hand height -> robot x (reach). Relative /
-# clutched (captured on engage). gains are metres of TCP per shoulder-width of hand motion, picked so a comfortable
-# human range covers the reachable box: lateral +/-1.0 sw -> +/-0.20 m (covers y -0.22..0.18 around home -0.027);
-# vertical +/-0.9 sw -> +/-0.135 m (z 0.38..0.60 around 0.52); reach raise +0.6 / lower -0.5 sw -> +0.09/-0.075 m
-# (x 0.47..0.64 around 0.545). Flip a sign if a control drives the wrong way (or press M for a mirrored webcam).
-# See docs/PLANE_TELEOP.md.
+# horizontal -> robot y (lateral, POSITION), RIGHT hand vertical -> robot z (vertical, POSITION), LEFT hand height ->
+# robot x (reach, a JOYSTICK RATE; see the plane table). Lateral/vertical are relative / clutched (captured on
+# engage); gains are metres of TCP per shoulder-width, picked so a comfortable human range covers the reachable box:
+# lateral +/-1.0 sw -> +/-0.20 m (covers y -0.22..0.18 around home -0.027); vertical +/-0.9 sw -> +/-0.135 m
+# (z 0.38..0.60 around 0.52). Reach is a rate: hold the left hand near shoulder height to creep forward (to x 0.70)
+# and near the lower chest to creep back (to x 0.47); mid-chest holds. Flip a sign if a control drives the wrong way
+# (or press M for a mirrored webcam). See docs/PLANE_TELEOP.md.
 plane:
   side: right                 # the operator's CONTROL hand (lateral + vertical); the other hand drives reach
-  gain:    {lateral: 0.20, vertical: 0.15, reach: 0.15}
+  gain:    {lateral: 0.20, vertical: 0.15, reach: 0.15}   # reach gain is only used in reach_mode: position
   sign:    {lateral: 1.0, vertical: 1.0, reach: 1.0}
   one_euro: {min_cutoff: 1.0, beta: 0.05}
   deadband: 0.015             # shoulder-widths
   ramp_s: 2.0
   drop_below_hip_s: 0.7       # control wrist below the hip line this long -> "right arm dropped" -> base
   conf_gate: true
+  # Reach is a JOYSTICK RATE from the LEFT-hand height (2026-10-24, option A): the live test showed the old
+  # height->x POSITION map gave almost no forward room and was engage-relative (left hand hanging low at engage ->
+  # no room to go back). Rate reach reads the left-wrist height against the operator's own body (image plane only):
+  # ABOVE forward_frac of the shoulder->hip torso span (around shoulder height) -> reach moves forward; BELOW
+  # back_frac (around lower chest / mid torso) -> back; in between = dead zone, reach holds. Speed scales with how
+  # far past the threshold the hand is, up to max_speed, integrated onto tcp0's x and clamped to the box (the rate
+  # just stops at a wall, amber ghost, and reversing frees it at once - no wind-up). Hold the LEFT hand around
+  # mid-chest to hold reach. reach_mode: position restores the old height->x position map.
+  reach_mode: rate
+  reach_rate: {forward_frac: 0.10, back_frac: 0.45, max_speed: 0.04, full_scale: 0.5, hysteresis: 0.08}
 
 # Full-arm mirror mapping for the real dev_arm. neutral = the raw arm angle (rad) that maps to the base pose
 # (home). Defaults are Pranav's 2026-10-23 session medians (camera in FRONT). Tune per docs/ARM_MIRROR.md; with the
@@ -102,10 +113,14 @@ arm_mirror:
   conf_gate: true
 
 safety:
-  # near-home box carved from the real reachable shell (axis-orient IK, real joint limits): contains the home TCP
+  # near-home box carved from the real reachable shell (frozen-wrist IK, real joint limits): contains the home TCP
   # (0.545, -0.027, 0.520); most of the interior is reachable, edges clamp (the ghost already cues amber there).
+  # x max widened 0.64 -> 0.70 (2026-10-24) for more FORWARD reach room under the new rate-reach control: the frozen
+  # IK reaches x to ~0.75 across the whole y,z face (sweep 2026-10-24); 0.70 keeps 5 cm margin and the box stays
+  # 95.2% reachable on a 5^3 grid / 96.5% on 7^3 (worst miss 72 mm, unchanged, at a y/z corner, not the x extreme).
+  # x min kept at 0.47 (the back edge is already near the reachable limit). Forward room from home: 0.095 -> 0.155 m.
   workspace_min: [0.47, -0.22, 0.38]
-  workspace_max: [0.64, 0.18, 0.60]
+  workspace_max: [0.70, 0.18, 0.60]
 
 table:
   top: 0.0
