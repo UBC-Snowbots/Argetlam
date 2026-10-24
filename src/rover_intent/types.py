@@ -14,7 +14,10 @@ class Action(str, Enum):
     grasp = "grasp"        # close the gripper where it is
     release = "release"    # open the gripper where it is
     home = "home"
-    preset = "preset"      # move to a named joint-space pose from the arm profile (presets.py); needs confirm
+    preset = "preset"      # move to a named joint-space pose from the arm profile (presets.py)
+    jog = "jog"            # Cartesian nudge: move the TCP a small distance in a base-frame direction
+    joint_jog = "joint_jog"  # move one named joint by a small angle
+    speed = "speed"        # scale the velocity cap for voice moves (slower/faster/normal)
     stop = "stop"
     follow = "follow"      # hand control back to body mirroring
     reset = "reset"        # arm home, gripper open, objects back to their start poses (sim)
@@ -29,6 +32,13 @@ class Intent(BaseModel):
     relation: Optional[Literal["beside", "left_of", "right_of", "in_front_of", "behind", "on", "into"]] = None
     reference: Optional[str] = Field(None, description="reference object for the relation, e.g. 'bottle'")
     preset: Optional[str] = Field(None, description="named pose for action 'preset' (e.g. 'base', 'ready', 'return')")
+    direction: Optional[Literal["left", "right", "up", "down", "forward", "back", "in", "out",
+                                "clockwise", "counterclockwise"]] = Field(
+        None, description="direction for action 'jog' (Cartesian) or 'joint_jog'")
+    distance_cm: Optional[float] = Field(None, description="distance in cm for a Cartesian 'jog' (clamped to <= 15)")
+    joint: Optional[str] = Field(None, description="joint for 'joint_jog': base/shoulder/elbow/forearm/wrist/tool")
+    angle_deg: Optional[float] = Field(None, description="angle in degrees for 'joint_jog' (clamped to <= 45)")
+    speed: Optional[Literal["slower", "faster", "normal"]] = Field(None, description="speed change for action 'speed'")
     say: str = Field("", description="short spoken confirmation for the user")
 
 
