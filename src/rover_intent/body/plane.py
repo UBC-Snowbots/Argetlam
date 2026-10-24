@@ -8,8 +8,12 @@ midpoint as the origin, so the mapping is independent of how far the operator st
 Mapping (relative / clutched; the hand positions and the current TCP are captured on engage so there is no jump):
     robot y (lateral)  <- RIGHT hand horizontal   hand to the operator's RIGHT -> gripper to their right (robot -y)
     robot z (vertical) <- RIGHT hand vertical      raise -> up
-    robot x (reach)    <- LEFT hand height         raise -> forward / away from the base, lower -> back
-    target = tcp0 + ramp * gain * (hand_now - hand0)      (gain in metres per shoulder-width)
+    robot x (reach)    <- LEFT hand height, as a JOYSTICK RATE (reach_mode "rate", the dev_arm_real default): the
+                          hand ABOVE ~shoulder height drives reach forward, BELOW ~mid torso drives it back, in
+                          between holds; speed scales with how far past the (body-absolute) threshold the hand is,
+                          up to a max, integrated onto tcp0's x and clamped to the box (no wind-up at the wall).
+                          reach_mode "position" keeps the old height->x position map (raise -> forward, lower -> back).
+    lateral/vertical:  target = tcp0 + ramp * gain * (hand_now - hand0)      (gain in metres per shoulder-width)
 then a One-Euro filter on the normalized hand coordinates, a small deadband, a 2 s engage ramp, and the SafetyLayer
 workspace box (targets outside the box are clamped and `.clipped` is flagged, so the ghost shows amber). The clamped
 target still runs through the normal IK path in the app (orient from the profile's teleop_orient).
@@ -40,7 +44,28 @@ DEFAULTS = {
     "ramp_s": 2.0,                                    # ease the gain in from 0 over this long on engage (no jump)
     "drop_below_hip_s": 0.7,                          # right wrist below the hip line this long -> "right arm dropped"
     "conf_gate": True,                                # skip a pose that is not visible (the TCP holds)
+    # reach_mode: "rate" = JOYSTICK reach from the LEFT-hand height (default on dev_arm_real); "position" = the old
+    # height->x position map (reach = tcp0 + gain * height-delta). Rate reach fixes the live finding that height->x
+    # as a position map gave almost no forward room and was engage-relative (docs/PLANE_TELEOP.md 2026-10-23).
+    "reach_mode": "rate",
+    # Joystick reach thresholds, ABSOLUTE to the operator's own body (image plane only, never engage-relative). The
+    # left-wrist height is read in shoulder-widths above the shoulder midpoint; the shoulder (0) -> hip-midpoint line
+    # defines the torso, and the two thresholds are fractions of that torso span measured DOWN from the shoulders:
+    #   reach_up ABOVE the forward threshold (around shoulder height)       -> reach moves FORWARD, speed scales
+    #   reach_up BELOW the back threshold    (around lower chest/mid torso) -> reach moves BACK
+    #   in between                                                          -> dead zone, reach HOLDS
+    # Speed grows linearly past a threshold and saturates at max_speed once full_scale shoulder-widths past it. A
+    # little hysteresis stops chatter at a threshold. If the reach hand is not tracked the rate is 0 (reach holds).
+    "reach_rate": {
+        "forward_frac": 0.10,   # fraction of the shoulder->hip span below the shoulders where FORWARD begins
+        "back_frac": 0.45,      # fraction below the shoulders where BACK begins (~lower chest / mid torso)
+        "max_speed": 0.04,      # m/s cap on the reach speed (well inside the real arm's limits, REAL_DATA 4a)
+        "full_scale": 0.5,      # shoulder-widths past a threshold at which max_speed is reached
+        "hysteresis": 0.08,     # shoulder-widths of hysteresis at each threshold (anti-chatter)
+    },
 }
+
+REACH_MAX_DT = 0.2  # s: cap the integration step so a resumed track after a gap can't jump the reach
 
 
 def _cfg(cfg, key):
@@ -61,6 +86,8 @@ def plane_coords(pose: BodyPose, side: str = "right"):
       ctrl_up   control hand height, shoulder-widths above the shoulder midpoint (+ = up; image y is flipped).
       reach_up  reach (other) hand height, same units (drives forward/back reach).
       reach_ok  the reach hand is actually tracked (BodyPose.wrist_other visible), so reach_up is trustworthy.
+      hip_drop  the hip-midpoint height in the same units (negative: hips sit below the shoulders). The shoulder
+                line (0) and this set the operator's torso span, so the rate-reach thresholds can be body-relative.
       below_hip the control wrist is below the hip line (image y) -> used for the "right arm dropped" release.
     """
     sk = pose.skel2d
@@ -74,7 +101,8 @@ def plane_coords(pose: BodyPose, side: str = "right"):
         return None
     ctrl_wr = pts[R_WR] if side == "right" else pts[L_WR]
     reach_wr = pts[L_WR] if side == "right" else pts[R_WR]
-    hip_y = float((pts[L_HIP][1] + pts[R_HIP][1]) / 2.0)
+    hip_mid = (pts[L_HIP] + pts[R_HIP]) / 2.0
+    hip_y = float(hip_mid[1])
 
     def nx(p):
         return float((p[0] - sh_mid[0]) / sw)
@@ -83,7 +111,8 @@ def plane_coords(pose: BodyPose, side: str = "right"):
         return float(-(p[1] - sh_mid[1]) / sw)   # image y points DOWN; flip so raising the hand is +
 
     return {"ctrl_x": nx(ctrl_wr), "ctrl_up": nup(ctrl_wr), "reach_up": nup(reach_wr),
-            "reach_ok": pose.wrist_other is not None, "below_hip": float(ctrl_wr[1]) > hip_y}
+            "reach_ok": pose.wrist_other is not None, "hip_drop": nup(hip_mid),
+            "below_hip": float(ctrl_wr[1]) > hip_y}
 
 
 class PlaneMapper:
@@ -100,12 +129,22 @@ class PlaneMapper:
         s = _cfg(cfg, "sign")
         # per robot axis (x reach, y lateral, z vertical), already carrying the sign
         self.gain = np.array([g["reach"] * s["reach"], g["lateral"] * s["lateral"], g["vertical"] * s["vertical"]])
+        self.reach_sign = float(s["reach"])
         oe = _cfg(cfg, "one_euro")
         self.filter = OneEuro(oe.get("min_cutoff", 1.0), oe.get("beta", 0.05))
         self.deadband = float(_cfg(cfg, "deadband"))
         self.ramp_s = float(_cfg(cfg, "ramp_s"))
         self.conf_gate = bool(_cfg(cfg, "conf_gate"))
+        self.reach_mode = str(_cfg(cfg, "reach_mode"))
+        rr = _cfg(cfg, "reach_rate")
+        self.rr_fwd_frac = float(rr["forward_frac"])
+        self.rr_back_frac = float(rr["back_frac"])
+        self.rr_max = float(rr["max_speed"])
+        self.rr_full = max(1e-6, float(rr["full_scale"]))
+        self.rr_hyst = float(rr["hysteresis"])
         self.clipped = False
+        self.reach_rate = 0.0        # last signed reach speed, m/s (status: HUD shows >>/<< from the sign)
+        self.reach_state = "hold"    # ">>" forward, "<<" back, "hold"
         self.reset()
 
     def reset(self):
@@ -114,6 +153,11 @@ class PlaneMapper:
         self._held = None          # last emitted normalized coords (deadband)
         self._reach_hold = 0.0     # last trustworthy reach_up (held while the reach hand is not tracked)
         self._t_engage = None
+        self._reach_off = 0.0      # rate mode: integrated reach offset (m) added to tcp0 x, anti-wind-up at the box
+        self._reach_zone = "hold"  # rate mode: latched zone for hysteresis ("fwd"/"back"/"hold")
+        self._t_last = None        # rate mode: previous frame time for dt
+        self.reach_rate = 0.0
+        self.reach_state = "hold"
         self.filter.reset()
         self.clipped = False
 
@@ -126,8 +170,40 @@ class PlaneMapper:
         self._held = None
         self._reach_hold = 0.0
         self._t_engage = None
+        self._reach_off = 0.0
+        self._reach_zone = "hold"
+        self._t_last = None
+        self.reach_rate = 0.0
+        self.reach_state = "hold"
         self.filter.reset()
         self.clipped = False
+
+    def _reach_rate_speed(self, reach_up, hip_drop):
+        """Joystick reach speed (m/s, BEFORE the reach sign) + a HUD label, from the reach-hand height vs the body.
+        Thresholds are fractions of the shoulder(0) -> hip(hip_drop) torso span, measured DOWN from the shoulders, so
+        they are absolute to the operator's body and never engage-relative. Hysteresis latches the zone to stop
+        chatter at a threshold; the speed grows linearly past the threshold and saturates at max_speed."""
+        span = abs(hip_drop)                    # torso height, shoulder-widths (hips sit below -> hip_drop < 0)
+        fwd_t = -self.rr_fwd_frac * span         # reach_up >= fwd_t (near the shoulders)        -> forward
+        back_t = -self.rr_back_frac * span       # reach_up <= back_t (near lower chest/mid torso) -> back
+        h = self.rr_hyst
+        z = self._reach_zone
+        if z == "fwd" and reach_up < fwd_t - h:          # only leave a zone once past its threshold by hysteresis
+            z = "hold"
+        elif z == "back" and reach_up > back_t + h:
+            z = "hold"
+        if z == "hold":
+            if reach_up >= fwd_t:
+                z = "fwd"
+            elif reach_up <= back_t:
+                z = "back"
+        self._reach_zone = z
+        gain = self.rr_max / self.rr_full        # m/s per shoulder-width past the threshold
+        if z == "fwd":
+            return min(self.rr_max, gain * max(0.0, reach_up - fwd_t)), ">>"
+        if z == "back":
+            return -min(self.rr_max, gain * max(0.0, back_t - reach_up)), "<<"
+        return 0.0, "hold"
 
     def __call__(self, pose: BodyPose):
         if self._tcp0 is None:
@@ -150,13 +226,47 @@ class PlaneMapper:
         if self._n0 is None:
             self._n0 = self._held.copy()
             self._t_engage = pose.t
+            self._t_last = pose.t
         s = 1.0 if self.ramp_s <= 0 else max(0.0, min(1.0, (pose.t - self._t_engage) / self.ramp_s))
         delta = self._held - self._n0
-        p = self._tcp0 + s * self.gain * delta
+        p = self._tcp0 + s * self.gain * delta                    # position map on all three axes
+
+        if self.reach_mode == "rate":
+            # x (reach) is a joystick RATE, not a position: integrate a body-relative speed onto tcp0's x.
+            dt = 0.0 if self._t_last is None else max(0.0, min(REACH_MAX_DT, pose.t - self._t_last))
+            if c["reach_ok"]:
+                speed, state = self._reach_rate_speed(self._held[0], c["hip_drop"])
+            else:                                                 # reach hand not tracked -> hold (rate 0)
+                self._reach_zone = "hold"
+                speed, state = 0.0, "hold"
+            self.reach_rate = self.reach_sign * speed * s         # the 2 s engage ramp eases the rate in too
+            self.reach_state = state
+            self._reach_off += self.reach_rate * dt
+            p[0] = self._tcp0[0] + self._reach_off                # raw; the box clamp below pins it with anti-wind-up
+        else:
+            self.reach_rate, self.reach_state = 0.0, "hold"
+        self._t_last = pose.t
+
         if self.ws_min is not None:
-            cl = np.clip(p, self.ws_min, self.ws_max)
-            self.clipped = bool(np.max(np.abs(cl - p)) > 0.005)   # > 5 mm outside the box: really out of reach
-            p = cl
+            if self.reach_mode == "rate":
+                # reach x: clamp with ANTI-WIND-UP (pin the offset at the wall so reversing frees it at once) and
+                # flag the amber ghost whenever the rate is held off by a wall, even though the per-frame overshoot
+                # is tiny. y and z keep the position-map 5 mm out-of-box test.
+                x_raw = self._tcp0[0] + self._reach_off
+                x_cl = min(max(x_raw, self.ws_min[0]), self.ws_max[0])
+                at_wall = (x_cl != x_raw
+                           or (x_cl >= self.ws_max[0] - 1e-9 and self.reach_rate > 0)
+                           or (x_cl <= self.ws_min[0] + 1e-9 and self.reach_rate < 0))
+                self._reach_off = x_cl - self._tcp0[0]
+                p[0] = x_cl
+                cl = np.clip(p, self.ws_min, self.ws_max)
+                yz_out = bool(max(abs(cl[1] - p[1]), abs(cl[2] - p[2])) > 0.005)
+                self.clipped = bool(at_wall or yz_out)
+                p = cl
+            else:
+                cl = np.clip(p, self.ws_min, self.ws_max)
+                self.clipped = bool(np.max(np.abs(cl - p)) > 0.005)   # > 5 mm outside the box: really out of reach
+                p = cl
         return p
 
 

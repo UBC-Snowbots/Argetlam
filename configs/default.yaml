@@ -62,6 +62,15 @@ plane:
   ramp_s: 2.0                # on engage, ease the gain in from 0 over this long (no jump)
   drop_below_hip_s: 0.7      # control wrist below the hip line this long -> "right arm dropped" -> on_drop preset
   conf_gate: true            # skip a pose that is not visible (the TCP holds)
+  # reach_mode: "rate" = JOYSTICK reach from the reach-hand height (forward above ~shoulder, back below ~mid torso,
+  # dead zone holds); "position" = the old height->x position map (reach gain applies). dev_arm_real defaults to rate.
+  reach_mode: position       # default.yaml keeps the old position map; dev_arm_real.yaml selects rate.
+  reach_rate:                # thresholds are fractions of the shoulder->hip torso span, body-absolute (not engage-rel)
+    forward_frac: 0.10       # below the shoulders where FORWARD begins (~shoulder height)
+    back_frac: 0.45          # below the shoulders where BACK begins (~lower chest / mid torso)
+    max_speed: 0.04          # m/s cap on reach speed (well inside the real arm's limits)
+    full_scale: 0.5          # shoulder-widths past a threshold at which max_speed is reached
+    hysteresis: 0.08         # shoulder-widths of hysteresis at each threshold (anti-chatter)
 
 nemotron:
   base_url: https://api.tokenfactory.nebius.com/v1/

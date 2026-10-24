@@ -628,6 +628,9 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
                                 "q_meas": np.round(robot.read_joints(), 4).tolist(),
                                 "plan_left": len(arbiter._plan), "table_top": scene.support_z,
                                 "preset": goal_name if joint_goal is not None else None,
+                                # plane rate-reach state so the body client / HUD can show "REACH >>" / "<<" / "hold"
+                                "reach_rate": round(float(getattr(retarget, "reach_rate", 0.0)), 4) if plane_on else None,
+                                "reach_state": getattr(retarget, "reach_state", None) if plane_on else None,
                                 "hw_busy": round(max(0.0, hw_busy_until - t0), 1) if hw_busy_until else 0.0,
                                 "mirror": mirror_real,
                                 "mirror_age": round(t0 - real_t, 3) if (mirror_real and real_t) else None,
