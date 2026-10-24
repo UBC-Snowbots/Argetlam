@@ -40,8 +40,8 @@ from .body.calib_session import CalibratedMapper, CalibrationSession
 from .body.calibration import Profile
 from .control.presets import HOME_HW, RETURN, at_goal, check_joint_goal, plan_preset, preset_names, request_hw_home
 from .session import SessionRecorder
-from .types import (Action, ArmPreset, BodyPose, ClutchMsg, EEGState, GripToggle, Intent, MirrorMsg, Query,
-                    RealJoints, Utterance)
+from .types import (Action, ArmPreset, BodyPose, CameraFrame, ClutchMsg, EEGState, GripToggle, Intent, MirrorMsg,
+                    Query, RealJoints, Utterance)
 
 log = logging.getLogger("rover_intent")
 ROOT = Path(__file__).resolve().parents[2]
@@ -116,6 +116,7 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
     clutch = Clutch(calib_s=c.get("calib_s", 2.0), still_m=c.get("still_m", 0.03), palm_s=c.get("palm_s", 1.0),
                     raise_m=c.get("raise_m", 0.05))
     hud = (cfg["net"].get("hud_host", "127.0.0.1"), cfg["net"].get("hud_port", 47130))
+    hud_video = (cfg["net"].get("hud_host", "127.0.0.1"), cfg["net"].get("hud_video_port", 47131))
     last_body, last_target, last_body_arrival, last_visible_t = None, None, 0.0, 0.0
     set_mirror = None
     presets = cfg["arm"].get("presets", {}) or {}
@@ -129,6 +130,12 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
         + (("right arm dropped", "disabled") if plane_on and on_drop else ())
     real_arm = cfg.get("real_arm", {}) or {}
     joint_goal, goal_name, hw_busy_until = None, None, 0.0  # button-panel preset move / real-arm homing window
+    goal_start = None       # q_cmd captured when the current preset/jog move began (drives the move-progress readout)
+    # "follower seen" heuristic for the real_following light: scripts/sim_to_real.py polls the app with Query several
+    # times a second, so a Query within the last second means the follower is live (it can't be known directly).
+    last_query_t, follower_ever = 0.0, False
+    BUSY_MSG = lambda: f"busy: {goal_name} still moving, press STOP first"   # the one-move-at-a-time refusal text
+    is_busy = lambda why: isinstance(why, str) and why.startswith("busy:")   # tag a refusal reply as busy for the UI
     # "mirror real" state: the sim arm's joint targets come straight from the PHYSICAL arm (real_to_sim -> real_joints),
     # no IK and no body/voice motion. Entered/left by a MirrorMsg (or STOP leaves it). real_t is the VM receive time of
     # the last real sample (the one shared clock); if it goes stale (> 0.5 s) the sim holds.
@@ -194,7 +201,7 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
         If the arm profile sets `on_drop: <preset>`, losing the body ("tracking lost": your arm dropped out of view)
         sends the arm to that preset instead of freezing it. F / left-hand releases (deliberate re-centring) and
         "link lost" (nobody watching) still freeze in place."""
-        nonlocal body_target, last_target, retarget, joint_goal, goal_name, body_joint_target
+        nonlocal body_target, last_target, retarget, joint_goal, goal_name, body_joint_target, goal_start
         if ev is None:
             return
         log.info("clutch: %s (trigger=%s%s)", ev.kind, clutch.trigger,
@@ -210,7 +217,7 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
             goal, why = plan_preset(on_drop, presets, home, q_cmd, clutch.state, arm, safety.ws_min, safety.ws_max)
             if goal is not None:
                 arbiter.on_intent(Intent(action=Action.stop))  # HOLD: the preset move owns the arm
-                joint_goal, goal_name = goal, on_drop
+                joint_goal, goal_name, goal_start = goal, on_drop, q_cmd.copy()
             log.info("on_drop (%s): %s", clutch.release_reason, why)
         elif ev.kind == "engaged":
             if arm_mirror_on:
@@ -223,14 +230,16 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
     def do_preset(name, now):
         """Start a named joint-space preset move, reusing the button-panel path (plan_preset -> joint_goal, no IK).
         Returns (ok, message). The SafetyLayer (vel/acc limits) runs it; the ghost cues clamping at the box edge."""
-        nonlocal joint_goal, goal_name, current_pose
+        nonlocal joint_goal, goal_name, goal_start, current_pose
+        if joint_goal is not None:          # BUSY rule: one move at a time; STOP (which clears joint_goal) always wins
+            return False, BUSY_MSG()
         if hw_busy_until and now < hw_busy_until:
             return False, f"refused: the real arm is homing ({hw_busy_until - now:.0f} s left)"
         goal, why = plan_preset(name, presets, home, q_cmd, clutch.state, arm, safety.ws_min, safety.ws_max)
         if goal is None:
             return False, why
         arbiter.on_intent(Intent(action=Action.stop))  # HOLD: the preset move owns the arm
-        joint_goal, goal_name = goal, name
+        joint_goal, goal_name, goal_start = goal, name, q_cmd.copy()
         current_pose = name            # the named pose we are now at / heading to (for "undo")
         return True, why
 
@@ -242,7 +251,10 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
             ok, why = do_preset(pend["name"], time.time())
             record_command([make_preset_step(pend["name"])], prev_pose, ok)
             log.info("voice preset %s confirmed: %s", pend["name"], why)
-            rx.reply(addr, {"kind": "reply", "text": "confirm", "ok": ok, "say": why, "mode": arbiter.mode.value})
+            rep = {"kind": "reply", "text": "confirm", "ok": ok, "say": why, "mode": arbiter.mode.value}
+            if not ok and is_busy(why):
+                rep["busy"] = True
+            rx.reply(addr, rep)
         elif pend["kind"] == "fast":   # a voice motion / sequence the operator confirmed
             start_sequence(pend["steps"], "confirm", addr, 0.0)
         else:  # an autonomous skill the operator confirmed
@@ -256,7 +268,9 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
         """Cartesian jog: solve IK for the current TCP + a base-frame delta, holding the current tool orientation
         (iterated to convergence, not one ik_step), then run it through the same joint_goal -> SafetyLayer path as
         the presets. Returns (ok, message); refuses with a spoken reason if it can't reach there or leaves the box."""
-        nonlocal joint_goal, goal_name, current_pose
+        nonlocal joint_goal, goal_name, goal_start, current_pose
+        if joint_goal is not None:          # BUSY rule: one move at a time (same as a preset); STOP always wins
+            return False, BUSY_MSG()
         if hw_busy_until and now < hw_busy_until:
             return False, f"refused: the real arm is homing ({hw_busy_until - now:.0f} s left)"
         axis, sign = CART[direction]
@@ -271,14 +285,16 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
         if goal is None:
             return False, why
         arbiter.on_intent(Intent(action=Action.stop))   # HOLD: the jog owns the arm, same as a preset
-        joint_goal, goal_name = goal, f"jog {direction}"
+        joint_goal, goal_name, goal_start = goal, f"jog {direction}", q_cmd.copy()
         current_pose = None            # a jog moves us off any named pose
         return True, why
 
     def start_joint_jog(joint_idx, angle_rad, now):
         """Joint jog: current joints + a signed delta on one joint, CLAMPED to the joint limits, through the same
         checks/path as the presets. Returns (ok, message)."""
-        nonlocal joint_goal, goal_name, current_pose
+        nonlocal joint_goal, goal_name, goal_start, current_pose
+        if joint_goal is not None:          # BUSY rule: one move at a time (same as a preset); STOP always wins
+            return False, BUSY_MSG()
         if hw_busy_until and now < hw_busy_until:
             return False, f"refused: the real arm is homing ({hw_busy_until - now:.0f} s left)"
         goal_q = np.array(q_cmd, float).copy()
@@ -289,7 +305,7 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
         if goal is None:
             return False, why
         arbiter.on_intent(Intent(action=Action.stop))
-        joint_goal, goal_name = goal, f"jog {J_NAMES[joint_idx]}"
+        joint_goal, goal_name, goal_start = goal, f"jog {J_NAMES[joint_idx]}", q_cmd.copy()
         current_pose = None            # a jog moves us off any named pose
         return True, why
 
@@ -366,8 +382,11 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
         combined = " ".join(s["say"] for s in steps if s.get("say"))
         arbiter.last_say = combined if ok else say
         log.info("voice fast-path %r -> %s (%.3fs)", text, [s["say"] for s in steps], latency)
-        rx.reply(addr, {"kind": "reply", "text": text, "latency_s": round(latency, 3), "ok": ok,
-                        "say": combined if ok else say, "mode": arbiter.mode.value})
+        rep = {"kind": "reply", "text": text, "latency_s": round(latency, 3), "ok": ok,
+               "say": combined if ok else say, "mode": arbiter.mode.value}
+        if not ok and is_busy(say):      # a voice motion refused because a move is already running
+            rep["busy"] = True
+        rx.reply(addr, rep)
 
     def execute_or_confirm(steps, text, addr, latency):
         """Fast-path dispatch: move at once unless confirm.presets / confirm.motion ask for a spoken yes first."""
@@ -437,9 +456,12 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
             ok, why = do_preset(want, time.time())
             record_command([make_preset_step(want)], prev_pose, ok)
             log.info("voice preset %s (no confirm): %s", want, why)
-            rx.reply(addr, {"kind": "reply", "text": text, "latency_s": round(latency, 2), "ok": ok,
-                            "intent": intent.model_dump(mode="json", exclude_none=True),
-                            "say": why, "mode": arbiter.mode.value})
+            rep = {"kind": "reply", "text": text, "latency_s": round(latency, 2), "ok": ok,
+                   "intent": intent.model_dump(mode="json", exclude_none=True),
+                   "say": why, "mode": arbiter.mode.value}
+            if not ok and is_busy(why):
+                rep["busy"] = True
+            rx.reply(addr, rep)
             return
         if want is not None:
             label = "the start pose" if want == RETURN else want
@@ -584,6 +606,13 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
                 log.info("preset %s: %s", msg.name, why)
                 rx.reply(addr, {"kind": "reply", "text": f"preset {msg.name}", "ok": ok, "say": why,
                                 "mode": arbiter.mode.value, "mirror": True})
+            elif isinstance(msg, ArmPreset) and joint_goal is not None:
+                # a preset move is already running: do NOT chain-replace it (that cancelled the previous move and left
+                # Pranav seeing nothing). Refuse and tell him to STOP first; STOP (an Utterance) always gets through.
+                why = f"busy: {goal_name} still moving, press STOP first"
+                log.info("preset %s refused: %s", msg.name, why)
+                rx.reply(addr, {"kind": "reply", "text": f"preset {msg.name}", "ok": False, "say": why,
+                                "mode": arbiter.mode.value, "busy": True})
             elif isinstance(msg, ArmPreset):
                 if msg.name == HOME_HW:
                     if t0 < hw_busy_until:
@@ -597,10 +626,14 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
                         joint_goal, goal_name = None, None
                         hw_busy_until = t0 + float(real_arm.get("busy_s", 120.0))
                 else:
-                    ok, why = do_preset(msg.name, t0)   # same path the voice confirm uses
+                    # same path the voice confirm uses; do_preset refuses a second move as busy while one runs so a
+                    # panel tap mid-move no longer chain-replaces the move (STOP, an Utterance, always gets through).
+                    ok, why = do_preset(msg.name, t0)
                 log.info("preset %s%s: %s", msg.name, " (confirmed)" if msg.confirm else "", why)
-                rx.reply(addr, {"kind": "reply", "text": f"preset {msg.name}", "ok": ok, "say": why,
-                                "mode": arbiter.mode.value})
+                rep = {"kind": "reply", "text": f"preset {msg.name}", "ok": ok, "say": why, "mode": arbiter.mode.value}
+                if not ok and is_busy(why):
+                    rep["busy"] = True
+                rx.reply(addr, rep)
             elif isinstance(msg, GripToggle):
                 arbiter.on_grip_toggle(None if plain_gripper else arm.fk(robot.read_joints())[:3, 3])
                 log.info("grip toggle (%s) in %s: gripper=%.0f", msg.source, arbiter.mode.value, arbiter.gripper)
@@ -620,7 +653,15 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
                 log.info("mirror real %s", "on" if mirror_real else "off")
                 rx.reply(addr, {"kind": "reply", "text": "mirror", "mirror": mirror_real, "mode": arbiter.mode.value,
                                 "say": "Mirroring the real arm." if mirror_real else "Mirror off."})
+            elif isinstance(msg, CameraFrame):
+                # live webcam stream for the panel under the HUD. Forward the frame straight to the HUD's video
+                # channel; keep it off the pose path entirely (separate message, not recorded, latest-wins at the HUD).
+                try:
+                    rx.reply(hud_video, msg.model_dump(mode="json"))
+                except OSError:
+                    pass  # nothing listening on the video port yet: drop it, never block the loop
             elif isinstance(msg, Query):
+                last_query_t, follower_ever = t0, True  # the follower polls here: drives the real_following light
                 rx.reply(addr, {"kind": "state", "mode": arbiter.mode.value, "held": arbiter.held,
                                 "clutch": clutch.state, "assist": arbiter.assist, "mapping": type(retarget).__name__,
                                 "gripper": arbiter.gripper, "tcp": np.round(arm.fk(q_cmd)[:3, 3], 4).tolist(),
@@ -751,6 +792,11 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
             pct = lambda i: round(100 * sum(x[i] for x in vis_seen) / len(vis_seen)) if vis_seen else None
             span = (seq_seen[-1][1] - seq_seen[0][1] + 1) if len(seq_seen) > 1 else len(seq_seen)
             loss = 1.0 - len(seq_seen) / span if span > 0 else 0.0
+            preset_progress = None
+            if joint_goal is not None and goal_start is not None:
+                span_q = float(np.linalg.norm(np.asarray(joint_goal) - goal_start))
+                done = float(np.linalg.norm(q_cmd - goal_start))
+                preset_progress = round(min(1.0, max(0.0, done / span_q)), 2) if span_q > 1e-6 else 1.0
             st = {"kind": "status", "mode": arbiter.mode.value, "tcp": np.round(tcp, 3).tolist(),
                   "target": None if ghost is None else np.round(ghost, 3).tolist(), "ghost": ghost_state,
                   "clipped": ghost_bad, "grip": grip, "clutch": clutch.state, "trigger": clutch.trigger, "release_reason": clutch.release_reason,
@@ -764,6 +810,8 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
                   "assist": arbiter.assist, "held": arbiter.held, "tcp_meas": np.round(tcp, 3).tolist(),
                   "presets": preset_names(presets, bool(real_arm.get("enabled"))),
                   "preset": goal_name if joint_goal is not None else None,
+                  "preset_progress": preset_progress,
+                  "real_following": (None if not follower_ever else (t0 - last_query_t < 1.0)),
                   "hw_busy": round(max(0.0, hw_busy_until - t0), 1) if hw_busy_until else 0.0}
             if body_addr is not None:
                 rx.reply(body_addr, st)
