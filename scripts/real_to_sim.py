@@ -26,6 +26,7 @@ import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 from rover_intent.control.stepper_map import DEFAULT_TABLE, fw_to_q  # noqa: E402
+from rover_intent.control import ee_limits as eel  # noqa: E402  (map the real EE to the sim gripper, if marked)
 
 import rclpy  # noqa: E402
 from rclpy.node import Node  # noqa: E402
@@ -33,12 +34,13 @@ from rover_msgs.msg import ArmCommand  # noqa: E402
 
 
 class RealToSim(Node):
-    def __init__(self, host, port, hz, mirror):
+    def __init__(self, host, port, hz, mirror, ee=None):
         super().__init__("real_to_sim")
         self.addr = (host, port)
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.min_dt = 1.0 / hz
         self.mirror = mirror
+        self.ee = ee          # EELimits or None: when set, the real EE is mapped to the sim gripper (0 open .. 1 closed)
         self.fw = None
         self.last_send = 0.0
         self.create_subscription(ArmCommand, "/arm/feedback", self.on_fb, 10)
@@ -54,8 +56,10 @@ class RealToSim(Node):
             return
         self.last_send = now
         q = fw_to_q(self.fw, DEFAULT_TABLE)
-        self.send_json({"kind": "real_joints", "t": time.time(), "fw": self.fw, "q": q,
-                        "table": DEFAULT_TABLE.version})
+        msg = {"kind": "real_joints", "t": time.time(), "fw": self.fw, "q": q, "table": DEFAULT_TABLE.version}
+        if self.ee is not None:                  # show the real EE as the sim gripper value (inverse map)
+            msg["grip"] = self.ee.fw_to_grip(self.fw[6])
+        self.send_json(msg)
 
 
 def main():
@@ -64,9 +68,14 @@ def main():
     ap.add_argument("--port", type=int, default=47100, help="app UDP listen port (47100 live; a spare for tests)")
     ap.add_argument("--hz", type=float, default=30.0, help="max real_joints send rate")
     ap.add_argument("--no-mirror", action="store_true", help="stream real_joints but do not toggle the app mirror")
+    ap.add_argument("--ee-limits", default=str(eel.DEFAULT_LIMITS_PATH),
+                    help="EE limits file; if it exists the real EE is shown as the sim gripper value (inverse map)")
     a = ap.parse_args()
+    ee = eel.load(a.ee_limits) if eel.exists(a.ee_limits) else None
     rclpy.init()
-    node = RealToSim(a.host, a.port, a.hz, mirror=not a.no_mirror)
+    node = RealToSim(a.host, a.port, a.hz, mirror=not a.no_mirror, ee=ee)
+    if ee is not None:
+        node.get_logger().info(f"EE limits found ({a.ee_limits}): mapping the real EE to the sim gripper value")
     if node.mirror:
         node.send_json({"kind": "mirror", "t": time.time(), "on": True})
         node.get_logger().info(f"mirror on -> {a.host}:{a.port}")

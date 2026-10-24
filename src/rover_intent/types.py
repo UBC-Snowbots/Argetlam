@@ -105,6 +105,8 @@ class RealJoints(BaseModel):
     fw: list[float]                # raw firmware degrees, length 7 (index 6 = EE)
     q: list[float]                 # URDF radians, length 6 (stepper_map.fw_to_q)
     table: Optional[str] = None    # stepper_map table version that produced q (so a replay knows which table)
+    grip: Optional[float] = None   # real EE mapped to the app gripper value 0 open .. 1 closed (ee_limits), when
+                                   # EE limits exist; None = don't touch the sim gripper (the mirror just shows joints)
 
 
 class MirrorMsg(BaseModel):
