@@ -14,11 +14,12 @@ NVIDIA Nemotron on Nebius Token Factory turns it into a robot command.
 """
 import argparse
 import json
+import os
 import socket
 import threading
 import time
 
-DEFAULT_HOST = "rover-vm"  # rover-vm on the tailnet
+DEFAULT_HOST = os.environ.get("ROVER_HOST", "127.0.0.1")  # the VM's address (tailnet IP or hostname); or pass --host
 PORT = 47100
 SR = 16000
 

@@ -1,6 +1,6 @@
 """Frozen-wrist teleop IK (issue 4): orient="frozen" is position-only DLS on joints 1-3, wrist (4-6) held.
 
-Numbers reproduced from a scratch script (wrist_dig.py) (dev_arm_real profile, app-like 50 Hz
+Numbers reproduced from an offline analysis of the dev_arm_real profile (app-like 50 Hz
 loop, horizontal circle around the home TCP), 'frozen' variant:
 
     r=5cm  frozen  wrist joints 4-6 span [0 0 0] deg   max tool tilt 7 deg   TCP err (with safety caps) 1.7/4.2 cm

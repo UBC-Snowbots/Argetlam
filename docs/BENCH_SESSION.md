@@ -20,7 +20,7 @@ Everything below runs on the VM unless it says "laptop".
 ```
 # 0. Power on the arm. E-stop in hand. Watch the arm on every move.
 
-# 1. (laptop, bench-laptop) start the serial bridge + the reverse SSH tunnel to the VM:
+# 1. (laptop) start the serial bridge + the reverse SSH tunnel to the VM:
 #    serial_bridge.py  +  ssh -R 47140:localhost:<bridge> ...
 #    The laptop now auto-reconnects this tunnel (it resets about once an hour, see Quirks).
 
