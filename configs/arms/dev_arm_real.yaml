@@ -54,6 +54,8 @@ sim:
 
 confirm:
   skills: true   # the physical arm: require a spoken "yes" before any autonomous pick/place/move too
+  presets: false # named poses move at once, no spoken yes (Pranav 2026-10-23: the 2-step confirm was too slow
+                 # on the real mic); skills stay gated: they aim at SIM object positions
 
 body:
   mode: arm_mirror   # full-arm joint mirroring, no IK (body/arm_mirror.py). The old position/calibrated modes stay
