@@ -71,10 +71,12 @@ nemotron:
   #   nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B   median 4.48 s  p90 10.18 s  18/20   (previous default)
   #   nvidia/Nemotron-3_5-Lightning           median 4.78 s  p90 14.68 s  19/20
   #   Qwen/Qwen3-30B-A3B-Instruct-2507        median 0.37 s  p90  7.63 s  19/20   <- set as default
-  # Qwen3-30B-A3B is ~12x faster at the median with equal-or-better accuracy, so it is the new default (the rule:
-  # switch only if accuracy is equal or better). Revert to the Nano line above if the endpoint behaves differently.
-  model: Qwen/Qwen3-30B-A3B-Instruct-2507
-  timeout_s: 6.0   # client timeout for the cloud call; on timeout the app says "Sorry, I didn't catch that in time"
+  # Qwen3-30B-A3B is ~12x faster at the median with equal-or-better accuracy, BUT this is the Nebius x NVIDIA
+  # hackathon: Pranav keeps Nemotron as the default (2026-10-24). Most commands never reach the cloud anyway
+  # (instant local fast path). For a faster practice run: model: Qwen/Qwen3-30B-A3B-Instruct-2507
+  model: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B
+  timeout_s: 12.0  # client timeout for the cloud call (Nemotron p90 was ~10 s on 2026-10-23); on timeout the app
+                   # says "Sorry, I didn't catch that in time"
 
 real_arm:        # the button panel's HOME button (control/presets.py); off unless a real arm is attached
   enabled: false
