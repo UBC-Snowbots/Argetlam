@@ -183,29 +183,9 @@ def main():
         grip = m.get("grip") or 0
         cv.create_text(W - 20, 356, text="gripper CLOSED" if grip >= 0.5 else "gripper open", anchor="e",
                        fill="#ffd166" if grip >= 0.5 else "#8892a0", font=("Helvetica", 13))
-        # calibration
-        cal = m.get("calib")
-        if cal and cal.get("prompt"):
-            cv2t = cal["prompt"]
-            cv.create_text(W / 2, 400, text=cv2t, fill="#00e5ff", font=("Helvetica", 15, "bold"), width=W - 30)
-            if cal.get("progress") is not None:
-                cv.create_rectangle(40, 430, 40 + (W - 80) * cal["progress"], 440, fill="#00e5ff", width=0)
-            if cal.get("n"):
-                cv.create_text(W / 2, 458, text=f"step {cal['n']}/{cal['of']}  {cal.get('note') or ''}",
-                               fill="#f59e0b" if cal.get("note") else "#8892a0", font=("Helvetica", 12))
-            if cal.get("errors"):
-                cv.create_text(W / 2, 482, text="targets (cm): " + ", ".join(map(str, cal["errors"])), fill="#8892a0",
-                               font=("Helvetica", 12))
-        elif cal and cal.get("result"):
-            r = cal["result"]
-            ok = r.get("accepted")
-            cv.create_text(W / 2, 420, fill="#22c55e" if ok else "#f59e0b", font=("Helvetica", 14, "bold"),
-                           text=f"calibration {'ACCEPTED' if ok else 'NOT accepted'}  fit {r.get('residual_deg')} deg")
-            cv.create_text(W / 2, 448, fill="#8892a0", font=("Helvetica", 12),
-                           text=f"targets: {r.get('errors_cm')} cm" + (f"   redo {r['bad_axis']}: X" if r.get("bad_axis") else ""))
-        else:
-            cv.create_text(W / 2, 420, text=f"mapping: {m.get('mapping', '?')}   (C in the webcam window = calibrate)",
-                           fill="#5b6472", font=("Helvetica", 12))
+        # body teleop mapping (plane or arm_mirror)
+        cv.create_text(W / 2, 420, text=f"mapping: {m.get('mapping', '?')}",
+                       fill="#5b6472", font=("Helvetica", 12))
         if m.get("assist"):
             cv.create_text(W / 2, 480, text="ASSIST: grabbing / releasing...", fill="#ff4fd8", font=("Helvetica", 14, "bold"))
         elif m.get("grab_ready"):

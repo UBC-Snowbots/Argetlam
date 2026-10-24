@@ -8,18 +8,17 @@ Standalone: needs only this file. Uses the MediaPipe *Tasks* API (mediapipe >= 0
     pip install mediapipe opencv-python numpy
     python body_client.py [--camera 0] [--side right]
 
-In the preview window:  F = clutch (hold still 2 s to calibrate, then the arm follows; F again = freeze)
-                        C = calibrate (about 30 s): stand on the green guide, follow the prompts, then touch
-                            4 magenta targets. X = redo only the axis that failed. The profile is saved and reused.
+In the preview window:  F = clutch (hold still 2 s to re-centre, then the arm follows; F again = freeze)
                         S = stop   R = reset   M = flip left/right (if the robot goes the wrong way)   Q/Esc = quit
 Hands-free clutch: hold an open palm UP (above your elbow) for 1 s, or keep your LEFT hand raised above your
 shoulder (hold-to-follow: lower it and the arm freezes, so you can reposition yourself).
 Grab assist: steer the gripper roughly above an object (it turns magenta in Isaac), then hold a FIST ~0.5 s: the arm
 lines up, grabs and lifts it, then hands control back. Hold an OPEN hand ~0.5 s to let go (stand-in until EEG is live).
-Stand ~1.5-2 m from the camera with your shoulders, elbow, wrist and hips in view. Gesture mode (default on the VM):
-  swing your hand left/right -> the arm rotates left/right
-  raise/lower your hand      -> the gripper goes up/down
-  straighten/bend your elbow -> the gripper reaches farther/closer
+Stand ~1.5-2 m from the camera with your shoulders, elbow, wrist and hips in view. Two body teleop modes (set by
+body.mode on the VM):
+  plane      - image-plane teleop (default): your right hand drives the gripper left/right + up/down in the camera
+               plane, your left hand height drives reach (depth is ignored). See docs/BODY_TELEOP.md.
+  arm_mirror - full-arm joint mirroring: your whole arm's pose drives the robot joints directly (no IK).
 The green ghost ball in Isaac shows where the gripper is heading (red = out of reach, clamped).
 Only the chosen arm's hand is used (--side, default right); the other hand is ignored.
 """
@@ -561,18 +560,6 @@ def main():
         lat = f"rtt {rtt_ms:.0f} ms" if rtt_ms is not None else "rtt ?"
         cv2.putText(frame, f"robot: {status}   {lat}   loss {100 * robot.get('loss', 0):.0f}%   "
                            f"ghost {robot.get('ghost') or '-'}", (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
-        cal = robot.get("calib")
-        if cal and cal.get("prompt"):
-            cv2.putText(frame, f"CALIBRATION: {cal['prompt']}", (10, 150), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 255, 255), 2)
-            if cal.get("progress") is not None:
-                cv2.rectangle(frame, (10, 160), (10 + int(300 * cal["progress"]), 170), (0, 255, 255), -1)
-            if cal.get("note"):
-                cv2.putText(frame, cal["note"], (10, 195), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 165, 255), 2)
-        elif cal and cal.get("result"):
-            r = cal["result"]
-            txt = (f"calibration {'ACCEPTED' if r.get('accepted') else 'NOT accepted'}: {r.get('errors_cm')} cm, "
-                   f"fit {r.get('residual_deg')} deg" + (f", redo {r['bad_axis']} (X)" if r.get("bad_axis") else ""))
-            cv2.putText(frame, txt, (10, 150), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 255, 255), 2)
         if robot.get("assist"):
             cv2.putText(frame, "ASSIST: grabbing / releasing...", (10, 230), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 80, 220), 2)
         elif robot.get("grab_ready"):
@@ -581,7 +568,7 @@ def main():
         if robot.get("ghost") == "clamped":
             cv2.putText(frame, "OUT OF REACH - the gripper is clamped at the edge", (10, 120),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 165, 255), 2)
-        cv2.putText(frame, "C calibrate | X redo bad axis | F clutch | S stop | R reset | M flip | Q quit",
+        cv2.putText(frame, "F clutch | S stop | R reset | M flip | Q quit",
                     (10, frame.shape[0] - 15),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
         # active preset banner + progress (clear feedback that a move is running; status carries preset/preset_progress)
@@ -624,14 +611,8 @@ def main():
             say("stop")
         elif k == ord("r"):
             say("reset")
-        elif k in (ord("c"), ord("w")):
-            link.send({"kind": "clutch", "t": time.time(), "action": "calibrate"})
-        elif k == ord("x"):
-            link.send({"kind": "clutch", "t": time.time(), "action": "redo_axis"})
         elif k == ord("m"):
-            mirror = not mirror
-            if robot.get("clutch") == "following":  # re-calibrate so flipping doesn't make the arm jump
-                link.send({"kind": "clutch", "t": time.time(), "action": "toggle"})
+            mirror = not mirror   # flip left/right for a mirrored webcam (plane / arm_mirror re-anchor on engage)
     cap.release()
     cv2.destroyAllWindows()
 

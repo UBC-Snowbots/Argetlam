@@ -20,10 +20,8 @@ from pathlib import Path
 import numpy as np
 import yaml
 
-from .body.mirror import GestureMirror
 from .body.arm_mirror import ArmMirror
 from .body.plane import PlaneMapper, DropWatch, plane_coords
-from .body.retarget import Retargeter
 from .control.arbiter import Arbiter, Mode
 from .control.kinematics import ArmModel
 from .control.safety import SafetyLayer
@@ -36,8 +34,6 @@ from .planner.fast_path import (CART, DEFAULT_ANGLE, DEFAULT_DIST_M, J_NAMES, J_
                                 make_joint_step, make_preset_step, make_speed_step, parse_fast, scale_speed)
 from .body.clutch import Clutch
 from .config import load_config
-from .body.calib_session import CalibratedMapper, CalibrationSession
-from .body.calibration import Profile
 from .control.presets import HOME_HW, RETURN, at_goal, check_joint_goal, plan_preset, preset_names, request_hw_home
 from .session import SessionRecorder
 from .types import (Action, ArmPreset, BodyPose, CameraFrame, ClutchMsg, EEGState, GripToggle, Intent, MirrorMsg,
@@ -73,17 +69,11 @@ def build(cfg: dict, backend: str):
     arbiter = Arbiter(scene, e["p_on"], e["p_off"], e["hold_s"], s["radius"], s["gain"])
     arbiter.z_max = cfg["safety"]["workspace_max"][2] - 0.005
     b = cfg["body"]
-    oe = b.get("one_euro", {})
-    retarget = Retargeter(b["axes"], b["scale"], b["origin"], min_cutoff=oe.get("min_cutoff", 1.0),
-                          beta=oe.get("beta", 0.7), ws_min=cfg["safety"]["workspace_min"],
-                          ws_max=cfg["safety"]["workspace_max"])  # "position" mode (default)
-    if b.get("mode", "position") == "gesture":
-        retarget = GestureMirror(arm, gains=b.get("gesture_gains", (2.5, 1.0, 0.6)),
-                                 height=(cfg["safety"]["workspace_min"][2], cfg["safety"]["workspace_max"][2]),
-                                 min_cutoff=oe.get("min_cutoff", 1.0), beta=oe.get("beta", 0.5))
-    elif b.get("mode", "position") == "arm_mirror":   # full-arm joint mirroring, no IK (body/arm_mirror.py)
+    # Two body-teleop modes: PLANE (default everywhere) and ARM_MIRROR (fallback). The legacy position / calibrated /
+    # gesture modes were removed. An unknown mode falls back to plane.
+    if b.get("mode", "plane") == "arm_mirror":   # full-arm joint mirroring, no IK (body/arm_mirror.py)
         retarget = ArmMirror(arm, home, a["max_vel"], cfg.get("arm_mirror"))
-    elif b.get("mode", "position") == "plane":   # image-plane TCP teleop, depth ignored, IK path (body/plane.py)
+    else:                                        # plane: image-plane TCP teleop, depth ignored, IK path (body/plane.py)
         retarget = PlaneMapper(arm, home, cfg.get("plane"), cfg["safety"]["workspace_min"],
                                cfg["safety"]["workspace_max"])
     n = cfg["nemotron"]
@@ -155,44 +145,11 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
     # moves off it). STOP does not clear this: a new command after STOP still sees the history.
     motion_history = deque(maxlen=5)   # each: {"steps": [step, ...]} (preset steps carry their from_pose)
     current_pose = RETURN              # the sim starts at arm.home, which is the RETURN pose
-    lo_ws, hi_ws = cfg["safety"]["workspace_min"], cfg["safety"]["workspace_max"]
-    sim = cfg.get("sim", {})
-    default_cam = sim.get("views", {}).get(sim.get("default_view", "behind"))
-    camera = lambda: getattr(robot, "camera", None) or default_cam
-    profile_path = ROOT / cfg["body"].get("profile", "data/profiles/{arm}_pranav.json").format(arm=cfg["arm_profile"])
-    session = CalibrationSession(lo_ws, hi_ws, profile_path, cfg["arm_profile"], default_cam)
-    bubble = (cfg["net"].get("bubble_host", "127.0.0.1"), cfg["net"].get("bubble_port", 47101))
-    if profile_path.exists() and not arm_mirror_on and not plane_on:   # these are joint/image maps, not a TCP calib
-        prof = Profile.load(profile_path)
-        retarget = CalibratedMapper(prof, lo_ws, hi_ws, camera)
-        log.info("calibration profile loaded: %s (%s, residual %.1f deg, verify %s)", profile_path.name, prof.created,
-                 prof.residual_deg, prof.verify)
-    elif arm_mirror_on:
+    if arm_mirror_on:
         log.info("body mode: arm_mirror (full-arm joint mirroring, no IK; side=%s)", retarget.side)
-    elif plane_on:
+    else:
         log.info("body mode: plane (image-plane TCP teleop, depth ignored, IK orient=%s; control hand=%s)",
                  teleop_orient, retarget.side)
-    else:
-        log.info("no calibration profile yet (%s): using %s mode until you calibrate (C)", profile_path.name,
-                 cfg["body"].get("mode"))
-
-    def say(text):
-        arbiter._last_say = text   # calibration channel: set directly (its own "calibration:" log), not the say_log
-        rx.reply(bubble, {"state": "reply", "text": text})   # Pranav's voice bubble on the VM screen
-        log.info("calibration: %s", text)
-
-    def handle_session(effects):
-        nonlocal retarget
-        if not effects:
-            return
-        if effects.get("say"):
-            say(effects["say"])
-        if effects.get("release") and clutch.state != "idle":
-            on_clutch(clutch._release("calibrating"))
-        if effects.get("profile") is not None:
-            retarget = CalibratedMapper(effects["profile"], lo_ws, hi_ws, camera)
-        if effects.get("engage") and clutch.state == "idle":
-            on_clutch(clutch.toggle(time.time()))
     seq_seen = []  # (t, seq) over the last second, for packet loss
     vis_seen = []  # (t, arm visible, in position, hand found) over the last second: tracking quality
 
@@ -522,8 +479,6 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
                                         and msg.wrist[1] < msg.elbow[1] - 0.02)          # MediaPipe y points down
                     left_raised = bool(msg.wrist_other is not None and msg.shoulder_other is not None
                                        and msg.wrist_other[1] < msg.shoulder_other[1] - clutch.raise_m)
-                    if session.state in ("positioning", "capturing"):
-                        palm_up_open = left_raised = False   # calibration poses (hand up, open palm) must not engage
                     if plane_on:
                         left_raised = False   # plane mode drives REACH from the left hand, so it can't be the clutch
                     on_clutch(clutch.update(rel, palm_up_open, left_raised, t0))
@@ -543,18 +498,15 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
                         if grip_from_hand and msg.hand_open is not None:
                             # teleop modes keep the gripper a plain open/close (tcp=None -> no grab-assist AUTO plan)
                             arbiter.on_hand(msg.hand_open, t0, None if plain_gripper else arm.fk(robot.read_joints())[:3, 3])
-                    if session.active:
-                        handle_session(session.update(t0, msg, bool(msg.in_position),
-                                                      tcp_meas=arm.fk(robot.read_joints())[:3, 3],
-                                                      camera=camera()))
-            elif isinstance(msg, ClutchMsg) and mirror_real:   # clutch / calibrate are motion: refused while mirroring
+            elif isinstance(msg, ClutchMsg) and mirror_real:   # clutch is motion: refused while mirroring
                 rx.reply(addr, {"kind": "reply", "text": "clutch", "say": "Mirroring the real arm; say stop to leave.",
                                 "mode": arbiter.mode.value, "mirror": True})
-            elif isinstance(msg, ClutchMsg) and msg.action in ("warmup", "calibrate"):
-                handle_session(session.start(t0))
-            elif isinstance(msg, ClutchMsg) and msg.action == "redo_axis":
-                bad = (session.result or {}).get("bad_axis")
-                handle_session(session.start(t0, redo_axis=bad))
+            elif isinstance(msg, ClutchMsg) and msg.action in ("warmup", "calibrate", "redo_axis"):
+                # calibration was removed with the legacy position mode: ignore the old C / X / warm-up actions so an
+                # older body client does not accidentally toggle the clutch.
+                rx.reply(addr, {"kind": "reply", "text": "clutch",
+                                "say": "Calibration was removed; use plane or arm-mirror teleop.",
+                                "mode": arbiter.mode.value})
             elif isinstance(msg, ClutchMsg):
                 ev = clutch.toggle(t0)
                 if (arm_mirror_on or plane_on) and ev is not None and ev.kind == "released" \
@@ -562,11 +514,6 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
                     clutch.release_reason = "disabled"   # deliberate F toggle off in a teleop mode -> return to base
                 on_clutch(ev)
                 rx.reply(addr, {"kind": "reply", "text": "clutch", "say": f"clutch: {clutch.state}",
-                                "mode": arbiter.mode.value})
-            elif isinstance(msg, Utterance) and not mirror_real and ("calibrat" in msg.text.lower() or
-                                                 ("warm" in msg.text.lower() and "up" in msg.text.lower())):
-                handle_session(session.start(t0))
-                rx.reply(addr, {"kind": "reply", "text": msg.text, "say": "Calibration started.",
                                 "mode": arbiter.mode.value})
             elif isinstance(msg, Utterance):
                 stop = urgent_stop(msg.text)
@@ -786,7 +733,7 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
         ghost_bad = ghost_state in ("clamped", "lost")
         cand = (arbiter.grab_candidate(tcp) if grip_from_hand and arbiter.mode == Mode.FOLLOW
                 and clutch.state == "following" else None)
-        vtarget = session.vtarget() or (np.round(cand.pos, 4).tolist() if cand is not None else None)
+        vtarget = np.round(cand.pos, 4).tolist() if cand is not None else None
         robot.command(q_cmd, grip, ghost=ghost, ghost_bad=ghost_bad, ghost_state=ghost_state, vtarget=vtarget)
         if t0 >= next_body_status:  # 10 Hz: status to the body client (echo for RTT) + HUD overlay on the VM screen
             next_body_status = t0 + 0.1
@@ -808,7 +755,7 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
                   "echo_age": round(t0 - last_body_arrival, 4) if last_body else None,
                   "pkt_s": len(seq_seen), "loss": round(max(0.0, loss), 3),
                   "vis_pct": pct(1), "inpos_pct": pct(2), "hand_pct": pct(3),
-                  "calib": session.view(), "mapping": type(retarget).__name__, "set_mirror": set_mirror,
+                  "calib": None, "mapping": type(retarget).__name__, "set_mirror": set_mirror,
                   "vtarget": vtarget, "grab_ready": cand.name if cand is not None else None,
                   "assist": arbiter.assist, "held": arbiter.held, "tcp_meas": np.round(tcp, 3).tolist(),
                   "presets": preset_names(presets, bool(real_arm.get("enabled"))),

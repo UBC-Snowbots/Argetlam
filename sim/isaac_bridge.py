@@ -201,7 +201,7 @@ def reset_scene():
 
 
 reset_scene()
-# Neutral marker: a white 3-axis cross at the box centre (your relaxed hand maps here after calibration).
+# Box-centre marker: a static white 3-axis cross at the workspace-box centre (a fixed reference in the sim view).
 neutral_mk = VisualizationMarkers(VisualizationMarkersCfg(prim_path="/Visuals/neutral", markers={
     "bar": sim_utils.CylinderCfg(radius=0.004, height=0.08, axis="Z", visual_material=sim_utils.PreviewSurfaceCfg(
         diffuse_color=(1.0, 1.0, 1.0), emissive_color=(0.6, 0.6, 0.6))),
@@ -212,7 +212,7 @@ neutral_mk.visualize(translations=np.array([_c] * 4, dtype=np.float32),
                      orientations=np.array([quat_z_to(np.array(d, float)) for d in
                                             ([1, 0, 0], [0, 1, 0], [0, 0, 1], [0, 0, 1])], dtype=np.float32),
                      marker_indices=[0, 0, 0, 1])
-# Verification target (magenta): touch it with the gripper during the calibration check.
+# vtarget marker (magenta): the app's current grab candidate (make a fist to grab it); hidden when there is none.
 vtarget = VisualizationMarkers(VisualizationMarkersCfg(prim_path="/Visuals/vtarget", markers={
     "t": sim_utils.SphereCfg(radius=0.025, visual_material=sim_utils.PreviewSurfaceCfg(
         diffuse_color=(0.95, 0.1, 0.85), emissive_color=(0.5, 0.05, 0.45), opacity=0.8))}))

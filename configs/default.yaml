@@ -20,20 +20,11 @@ net:                                   # laptop -> VM over the tailnet
   hud_video_port: 47131 # live webcam stream shown under the HUD (CameraFrame, forwarded by the app)
 
 body:
-  profile: data/profiles/{arm}_pranav.json   # calibration profile (created by C / "calibrate"); used when present
-  mode: position        # used until a calibration profile exists. position = wrist-rel-shoulder -> gripper offset;
-                        # gesture = swing/raise/reach -> yaw/height/reach (body/mirror.py);
-                        # arm_mirror = full-arm joint mirroring, no IK (body/arm_mirror.py);
-                        # plane = image-plane TCP teleop, depth ignored (body/plane.py; dev_arm_real default).
-                        # A saved calibration profile is NOT loaded in arm_mirror / plane mode (not TCP maps).
+  mode: plane           # body teleop mode. Two modes only:
+                        #   plane = image-plane TCP teleop, depth ignored, IK path (body/plane.py) - the default;
+                        #   arm_mirror = full-arm joint mirroring, no IK (body/arm_mirror.py) - the fallback.
+                        # (The legacy position / calibrated / gesture modes were removed.)
   clutch: {calib_s: 2.0, still_m: 0.03, palm_s: 1.0, raise_m: 0.05}  # F / open palm held up 1 s / left hand up
-  gesture_gains: [2.5, 1.0, 0.6]   # rad yaw per m sideways, m height per m up, m reach per unit elbow extension
-  # MediaPipe world axes (x image-right, y down, z toward camera = smaller) -> arm base (x fwd, y left, z up).
-  # Over-the-shoulder view: hand to YOUR right -> gripper right on screen. (Was [-1,0,0] for y: left/right inverted.)
-  axes: [[0, 0, -1], [1, 0, 0], [0, -1, 0]]
-  scale: [1.2, 1.4, 1.4]  # robot m per human m, per robot axis (fwd, lateral, up); monocular depth is the noisiest
-  origin: [0.45, 0.0, 0.45]
-  one_euro: {min_cutoff: 1.0, beta: 0.7}  # smooth when still, low lag when moving fast
   grip_from_hand: true  # fist closes the gripper; stand-in until EEG is live
 
 # Full-arm joint mirroring (body.mode = arm_mirror). Defaults here; dev_arm_real.yaml tunes neutral/gain/sign.
