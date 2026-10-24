@@ -29,7 +29,9 @@ arm:
   # FRACTION = 0.2 of the firmware max (80/40/60/110/90/90 deg/s). The sim_to_real follower default --speed is 0.2 too.
   max_vel: [0.2793, 0.1396, 0.2094, 0.3840, 0.3142, 0.3142]   # rad/s
   max_acc: [1.745, 1.745, 1.745, 1.745, 1.745, 1.745]         # rad/s^2  (= radians(100) each)
-  teleop_orient: axis
+  # frozen = position-only IK on joints 1-3, wrist (4-6) held: the wrist never spins to track position (issue 4,
+  # wrist_dig.py). Tool tilts ~7 deg on a 5 cm circle, ~12 deg at 10 cm. "axis" (free the roll) is still available.
+  teleop_orient: frozen
   # intersection of URDF joint limits and firmware travel (q = radians(fw)*dir + zero, fw in [0, FWMAX]),
   # 5 deg inside each bound. Home and both presets fit. j6 fw max 9999 -> firmware travel dominates [-174.5, 0].
   joint_limits_lower: [-0.8735, -1.8127, -1.2587, -1.4127, -1.8955, -9.9127]

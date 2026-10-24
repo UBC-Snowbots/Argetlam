@@ -82,6 +82,8 @@ def request_hw_home(real_arm: dict, confirm: bool, dry_run: bool = False):
     return True, "home sent to the real arm: every axis drives to its limit switch, then back to base"
 
 
+# -w 1 waits for one matching subscription before publishing, so a one-shot command is not lost to the DDS
+# discovery race (and is captured by a running record_real.sh recorder). The driver subscribes to /arm/command.
 HOME_CMD_EXAMPLE = ("source /opt/ros/jazzy/setup.bash && source ~/projects/ubc-rover-arm/RoverFlake2/install/setup.bash "
-                    "&& ros2 topic pub --once /arm/command rover_msgs/msg/ArmCommand "
+                    "&& ros2 topic pub --once -w 1 /arm/command rover_msgs/msg/ArmCommand "
                     + shlex.quote("{cmd_type: 72, cmd_value: 170}"))

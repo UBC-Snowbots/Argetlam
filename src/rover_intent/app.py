@@ -35,7 +35,8 @@ from .body.calib_session import CalibratedMapper, CalibrationSession
 from .body.calibration import Profile
 from .control.presets import HOME_HW, at_goal, plan_preset, preset_names, request_hw_home
 from .session import SessionRecorder
-from .types import Action, ArmPreset, BodyPose, ClutchMsg, EEGState, GripToggle, Intent, Query, Utterance
+from .types import (Action, ArmPreset, BodyPose, ClutchMsg, EEGState, GripToggle, Intent, MirrorMsg, Query,
+                    RealJoints, Utterance)
 
 log = logging.getLogger("rover_intent")
 ROOT = Path(__file__).resolve().parents[2]
@@ -108,6 +109,11 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
         raise ValueError(f"arm.on_drop {on_drop!r} is not one of the arm's presets {list(presets)}")
     real_arm = cfg.get("real_arm", {}) or {}
     joint_goal, goal_name, hw_busy_until = None, None, 0.0  # button-panel preset move / real-arm homing window
+    # "mirror real" state: the sim arm's joint targets come straight from the PHYSICAL arm (real_to_sim -> real_joints),
+    # no IK and no body/voice motion. Entered/left by a MirrorMsg (or STOP leaves it). real_t is the VM receive time of
+    # the last real sample (the one shared clock); if it goes stale (> 0.5 s) the sim holds.
+    mirror_real, real_q, real_fw, real_t = False, None, None, 0.0
+    MIRROR_STALE_S = 0.5
     lo_ws, hi_ws = cfg["safety"]["workspace_min"], cfg["safety"]["workspace_max"]
     sim = cfg.get("sim", {})
     default_cam = sim.get("views", {}).get(sim.get("default_view", "behind"))
@@ -173,8 +179,11 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
             body_target = last_target = None
 
     def finish(text, addr, intent, latency):
-        nonlocal q_cmd, T_des, body_target, joint_goal
+        nonlocal q_cmd, T_des, body_target, joint_goal, mirror_real
         log.info("heard %r -> %s (%.1fs)", text, intent.model_dump(exclude_none=True), latency)
+        if intent.action in (Action.stop, Action.reset) and mirror_real:
+            mirror_real = False  # STOP always leaves the mirror-real state
+            log.info("mirror real left by %s", intent.action.value)
         if intent.action in (Action.stop, Action.reset) and joint_goal is not None:
             log.info("preset %s cancelled by %s", goal_name, intent.action.value)
             joint_goal = None
@@ -213,24 +222,28 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
                     last_visible_t = t0
                 seq_seen.append((t0, msg.seq))
                 vis_seen.append((t0, bool(msg.visible), bool(msg.in_position), msg.hand_open is not None))
-                rel = np.asarray(msg.wrist) - np.asarray(msg.shoulder) if msg.visible else None
-                palm_up_open = bool(msg.hand_open is not None and msg.hand_open > 0.6 and msg.elbow is not None
-                                    and msg.wrist[1] < msg.elbow[1] - 0.02)          # MediaPipe y points down
-                left_raised = bool(msg.wrist_other is not None and msg.shoulder_other is not None
-                                   and msg.wrist_other[1] < msg.shoulder_other[1] - clutch.raise_m)
-                if session.state in ("positioning", "capturing"):
-                    palm_up_open = left_raised = False   # calibration poses (hand up, open palm) must not engage the arm
-                on_clutch(clutch.update(rel, palm_up_open, left_raised, t0))
-                if msg.visible and clutch.state == "following" and arbiter.mode == Mode.FOLLOW:
-                    tgt = retarget(msg)
-                    if tgt is not None:
-                        body_target, body_t, last_target = tgt, t0, tgt
-                    if grip_from_hand and msg.hand_open is not None:
-                        arbiter.on_hand(msg.hand_open, t0, arm.fk(robot.read_joints())[:3, 3])
-                if session.active:
-                    handle_session(session.update(t0, msg, bool(msg.in_position),
-                                                  tcp_meas=arm.fk(robot.read_joints())[:3, 3],
-                                                  camera=camera()))
+                if not mirror_real:  # mirroring the real arm: ignore the body for motion (still track it for the HUD)
+                    rel = np.asarray(msg.wrist) - np.asarray(msg.shoulder) if msg.visible else None
+                    palm_up_open = bool(msg.hand_open is not None and msg.hand_open > 0.6 and msg.elbow is not None
+                                        and msg.wrist[1] < msg.elbow[1] - 0.02)          # MediaPipe y points down
+                    left_raised = bool(msg.wrist_other is not None and msg.shoulder_other is not None
+                                       and msg.wrist_other[1] < msg.shoulder_other[1] - clutch.raise_m)
+                    if session.state in ("positioning", "capturing"):
+                        palm_up_open = left_raised = False   # calibration poses (hand up, open palm) must not engage
+                    on_clutch(clutch.update(rel, palm_up_open, left_raised, t0))
+                    if msg.visible and clutch.state == "following" and arbiter.mode == Mode.FOLLOW:
+                        tgt = retarget(msg)
+                        if tgt is not None:
+                            body_target, body_t, last_target = tgt, t0, tgt
+                        if grip_from_hand and msg.hand_open is not None:
+                            arbiter.on_hand(msg.hand_open, t0, arm.fk(robot.read_joints())[:3, 3])
+                    if session.active:
+                        handle_session(session.update(t0, msg, bool(msg.in_position),
+                                                      tcp_meas=arm.fk(robot.read_joints())[:3, 3],
+                                                      camera=camera()))
+            elif isinstance(msg, ClutchMsg) and mirror_real:   # clutch / calibrate are motion: refused while mirroring
+                rx.reply(addr, {"kind": "reply", "text": "clutch", "say": "Mirroring the real arm; say stop to leave.",
+                                "mode": arbiter.mode.value, "mirror": True})
             elif isinstance(msg, ClutchMsg) and msg.action in ("warmup", "calibrate"):
                 handle_session(session.start(t0))
             elif isinstance(msg, ClutchMsg) and msg.action == "redo_axis":
@@ -240,15 +253,18 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
                 on_clutch(clutch.toggle(t0))
                 rx.reply(addr, {"kind": "reply", "text": "clutch", "say": f"clutch: {clutch.state}",
                                 "mode": arbiter.mode.value})
-            elif isinstance(msg, Utterance) and ("calibrat" in msg.text.lower() or
+            elif isinstance(msg, Utterance) and not mirror_real and ("calibrat" in msg.text.lower() or
                                                  ("warm" in msg.text.lower() and "up" in msg.text.lower())):
                 handle_session(session.start(t0))
                 rx.reply(addr, {"kind": "reply", "text": msg.text, "say": "Calibration started.",
                                 "mode": arbiter.mode.value})
             elif isinstance(msg, Utterance):
                 stop = urgent_stop(msg.text)
-                if stop is not None:  # handled in this tick; never queued behind a cloud call
+                if stop is not None:  # handled in this tick; never queued behind a cloud call (STOP also leaves mirror)
                     finish(msg.text, addr, stop, 0.0)
+                elif mirror_real:  # any non-stop command is motion: refuse while mirroring the real arm
+                    rx.reply(addr, {"kind": "reply", "text": msg.text, "mode": arbiter.mode.value, "mirror": True,
+                                    "say": "Mirroring the real arm; say stop to leave."})
                 elif msg.offline:
                     finish(msg.text, addr, fallback_parse(msg.text, scene.names()), 0.0)
                 else:  # Nemotron takes seconds: run it off the control loop
@@ -256,6 +272,11 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
                                     pool.submit(parser.parse, msg.text, scene.names(), descriptions)))
             elif isinstance(msg, EEGState):
                 arbiter.on_eeg(msg.p_grasp, t0)
+            elif isinstance(msg, ArmPreset) and mirror_real:
+                ok, why = False, "refused: mirroring the real arm (say stop to leave)"
+                log.info("preset %s: %s", msg.name, why)
+                rx.reply(addr, {"kind": "reply", "text": f"preset {msg.name}", "ok": ok, "say": why,
+                                "mode": arbiter.mode.value, "mirror": True})
             elif isinstance(msg, ArmPreset):
                 if msg.name == HOME_HW:
                     if t0 < hw_busy_until:
@@ -283,6 +304,22 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
             elif isinstance(msg, GripToggle):
                 arbiter.on_grip_toggle(arm.fk(robot.read_joints())[:3, 3])
                 log.info("grip toggle (%s) in %s: gripper=%.0f", msg.source, arbiter.mode.value, arbiter.gripper)
+            elif isinstance(msg, RealJoints):
+                # one sample of the PHYSICAL arm (real_to_sim). Stamp it with the VM receive time (the shared clock),
+                # not the payload's t. Recorded above like every other inbound message.
+                if len(msg.q) >= 6:
+                    real_q, real_fw, real_t = np.array(msg.q[:6], float), list(msg.fw), t_recv
+            elif isinstance(msg, MirrorMsg):
+                if msg.on and not mirror_real:  # entering mirror: drop the clutch and HOLD so the body can't fight it
+                    if clutch.state != "idle":
+                        on_clutch(clutch._release())
+                    arbiter.on_intent(Intent(action=Action.stop))
+                    joint_goal, goal_name = None, None
+                    body_target = None
+                mirror_real = bool(msg.on)
+                log.info("mirror real %s", "on" if mirror_real else "off")
+                rx.reply(addr, {"kind": "reply", "text": "mirror", "mirror": mirror_real, "mode": arbiter.mode.value,
+                                "say": "Mirroring the real arm." if mirror_real else "Mirror off."})
             elif isinstance(msg, Query):
                 rx.reply(addr, {"kind": "state", "mode": arbiter.mode.value, "held": arbiter.held,
                                 "clutch": clutch.state, "assist": arbiter.assist, "mapping": type(retarget).__name__,
@@ -292,6 +329,8 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
                                 "plan_left": len(arbiter._plan), "table_top": scene.support_z,
                                 "preset": goal_name if joint_goal is not None else None,
                                 "hw_busy": round(max(0.0, hw_busy_until - t0), 1) if hw_busy_until else 0.0,
+                                "mirror": mirror_real,
+                                "mirror_age": round(t0 - real_t, 3) if (mirror_real and real_t) else None,
                                 "objects": {n: {"pos": np.round(o.pos, 4).tolist(),
                                                 "bottom_z": round(float(o.pos[2] - o.grasp_z), 4)}
                                             for n, o in scene.objects.items()}})
@@ -335,11 +374,21 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
             log.info("preset %s cancelled: %s took over", goal_name,
                      "the clutch" if clutch.state != "idle" else f"{arbiter.mode.value} mode")
             joint_goal = None
-        # button-panel preset: joint-space target straight into the SafetyLayer (vel/acc limits), no IK.
-        # teleop (FOLLOW) can free the wrist roll (orient="axis"); AUTO grasps keep full orientation.
+        # mirror real: the sim's joint target is the PHYSICAL arm's joints straight (no IK). If the real samples go
+        # stale (> 0.5 s) the sim holds. Button-panel preset: joint-space target straight into the SafetyLayer, no IK.
+        # teleop (FOLLOW) can free/freeze the wrist (orient from the profile); AUTO grasps keep full orientation.
+        mirror_age = (t0 - real_t) if real_t else None
+        mirror_hold = mirror_real and (real_q is None or mirror_age is None or mirror_age > MIRROR_STALE_S)
         orient = teleop_orient if arbiter.mode == Mode.FOLLOW else "full"
-        q_des = joint_goal if joint_goal is not None else arm.ik_step(q_cmd, T_des, orient=orient)
-        q_cmd = safety.step(q_cmd, q_des, dt, input_age)
+        if mirror_real and not mirror_hold:
+            q_des = real_q
+        elif mirror_real:                                    # real samples stale: hold the sim where it is
+            q_des = q_cmd
+        elif joint_goal is not None:
+            q_des = joint_goal
+        else:
+            q_des = arm.ik_step(q_cmd, T_des, orient=orient)
+        q_cmd = safety.step(q_cmd, q_des, dt, 0.0 if mirror_real else input_age)
         q_cmd = np.clip(q_cmd, q - WINDUP, q + WINDUP)  # anti-windup: never run far ahead of the real joints
         if joint_goal is not None and at_goal(q_cmd, q, joint_goal):
             log.info("preset %s reached", goal_name)

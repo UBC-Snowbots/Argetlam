@@ -93,3 +93,23 @@ class GripToggle(BaseModel):
     kind: Literal["grip_toggle"] = "grip_toggle"
     t: float
     source: str = "clench"
+
+
+class RealJoints(BaseModel):
+    """real_to_sim -> VM: one sample of the PHYSICAL arm's joints, from Rowan's /arm/feedback.
+    `fw` is the RAW firmware degrees (7: axes 1-6 then the EE at index 6); `q` is those converted to URDF radians
+    by control.stepper_map (6 axes). `t` is the real_to_sim node's send time (laptop/VM clock in the payload); the
+    app stamps the sample with its OWN VM receive time, which is the one shared clock used for everything else."""
+    kind: Literal["real_joints"] = "real_joints"
+    t: float
+    fw: list[float]                # raw firmware degrees, length 7 (index 6 = EE)
+    q: list[float]                 # URDF radians, length 6 (stepper_map.fw_to_q)
+    table: Optional[str] = None    # stepper_map table version that produced q (so a replay knows which table)
+
+
+class MirrorMsg(BaseModel):
+    """-> VM: enter or leave the "mirror real" state. While on (and real_joints are fresh) the sim arm's joint
+    targets are set straight from the real arm; body/voice motion is refused. STOP always leaves mirror."""
+    kind: Literal["mirror"] = "mirror"
+    t: float = 0.0
+    on: bool = True

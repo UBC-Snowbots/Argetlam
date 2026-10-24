@@ -25,16 +25,23 @@ import logging
 import math
 import os
 import socket
+import sys
 import time
 
-import rclpy
-from rclpy.node import Node
-from rover_msgs.msg import ArmCommand
+# Mapping = the single source of truth (rover_intent.control.stepper_map), imported via the repo src on sys.path so
+# this stays a pure-python no-numpy script on the system python. tools/sim_to_real.py (outside git) keeps a synced
+# copy of these constants inline; both must match stepper_map.
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
+from rover_intent.control.stepper_map import DEFAULT_TABLE  # noqa: E402
 
-ZERO_RAD = [-0.9608, -1.9390, -1.3460, -2.4108, 2.2060 - math.pi / 3, 0.0]
-DIR = [1, 1, 1, 1, -1, -1]
-FW_MAX_DEG = [180.0, 180.0, 140.0, 180.0, 180.0, 9999.0]
-FW_MAX_VEL = [80.0, 40.0, 60.0, 110.0, 90.0, 90.0]
+import rclpy  # noqa: E402
+from rclpy.node import Node  # noqa: E402
+from rover_msgs.msg import ArmCommand  # noqa: E402
+
+ZERO_RAD = list(DEFAULT_TABLE.zero_rad)
+DIR = list(DEFAULT_TABLE.dir)
+FW_MAX_DEG = list(DEFAULT_TABLE.fw_max_deg)
+FW_MAX_VEL = list(DEFAULT_TABLE.fw_max_vel)
 V_CMD = ord("V")
 LOGDIR = os.path.expanduser("~/projects/ubc-rover-arm/logs")
 
@@ -63,6 +70,7 @@ class SimQuery:
         self.s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.s.settimeout(0.05)
         self.hw_busy = 0.0
+        self.mirror = False   # True = the app is mirroring the real arm; the follower must not command it (one-way)
 
     def joints(self):
         self.s.sendto(json.dumps({"kind": "query", "t": time.time()}).encode(), self.addr)
@@ -75,6 +83,7 @@ class SimQuery:
             msg = json.loads(data)
             if msg.get("kind") == "state" and "q_meas" in msg:
                 self.hw_busy = float(msg.get("hw_busy", 0.0) or 0.0)
+                self.mirror = bool(msg.get("mirror", False))
                 return [float(x) for x in msg["q_meas"][:6]]
         return None
 
@@ -150,7 +159,7 @@ def main():
             info("dry run: nothing sent")
             return
         info(f"following on axes {[i + 1 for i in axes]} at {speed:.0%} speed. Ctrl+C to stop.")
-        t_sim, last_log, last_stale, last_busy, dt = time.monotonic(), 0.0, 0.0, 0.0, 1.0 / a.hz
+        t_sim, last_log, last_stale, last_busy, last_mirror, dt = time.monotonic(), 0.0, 0.0, 0.0, 0.0, 1.0 / a.hz
         while True:
             t0 = time.monotonic()
             rclpy.spin_once(node, timeout_sec=0.0)
@@ -162,6 +171,13 @@ def main():
                 node.send(zero)
                 error("real feedback stale: zero velocity, stopping")
                 break
+            if sim.mirror:                           # the app is mirroring the real arm: the follower must NOT drive it
+                node.send(zero)                      # (otherwise real -> sim -> real would be a loop). Hold, one-way.
+                if now - last_mirror > 1.0:
+                    last_mirror = now
+                    info("app reports mirror: holding (zero velocity) so the real->sim->real loop stays open")
+                time.sleep(max(0.0, dt - (time.monotonic() - t0)))
+                continue
             if sim.hw_busy > 0.0:                    # the app is homing the real arm: hold (zero velocity)
                 node.send(zero)
                 if now - last_busy > 1.0:

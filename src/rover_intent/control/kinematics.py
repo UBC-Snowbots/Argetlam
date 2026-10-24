@@ -140,7 +140,18 @@ class ArmModel:
 
         orient="full" (default): match the full target orientation (grasps, unchanged behaviour).
         orient="axis": constrain only the tool-pointing direction (self.tool_axis), leaving the roll about it free,
-        so teleop that only moves the target position doesn't make the wrist spin to chase a fixed roll (issue 2)."""
+        so teleop that only moves the target position doesn't make the wrist spin to chase a fixed roll (issue 2).
+        orient="frozen": position-only DLS on joints 1-3; joints 4-6 (the wrist) are held at their current values,
+        so frozen-wrist teleop never spins the wrist to track position (the wrist is near-singular at this home,
+        joint 5 ~ -28 deg). Tool tilt then grows with reach: ~7 deg on a 5 cm circle, ~12 deg at 10 cm (wrist_dig)."""
+        if orient == "frozen":
+            J = self.jacobian(q)[:3, :3]                      # position rows, joints 1-3 only
+            e = T_des[:3, 3] - self.fk(q)[:3, 3]
+            dq3 = J.T @ np.linalg.solve(J @ J.T + damping ** 2 * np.eye(3), e)
+            dq = np.zeros(self.dof)
+            dq[:3] = dq3
+            dq = np.clip(dq, -max_dq, max_dq)
+            return np.clip(q + dq, self.lower, self.upper)
         T = self.fk(q)
         if orient == "axis":
             r = axis_err(T[:3, :3] @ self.tool_axis, T_des[:3, :3] @ self.tool_axis)
