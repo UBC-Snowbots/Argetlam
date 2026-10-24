@@ -26,6 +26,7 @@ Only the chosen arm's hand is used (--side, default right); the other hand is ig
 import argparse
 import base64
 import json
+import os
 import socket
 import time
 import urllib.request
@@ -35,7 +36,7 @@ import cv2
 import mediapipe as mp
 from mediapipe.tasks.python import BaseOptions, vision
 
-DEFAULT_HOST = "rover-vm"  # rover-vm on the tailnet
+DEFAULT_HOST = os.environ.get("ROVER_HOST", "127.0.0.1")  # the VM's address (tailnet IP or hostname); or pass --host
 PORT = 47100
 SIDES = {"right": (12, 16), "left": (11, 15)}  # (shoulder, wrist) pose landmark ids
 SKEL = [11, 12, 13, 14, 15, 16, 23, 24, 0]      # shoulders, elbows, wrists, hips, nose -> HUD skeleton

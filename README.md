@@ -1,16 +1,20 @@
 # rover-intent
 
 **Drive a 6-axis rover arm with your body, your voice and (experimentally) your brain.**
-A webcam tracks your arm, a measured calibration syncs your frame of reference with the robot's camera view,
-NVIDIA Nemotron on Nebius Token Factory turns speech into structured robot commands, and an EEG decoder estimates
-grasp intent. Everything is developed against a physics simulation of the team's real arm in NVIDIA Isaac Sim /
-Isaac Lab, and designed to drive the physical arm through the same safety layer.
+A webcam tracks your arm and drives the gripper in the plane you see on screen, NVIDIA Nemotron on Nebius Token
+Factory (with an instant local fast path) turns speech into structured robot commands, a Muse 2 jaw-clench toggles
+the grip, and an EEG decoder estimates grasp intent. Everything is developed against a physics simulation of the
+team's real arm in NVIDIA Isaac Sim / Isaac Lab, and the same joint stream, through the same safety layer, now drives
+the physical arm.
 
 Built by UBC Rover for the **Nebius × NVIDIA Global AI Hackathon** (Physical AI track).
 
-> Status (2026-10): simulation stack, teleop, calibration, voice and the EEG research are working and tested in sim.
-> The physical-arm driver is the next milestone (see [Roadmap](#roadmap)). All numbers below are from the
-> simulation or from offline datasets unless stated otherwise.
+> Status (2026-10): the simulation stack, teleop, calibration, voice and the EEG research are working and tested in
+> sim, and the **physical dev arm is now driven**: the sim streams joint targets to a follower
+> (`scripts/sim_to_real.py`) that feeds Rowan's ROS 2 Jazzy `stepper_arm_driver`, which drives the real arm through
+> the same safety layer under the `dev_arm_real` profile. Voice presets and jogs have been run on the real arm; it
+> tracks the sim to within about 0.5 deg after settling. Numbers below are from simulation or offline datasets unless
+> they say "real arm".
 
 ---
 
@@ -41,10 +45,12 @@ Built by UBC Rover for the **Nebius × NVIDIA Global AI Hackathon** (Physical AI
 
 | Input | What you do | What the arm does |
 |---|---|---|
-| **Body** (webcam) | move your right hand | the gripper follows, 1:1 in direction, in the frame you see on screen |
+| **Body** (webcam) | move your right hand (default **plane** mode: image-plane only) | the gripper follows left/right and up/down in the frame you see; the left hand drives a joystick-rate reach |
 | **Hand** | make a fist / open your hand | the gripper closes / opens |
+| **Voice** | "move left 10 centimetres", "go to ready", "stow then home" | the instant local fast path runs it in the same tick, no cloud round trip |
 | **Voice** | "put the red cup next to the tall bottle" | Nemotron parses it; the arm plans and executes the pick-and-place |
 | **Voice** | "stop", "hold on", "reset" | handled locally and instantly (never waits on the cloud) |
+| **Muse 2** (EMG) | double jaw-clench | toggles the gripper open/closed (`eeg/clench.py`) |
 | **EEG** (research) | imagine / prepare a grasp | a decoder estimates grasp intent (offline and pseudo-online results below) |
 
 Visual feedback is built for one screen (streamed to the operator over Moonlight): the Isaac view shows a **ghost
@@ -87,8 +93,13 @@ overlay shows a mirror-view skeleton, clutch state, prompts and link latency.
  ┌──────────────── sim/isaac_bridge.py (Isaac Lab, 120 Hz physics, CPU PhysX) ────────────┐
  │  arm + gripper + cup / block / bottle · ghost + line · reach wireframe · neutral cross │
  └────────────────────────────────────────────────────────────────────────────────────────┘
-   (planned) robot/backends.py RealArm ─► USB serial ─► Teensy 4.1 stepper firmware
+   scripts/sim_to_real.py follower ─► Rowan's ROS 2 Jazzy stepper_arm_driver ─► Teensy 4.1 stepper firmware ─► real dev_arm
 ```
+
+The real arm is driven by mirroring the simulated joint targets: `scripts/sim_to_real.py` reads the app's joint
+stream and republishes it (at a conservative speed fraction) to Rowan's `stepper_arm_driver` over ROS 2 Jazzy, so
+the sim and the hardware run the same trajectory through the same safety layer. `scripts/real_to_sim.py` mirrors the
+other way (the real arm's measured joints drive the sim view). See [The arm and the simulation](#the-arm-and-the-simulation).
 
 Design rules that shaped the code:
 - **Only decisions go to the cloud.** Nemotron decides *what* to do; motion, IK, safety and the control loop stay
@@ -119,6 +130,18 @@ Design rules that shaped the code:
 
 The client sends 30 packets/s with a sequence number; the app echoes the latest one so the client can show the real
 round-trip time (excluding the app's own hold time) and packet loss.
+
+### Teleop modes
+
+- **`plane`** (default on the real arm, [`docs/PLANE_TELEOP.md`](docs/PLANE_TELEOP.md)): the camera sits in front of
+  you and only the image plane is used. The right hand moves the gripper left/right and up/down; the left hand is a
+  joystick-rate reach (hold it high to creep forward, low to pull back, a dead zone in between). Depth, the noisiest
+  MediaPipe axis, is ignored, so there is no calibration capture. This is the mode behind the real-arm sessions.
+- **`arm_mirror`** ([`docs/ARM_MIRROR.md`](docs/ARM_MIRROR.md)): full-arm joint mirroring, no IK. Your shoulder,
+  elbow and wrist angles map straight to the arm's joints. Also has no calibration capture.
+
+The calibrated-mapper path below (a measured body-to-robot frame fit) is used by the older mapping mode and is kept
+for reference; `plane` and `arm_mirror` do not load a calibration profile.
 
 ---
 
@@ -198,12 +221,21 @@ The `SafetyLayer` sits between every command source and the arm:
  {"action": "move", "object": "block", "relation": "beside", "reference": "cup", "say": "..."}
 ```
 
-- The call runs **off the control loop** (worker thread); a later "stop" cancels pending cloud results.
+- **Instant local fast path** (`src/rover_intent/planner/fast_path.py`): a strict local parser runs in the control
+  loop *before* the cloud call and handles the short commands with no round trip (< 50 ms): named poses
+  (stow / ready / go back / home ...), Cartesian jogs ("move left 10 cm", "forward a bit"), joint jogs ("turn the
+  base 20 degrees"), speed ("slower" / "normal speed"), short sequences ("stow then home"), and context ("again",
+  "the other way"). Anything it does not fully understand returns `None` and falls through to Nemotron, so it can
+  never misfire on a sentence like "put the cup left of the bottle".
+- The cloud call runs **off the control loop** (worker thread); a later "stop" cancels pending cloud results.
 - No hand-written language rules or object whitelists: the model resolves colours, synonyms and ambiguity itself
   and may answer `clarify` ("which one?"); the skill layer still refuses objects it cannot see.
 - On 7 test phrases Nano parsed 7/7 and Super 5/7 (Super heard "whoa whoa hold on" as *grasp*), so Nano is the
-  default. Typical latency 1.5–4 s.
-- Without `NEBIUS_API_KEY` an offline keyword parser keeps the loop usable.
+  default. Typical latency 1.5-4 s.
+- **On the real-arm profile** (`dev_arm_real`) named poses and the no-camera jogs/sequences/speed move at once, with
+  no spoken "yes" (the two-step confirm was too slow on the real mic); the pick/place **skills stay confirm-gated**.
+- Without `NEBIUS_API_KEY` an offline keyword parser keeps the loop usable. Full latency/accuracy table in
+  [`docs/VOICE.md`](docs/VOICE.md).
 
 ---
 
@@ -226,16 +258,32 @@ approach). This fixed a real bug: jumping the IK target 10 cm down produced a cu
 
 ## The arm and the simulation
 
-Two arm profiles are supported (`configs/arms/*.yaml`); the default is the physical arm.
+Three arm profiles are supported (`configs/arms/*.yaml`): **dev_arm** (sim), **dev_arm_real** (the same arm tuned for
+the physical hardware), and **rover2026**.
 
-| | **dev_arm** (default, the team's 2023 / development arm) | rover2026 |
+| | **dev_arm** (the team's 2023 / development arm) | rover2026 |
 |---|---|---|
 | source | team description `dev_arm_description` | 2025-26 SolidWorks export |
 | joints | 6 revolute, base yaw ±86° | 6 revolute, base yaw ~327° |
 | tool | +z of `link_6`, TCP 0.20 m | +x of `a6_EE_holder`, TCP 0.145 m |
 | actuation (real) | steppers + Teensy 4.1, USB serial | Maxon motors, moteus over CAN |
-| reach box (top-down, from home) | x 0.40–0.62, y ±0.40, z 0.03–0.32 m | x 0.35–0.80, y ±0.40, z 0.15–0.45 m |
+| reach box (top-down, from home) | x 0.40-0.62, y ±0.40, z 0.03-0.32 m | x 0.35-0.80, y ±0.40, z 0.15-0.45 m |
 | objects | on the arm's own surface | on a 12 cm table |
+
+### Driving the real arm (`dev_arm_real`)
+
+The `dev_arm_real` profile is the sim dev arm retuned from bench measurements (2026-10-23) so the hardware can follow
+the sim safely:
+- home is Rowan's return-to-base rest pose, and the workspace box is moved up and in to contain it and sit inside the
+  real reachable shell;
+- the firmware runs a velocity command at **about half** the commanded speed (bench sweep), so the per-joint velocity
+  caps are dropped to a conservative fraction of the firmware max and the follower defaults to the matching speed, so
+  the sim never outruns the arm;
+- there is a measured **0.17-0.31 s command lag** before the near-instant ramp, so a gentler sim ramp is used.
+
+`scripts/record_real.sh` records a raw session, `scripts/real_bag_to_csv.py` converts it to CSV, and the
+`scripts/bench/` sweeps (axis, drift, end-stop) produced the numbers above. See
+[`docs/REAL_DATA.md`](docs/REAL_DATA.md) and [`docs/BENCH_SESSION.md`](docs/BENCH_SESSION.md).
 
 Simulation details:
 - Isaac Sim 6.0.1 + Isaac Lab 3.0, standalone script, CPU PhysX for a single arm (≈5× faster per step than the GPU
@@ -342,28 +390,32 @@ stays on local disk and is never committed or uploaded.
 rover-intent/
 ├── configs/
 │   ├── default.yaml            shared settings (loop, network, body mapping, Nemotron, EEG, clutch)
-│   └── arms/{dev_arm,rover2026}.yaml   arm-specific: URDF, joints, home, limits, reach box, scene, sim actuators, views
+│   └── arms/{dev_arm,dev_arm_real,rover2026}.yaml   arm-specific: URDF, joints, home, limits, reach box, scene, modes
 ├── src/rover_intent/
 │   ├── app.py                  the 50 Hz control loop wiring everything together
 │   ├── config.py               profile-aware config loader (ROVER_ARM / --arm)
-│   ├── types.py                message types (also the laptop ↔ host JSON)
-│   ├── body/                   retarget (position mode, One-Euro), mirror (gesture mode), clutch,
+│   ├── types.py                message types (also the laptop <-> host JSON)
+│   ├── body/                   plane (image-plane teleop), arm_mirror (full-arm joint mirror), clutch,
 │   │                           calibration (frame, capture, Kabsch fit, profile), calib_session (session + mapper)
-│   ├── control/                kinematics (URDF FK, Jacobian, DLS IK), safety, arbiter
-│   ├── planner/                nemotron (intent parser), scene, skills
-│   ├── robot/backends.py       MockArm · IsaacArm (UDP) · RealArm (to do)
+│   ├── control/                kinematics (URDF FK, Jacobian, DLS IK), safety, arbiter, stepper_map
+│   ├── planner/                fast_path (instant local parser), nemotron (intent parser), scene, skills
+│   ├── robot/backends.py       MockArm · IsaacArm (UDP) · RealArm (unused; real arm driven via scripts/sim_to_real.py)
 │   ├── transport/udp.py        JSON-over-UDP link
-│   └── eeg/                    datasets, motor-imagery training, reach-and-grasp studies, hybrid decoder, live
+│   └── eeg/                    datasets, motor-imagery training, reach-and-grasp studies, hybrid decoder, clench, live
 ├── sim/
 │   ├── isaac_bridge.py         Isaac Lab scene + UDP bridge, markers, camera views
-│   ├── make_dev_arm_urdf.py    dev arm + placeholder gripper → URDF
-│   ├── make_gripper_urdf.py    rover2026 + gripper → URDF
-│   └── import_gripper.py       URDF → USD (Isaac Sim importer)
-├── laptop/                     body_client.py (webcam), voice_client.py (Whisper) — standalone scripts
-├── scripts/                    tcp_relay.py, hud.py, check_grasps.py, gate.sh, fake_laptop.py
+│   ├── make_dev_arm_urdf.py    dev arm + placeholder gripper -> URDF
+│   ├── make_gripper_urdf.py    rover2026 + gripper -> URDF
+│   └── import_gripper.py       URDF -> USD (Isaac Sim importer)
+├── ros/servo/                  MoveIt Servo on the simulated arm (experimental; sim / mock only)
+├── laptop/                     body_client.py (webcam), voice_client.py (Whisper) - standalone single-file scripts
+├── scripts/                    sim_to_real.py / real_to_sim.py (real-arm follower + mirror), record_real.sh +
+│                               real_bag_to_csv.py (recorder + CSV), bench/ (characterization), tcp_relay.py, hud.py,
+│                               check_grasps.py, gate.sh, replay_session.py, fake_laptop.py, publish.sh
 ├── assets/                     dev_arm (team model, see SOURCE.md), rover2026
 ├── tests/                      unit + integration tests (control loop, calibration flow, decoder streaming)
-└── docs/                       PLAN.md, EEG.md, GRIPPER.md, REAL_ARM.md, VIDEO_HUD.md
+└── docs/                       PLAN.md, VOICE.md, PLANE_TELEOP.md, ARM_MIRROR.md, REAL_ARM.md, REAL_DATA.md,
+                                BENCH_SESSION.md, VIDEO_HUD.md, EEG.md, GRIPPER.md
 ```
 
 ---
@@ -414,6 +466,10 @@ python voice_client.py --host <host-tailnet-ip>
 # laptop (when UDP can't reach the host)
 ssh -N -L 47120:127.0.0.1:47120 <host>
 python body_client.py --tunnel 127.0.0.1:47120
+
+# real arm: run the app on the dev_arm_real profile, then the follower (needs Rowan's stepper_arm_driver up)
+.venv/bin/python -m rover_intent.app --backend isaac --arm dev_arm_real
+source /opt/ros/jazzy/setup.bash && python3 scripts/sim_to_real.py --speed 0.2   # --dry to print only
 ```
 
 First session: stand so the guide turns green → **C** (calibrate, ~35 s) → **F** or raise your left hand to follow →
@@ -431,9 +487,10 @@ works. See `docs/VIDEO_HUD.md` for the flags, sizing and the UDP-vs-tunnel size 
 ## Testing and the regression gate
 
 ```bash
-.venv/bin/python -m pytest -q        # 51 tests: kinematics, safety, parser, skills, arbiter, clutch,
-                                     # calibration, the full control loop and calibration flow over UDP (mock arm),
-                                     # streaming EEG decoder == batch path, per-arm IK reach of every skill waypoint
+.venv/bin/python -m pytest -q        # 314 tests: kinematics, safety, parser, fast path, skills, arbiter, clutch,
+                                     # calibration, plane / arm_mirror teleop, the full control loop and calibration
+                                     # flow over UDP (mock arm), streaming EEG decoder == batch path, sim_to_real
+                                     # follower, per-arm IK reach of every skill waypoint
 scripts/gate.sh                      # tests + live grasp check in Isaac (every pick and every "move X beside Y")
 ```
 
@@ -448,8 +505,10 @@ home-pose change once broke the bottle grasp and only a re-run caught it.
 `arm_profile`, the `ROVER_ARM` environment variable or `--arm`. Values marked `PLACEHOLDER` are not real hardware
 data yet (accelerations, the real gripper, rover2026 home).
 
-Key settings: `body.mode` (position / gesture, used until a calibration profile exists), `body.clutch`,
-`body.profile` (calibration profile path), `safety.workspace_min/max`, `arm.max_vel/max_acc`, `nemotron.model`.
+Key settings: `body.mode` (`plane` | `arm_mirror`; `plane` is the real-arm default), `body.clutch`,
+`body.grip_from_hand` (set `false` when the Muse clench toggle drives the gripper), `safety.workspace_min/max`,
+`arm.max_vel/max_acc`, `nemotron.model`, `confirm.presets/motion` (off on `dev_arm_real` so voice poses and jogs
+move at once).
 
 ---
 
@@ -473,19 +532,23 @@ Key settings: `body.mode` (position / gesture, used until a calibration profile 
 |---|---|
 | grasp gate in Isaac (dev arm) | 9/9: picks lift 23 / 11 / 26 cm, all six "move X beside Y" land within 1.2 cm |
 | sim speed | 1.00× real time under load (was 0.82×) |
+| **real arm** (dev_arm_real, voice presets + jogs) | tracks the sim to within about 0.5 deg after settling; firmware runs ~half the commanded speed, 0.17-0.31 s command lag (bench sweep) |
 | calibration (scripted operator standing 15° off-axis) | fit residual 0.1°, targets 2.0 / 2.1 / 2.2 / 1.8 cm, ~36 s |
-| voice parsing (Nemotron Nano) | 7/7 test phrases, 1.5–4 s |
+| voice parsing (Nemotron Nano) | 7/7 test phrases, 1.5-4 s |
 | safety layer | 20 000-step stress test: velocity/acceleration limits never exceeded |
 | EEG | see [EEG grasp-intent research](#eeg-grasp-intent-research) |
 
-Everything above is simulation, scripted input or offline data. Live operator sessions and the physical arm are next.
+The real arm has been driven by voice presets and jogs under the `dev_arm_real` profile. The laptop camera HUD panel
+and the `plane` left-hand joystick reach are implemented but not yet verified in a live session; everything else above
+is simulation, scripted input or offline data.
 
 ---
 
 ## Known limitations
 
-- **Physical arm not driven yet**: `RealArm` is a stub; joint directions, zero offsets and gear ratios need a
-  hardware session.
+- **Real arm driven, not yet fully commissioned**: the sim drives the hardware through the `sim_to_real.py` follower
+  and Rowan's `stepper_arm_driver` (the `RealArm` serial backend is unused), and voice presets and jogs have run on
+  it; broader live operator sessions, per-axis sign/offset refinement and the live camera HUD are still to come.
 - **Gripper**: the real end effector's geometry is unknown; a placeholder parallel gripper is used in sim.
 - **Monocular depth**: forward/back is the noisiest axis; the calibration's per-axis scales and filtering compensate
   but don't remove it.
@@ -499,9 +562,9 @@ Everything above is simulation, scripted input or offline data. Live operator se
 
 ## Roadmap
 
-1. Real-arm serial driver (Teensy text protocol: absolute moves, velocity, angle feedback) behind the same safety
-   layer; hardware calibration of directions, offsets and gear ratios; half-speed limits for demos.
-2. Live operator sessions with calibration; tune the stand-here guide.
+1. Finish commissioning the real arm: per-axis sign/offset refinement, wider workspace, and verifying the camera HUD
+   and the `plane` joystick reach in a live session.
+2. Live operator sessions with the body teleop; tune the stand-here guide.
 3. Context-gated EEG (listen only near an object) and per-user calibration.
 4. Perception for the real scene (ArUco / detection) to replace sim ground truth.
 5. Demo video and submission.

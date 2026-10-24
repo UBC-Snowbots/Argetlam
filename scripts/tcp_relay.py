@@ -2,7 +2,7 @@
 
     python scripts/tcp_relay.py            # listens on 127.0.0.1:47101... see --port
 Laptop:
-    ssh -N -L 47120:127.0.0.1:47120 rover-vm        (leave running)
+    ssh -N -L 47120:127.0.0.1:47120 your-server        (leave running)
     python body_client.py --tunnel 127.0.0.1:47120
 
 Protocol: newline-delimited JSON both ways. Each TCP client gets its own UDP socket, so the app's replies and 10 Hz
