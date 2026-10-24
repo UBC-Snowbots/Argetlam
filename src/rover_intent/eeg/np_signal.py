@@ -1,5 +1,5 @@
 """Numpy-only stand-ins for the few scipy.signal functions the Muse laptop path uses (welch, butter, iirnotch,
-tf2sos, sosfilt, sosfilt_zi). Used only when SciPy can't be imported: on the laptop ("bench-laptop"), Windows Smart App
+tf2sos, sosfilt, sosfilt_zi). Used only when SciPy can't be imported: on the Windows laptop, Windows Smart App
 Control blocks SciPy's compiled DLLs (2026-10-23: "DLL load failed while importing cython_blas"), while numpy and
 BrainFlow load fine. The math follows scipy.signal (same defaults for the arguments we use) and
 tests/test_np_signal.py checks the outputs against SciPy on the VM.

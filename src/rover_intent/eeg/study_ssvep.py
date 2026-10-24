@@ -22,6 +22,9 @@ import numpy as np
 
 from rover_intent.eeg.ssvep import TRCA, cca_scores, fbcca_scores, itr_bits_per_min, reference_signals
 
+# default data location: the shared data/ folder next to the repo (override with --data / --out)
+_DATA = Path(__file__).resolve().parents[3].parent / "data"
+
 MUSE_PROXY = ["TP7", "TP8", "T7", "T8"]            # nearest to Muse TP9/TP10 (+ temporal); no AF7/AF8 in this montage
 AUX_OZ = ["Oz"]                                    # single "AUX electrode over the occiput" scenario
 OCCIPITAL9 = ["Pz", "PO5", "PO3", "POz", "PO4", "PO6", "O1", "Oz", "O2"]  # standard Tsinghua ceiling
@@ -186,8 +189,8 @@ def run_study(subjects, data_path, out_path):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--data", default="../data/mne_data")
-    ap.add_argument("--out", default="../data/eeg_studies/ssvep_results.json")
+    ap.add_argument("--data", default=str(_DATA / "mne_data"))
+    ap.add_argument("--out", default=str(_DATA / "eeg_studies/ssvep_results.json"))
     ap.add_argument("--subjects", default="1-9", help="e.g. 1-9 or 1,2,3")
     args = ap.parse_args(argv)
     if "-" in args.subjects:

@@ -23,6 +23,9 @@ import numpy as np
 
 from rover_intent.eeg.alpha import alpha_log_features, rel_alpha
 
+# default data location: the shared data/ folder next to the repo (override with --data / --out)
+_DATA = Path(__file__).resolve().parents[3].parent / "data"
+
 # EEGMMIDB 10-10 names after eegbci.standardize()
 MUSE_PROXY = ["AF7", "AF8", "TP7", "TP8", "T9", "T10"]  # nearest to Muse TP9/AF7/AF8/TP10 (no TP9/TP10 in this montage)
 POSTERIOR = ["O1", "Oz", "O2", "P7", "P8"]              # ceiling: a real occipital/parietal montage
@@ -185,8 +188,8 @@ def _loso(per_subj):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--data", default="../data/mne_data")
-    ap.add_argument("--out", default="../data/eeg_studies/alpha_results.json")
+    ap.add_argument("--data", default=str(_DATA / "mne_data"))
+    ap.add_argument("--out", default=str(_DATA / "eeg_studies/alpha_results.json"))
     ap.add_argument("--subjects", type=int, default=109)
     args = ap.parse_args(argv)
     subjects = list(range(1, args.subjects + 1))

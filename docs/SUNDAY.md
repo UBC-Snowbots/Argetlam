@@ -19,7 +19,7 @@ Tool: `src/rover_intent/eeg/sunday.py`. Run it as `python -m rover_intent.eeg.su
 
 ## SATURDAY (10 min, NO Muse) - preflight
 
-On the Windows laptop ("bench-laptop"), in the repo, with the venv active:
+On the Windows laptop, in the repo, with the venv active:
 
 ```
 pip install -e ".[muse]"              # brainflow + scipy + pygame (one time)
