@@ -584,11 +584,14 @@ def preflight(session_dir: Path | None = None) -> dict:
             check(f"import {mod}", True, "present")
         except Exception as e:  # noqa: BLE001
             check(f"import {mod}", False, f"MISSING ({e}); run the pip install below")
-    try:  # optional: Windows Smart App Control can block SciPy's DLLs; numpy stand-ins (eeg/np_signal.py) take over
-        import scipy.signal  # noqa: F401
-        check("import scipy.signal", True, "present")
-    except Exception as e:  # noqa: BLE001
-        check("import scipy.signal", False, f"unavailable ({str(e)[:80]}); using the numpy-only filters instead",
+    # optional: Windows Smart App Control can block SciPy's DLLs. scipy.signal loads lazily, so "import scipy.signal"
+    # can succeed while welch/sosfilt fail; report what the session code actually ended up using.
+    from rover_intent.eeg import alpha as _alpha, clench as _clench
+    impl = {_alpha.welch.__module__.split(".")[0], _clench.sosfilt.__module__.split(".")[0]}
+    if impl == {"scipy"}:
+        check("signal filters", True, "SciPy")
+    else:
+        check("signal filters", False, "SciPy blocked or missing: using the numpy-only filters (eeg/np_signal.py)",
               fatal=False)
     try:                                          # sklearn is only for the offline MI studies, not the session
         import sklearn  # noqa: F401
@@ -653,11 +656,16 @@ def _bluetooth_present():
     import subprocess
     try:
         if platform.system() == "Windows":
-            r = subprocess.run(["powershell", "-NoProfile", "-Command",
-                                "Get-PnpDevice -Class Bluetooth -Status OK | Select-Object -First 1 FriendlyName"],
-                               capture_output=True, text=True, timeout=15)
+            # the radio itself sits on USB or PCI; paired devices' profiles (BTHENUM\..., e.g. a headset's
+            # "Avrcp Transport") are also in the Bluetooth class and must not count as the adapter
+            ps = ("$d = Get-PnpDevice -Class Bluetooth -Status OK; "
+                  "$a = $d | Where-Object { $_.InstanceId -match '^(USB|PCI)\\\\' } | Select-Object -First 1; "
+                  "if ($a) { $a.FriendlyName } elseif ($d) { 'NOADAPTER' }")
+            r = subprocess.run(["powershell", "-NoProfile", "-Command", ps], capture_output=True, text=True, timeout=15)
             name = r.stdout.strip().splitlines()[-1].strip() if r.stdout.strip() else ""
-            return name or bool(r.returncode == 0 and r.stdout.strip())
+            if name == "NOADAPTER":
+                return False
+            return name or False
         if platform.system() == "Linux":
             r = subprocess.run(["hciconfig"], capture_output=True, text=True, timeout=5)
             return "hci" in r.stdout
