@@ -13,6 +13,7 @@ import subprocess
 import sys
 import time
 
+import benchlib
 import rclpy
 from rclpy.node import Node
 from rover_msgs.msg import ArmCommand
@@ -110,12 +111,5 @@ class Recording:
 
     def __exit__(self, *exc):
         if self.proc is not None:
-            try:
-                os.killpg(os.getpgid(self.proc.pid), signal.SIGINT)
-                self.proc.wait(timeout=15)
-            except Exception:  # noqa: BLE001
-                try:
-                    self.proc.terminate()
-                except Exception:  # noqa: BLE001
-                    pass
-        return False
+            benchlib.stop_group(self.proc)
+

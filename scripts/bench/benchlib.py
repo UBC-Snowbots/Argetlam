@@ -6,6 +6,10 @@ firmware max speed, so the cap cannot be bypassed by a wrong argument. Mapping/l
 """
 from __future__ import annotations
 
+import os
+import signal
+import time
+
 from rover_intent.control.stepper_map import DEFAULT_TABLE, in_travel
 
 SPEED_CAP = 0.2   # hard fraction of firmware max speed the bench may command, ever
@@ -118,3 +122,49 @@ def per_axis_drift(ts, fw_rows):
         sxt = sum((ts[i] - tbar) * (fw_rows[i][a] - xbar) for i in range(n))
         slopes.append(sxt / stt)
     return slopes
+
+
+def stop_group(proc, waits=(5.0, 5.0, 2.0)):
+    """Stop record_real.sh and EVERYTHING it started (ros2 bag + the type-pin node share its process group).
+    `ros2 bag record` here ignores SIGINT (2026-10-23 bench: it kept running and held the caller's stdout open, so
+    the sweep looked hung), so escalate SIGINT -> SIGTERM -> SIGKILL on the whole group."""
+    try:
+        pgid = os.getpgid(proc.pid)
+    except ProcessLookupError:
+        return
+    for sig, wait in zip((signal.SIGINT, signal.SIGTERM, signal.SIGKILL), waits):
+        try:
+            os.killpg(pgid, sig)
+        except ProcessLookupError:
+            return
+        t_end = time.monotonic() + wait
+        while time.monotonic() < t_end:
+            proc.poll()                     # reap the bash leader so it doesn't linger as a zombie in the group
+            if not group_alive(pgid):
+                return
+            time.sleep(0.1)
+
+
+def group_alive(pgid: int) -> bool:
+    """True if any process in group `pgid` is still running. Killed children can sit as zombies (state Z) until
+    their new parent reaps them; they hold no files or pipes, so they don't count. Linux /proc, else killpg probe."""
+    try:
+        entries = os.listdir("/proc")
+    except OSError:
+        try:
+            os.killpg(pgid, 0)
+            return True
+        except ProcessLookupError:
+            return False
+    for e in entries:
+        if not e.isdigit():
+            continue
+        try:
+            with open(f"/proc/{e}/stat") as f:
+                stat = f.read()
+        except OSError:
+            continue
+        fields = stat[stat.rindex(")") + 2:].split()      # after "pid (comm) ": state ppid pgrp ...
+        if int(fields[2]) == pgid and fields[0] != "Z":
+            return True
+    return False

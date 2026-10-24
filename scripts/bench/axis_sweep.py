@@ -36,6 +36,30 @@ def run_segment(arm, axis0, v, dur, hz=50.0):
     return ts, fw
 
 
+def return_to(arm, axis0, target, frac, kp=1.0, deadband=0.3, settle_s=1.0, timeout=20.0, hz=50.0):
+    """Slow capped P-loop back to `target` (fw deg) on one axis, then zero. Needed because +v/-v velocity steps don't
+    cancel: the ~0.5 s command-to-motion lag measured on axis 1 (2026-10-23) left the arm 1-3 deg off its start.
+    kp is low (1/s) so kp * lag stays well under pi/2 (no oscillation). Returns the final error in deg."""
+    dt, t_end, t_in = 1.0 / hz, time.monotonic() + timeout, None
+    while time.monotonic() < t_end:
+        t0 = time.monotonic()
+        rclpy.spin_once(arm, timeout_sec=0.0)
+        e = target - arm.fw[axis0]
+        if abs(e) <= deadband:
+            arm.send_v([0.0] * 6)
+            t_in = t_in or time.monotonic()
+            if time.monotonic() - t_in >= settle_s:
+                break
+        else:
+            t_in = None
+            v = benchlib.p_step(target, arm.fw[axis0], axis0, frac, kp=kp, deadband=deadband)
+            arm.send_v([v if i == axis0 else 0.0 for i in range(6)])
+        time.sleep(max(0.0, dt - (time.monotonic() - t0)))
+    arm.stop()
+    rclpy.spin_once(arm, timeout_sec=0.1)
+    return target - arm.fw[axis0]
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--axis", type=int, required=True, help="1-based axis to sweep")
@@ -63,6 +87,7 @@ def main():
         if not ok:
             print(f"refused: start pose outside firmware travel on axes {bad} (fw={[round(x, 1) for x in arm.fw]})")
             return
+        start = arm.fw[axis0]
         with benchros.Recording(f"axis_sweep_a{a.axis}"):
             rows = []
             for s in steps:
@@ -73,6 +98,9 @@ def main():
                 est = benchlib.estimate_axis_response(ts, fw, v)
                 rows.append((s, v, est))
             arm.stop()
+            err = return_to(arm, axis0, start, frac)
+            print(f"back at the start: axis {a.axis} {arm.fw[axis0]:.2f} deg (start {start:.2f}, error {err:+.2f})")
+    print("done: recorder stopped", flush=True)
     print(f"\naxis {a.axis} response (cap {cap:.1f} deg/s):")
     print(f"{'cmd deg/s':>10} {'capped':>8} {'max_vel':>9} {'lag s':>8} {'accel deg/s^2':>14}")
     for s, v, e in rows:

@@ -79,3 +79,57 @@ def test_per_axis_drift_matches_a_known_slope():
     assert slopes[0] == pytest.approx(-0.006, abs=1e-6)
     assert slopes[1] == pytest.approx(0.0, abs=1e-9)
     assert slopes[2] == pytest.approx(0.0, abs=1e-9)
+
+
+def test_stop_group_kills_a_recorder_that_ignores_sigint():
+    """2026-10-23 bench: `ros2 bag record` ignored SIGINT, kept running and held the sweep's stdout open, so the sweep
+    looked hung. stop_group must escalate to the whole process group and return quickly."""
+    import os
+    import subprocess
+    import time
+    # a stand-in for record_real.sh: a bash leader plus a child that ignores SIGINT, both in their own group
+    proc = subprocess.Popen(["bash", "-c", "trap '' INT; sleep 60 & wait"], preexec_fn=os.setsid)
+    time.sleep(0.3)
+    pgid = os.getpgid(proc.pid)
+    t0 = time.monotonic()
+    benchlib.stop_group(proc, waits=(0.5, 2.0, 2.0))
+    assert time.monotonic() - t0 < 4.0
+    assert not benchlib.group_alive(pgid)  # nobody left running in the group (zombies awaiting reaping don't count)
+
+
+def test_return_to_start_converges_despite_command_lag(monkeypatch):
+    """The sweep's +v/-v steps don't cancel (0.5 s command lag), so it ends with a P-loop back to the start. Against a
+    fake arm with that lag it must end inside the 0.3 deg deadband without oscillating."""
+    import collections
+    import types
+    import time
+    rclpy = types.ModuleType("rclpy")
+    rclpy.spin_once = lambda *a, **k: None
+    monkeypatch.setitem(sys.modules, "rclpy", rclpy)
+    monkeypatch.setitem(sys.modules, "benchros", types.ModuleType("benchros"))
+    import importlib
+    sweep = importlib.import_module("axis_sweep")
+    clock = [0.0]
+    monkeypatch.setattr(sweep.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(sweep.time, "sleep", lambda s: clock.__setitem__(0, clock[0] + max(s, 0.02)))
+
+    class LaggyArm:
+        def __init__(self, pos):
+            self.fw = [pos, 30, 20, 125, 94, 180, 0]
+            self.q = collections.deque([0.0] * 25)      # 25 ticks x 20 ms = 0.5 s command lag
+            self.sent = []
+
+        def send_v(self, v6):
+            self.q.append(v6[0])
+            self.fw[0] += self.q.popleft() * 0.02
+            self.sent.append(v6[0])
+
+        def stop(self):
+            self.send_v([0.0] * 6)
+
+    arm = LaggyArm(57.04)
+    err = sweep.return_to(arm, 0, 60.01, 0.2)
+    assert abs(err) <= 0.6                                 # lag can carry it a little past the deadband edge
+    assert max(abs(v) for v in arm.sent) <= 16.0 + 1e-9    # still under the 0.2x cap on axis 1
+    signs = [v > 0 for v in arm.sent if abs(v) > 1e-9]
+    assert sum(a != b for a, b in zip(signs, signs[1:])) <= 2   # no sustained oscillation
