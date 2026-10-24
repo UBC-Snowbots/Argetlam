@@ -78,12 +78,14 @@ def test_profile_home_presets_box_and_limits(real):
     assert not np.allclose(arm.fk(home)[:3, :3] @ arm.tool_axis, [0, 0, -1], atol=0.2)
 
 
-def test_max_vel_is_a_fraction_of_firmware_and_matches_follower_default(real):
+def test_max_vel_matches_what_the_real_arm_reaches_at_the_follower_cap(real):
     cfg, a, arm = real
+    from rover_intent.control.stepper_map import MEASURED_VEL_RATIO
     fw = np.radians([80, 40, 60, 110, 90, 90])
-    frac = np.array(a["max_vel"]) / fw
-    assert np.allclose(frac, frac[0], atol=1e-3)               # one common fraction across joints
-    assert abs(frac[0] - 0.2) < 1e-2                            # == the sim_to_real follower default --speed
+    # sim limit = what the real arm actually reaches at the follower's default 0.2 x firmware command (the firmware
+    # runs 'V' at ~half speed, bench sweep 2026-10-23), so the sim can't outrun the arm
+    assert np.allclose(np.array(a["max_vel"]), 0.2 * fw * np.array(MEASURED_VEL_RATIO), rtol=2e-3)
+    assert np.all(np.array(a["max_vel"]) < 0.2 * fw)
     assert np.allclose(a["max_acc"], np.radians(100), atol=1e-2)
 
 

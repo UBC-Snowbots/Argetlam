@@ -26,9 +26,12 @@ arm:
   # your arm drops out of view while following -> glide to base (stow) instead of freezing. The stepper arm can't
   # go limp while powered (Rowan, 2026-10-23), so this replaces the moteus arm's limp "d stop".
   on_drop: base
-  # FRACTION = 0.2 of the firmware max (80/40/60/110/90/90 deg/s). The sim_to_real follower default --speed is 0.2 too.
-  max_vel: [0.2793, 0.1396, 0.2094, 0.3840, 0.3142, 0.3142]   # rad/s
-  max_acc: [1.745, 1.745, 1.745, 1.745, 1.745, 1.745]         # rad/s^2  (= radians(100) each)
+  # What the REAL arm actually reaches when commanded at 0.2 of the firmware max (80/40/60/110/90/90 deg/s, the
+  # sim_to_real follower default --speed): 0.2 x fw x MEASURED_VEL_RATIO (control/stepper_map.py). The firmware runs
+  # 'V' at ~half the commanded speed (bench sweep 2026-10-23), so the old 0.2 x fw let the sim outrun the arm.
+  max_vel: [0.1357, 0.0624, 0.0988, 0.1620, 0.1540, 0.1389]   # rad/s
+  max_acc: [1.745, 1.745, 1.745, 1.745, 1.745, 1.745]         # rad/s^2  (= radians(100) each). The real ramp is
+  # near-instant after a 0.17-0.31 s command lag (sweep 2026-10-23); a gentler sim ramp is the safe side.
   # frozen = position-only IK on joints 1-3, wrist (4-6) held: the wrist never spins to track position (issue 4,
   # wrist_dig.py). Tool tilts ~7 deg on a 5 cm circle, ~12 deg at 10 cm. "axis" (free the roll) is still available.
   teleop_orient: frozen

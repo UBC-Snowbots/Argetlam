@@ -70,3 +70,12 @@ def q_to_fw(q_rad, table: StepperTable = DEFAULT_TABLE) -> list:
 def in_travel(fw_deg, table: StepperTable = DEFAULT_TABLE, margin: float = 0.0) -> list:
     """Per-axis: is fw_deg[i] within [margin, fw_max_deg[i] - margin]? (the firmware travel, 0 at the limit switch)."""
     return [margin <= float(fw_deg[i]) <= table.fw_max_deg[i] - margin for i in range(6)]
+
+
+# Measured on the bench 2026-10-23 (scripts/bench/axis_sweep.py, 5/10/16 deg/s steps, fitted steady slope of the RAW
+# /arm/feedback counts): every axis runs at roughly HALF the commanded 'V' speed (firmware two-phase pulse generation,
+# see docs/REAL_DATA.md). Time from a command to the first count change: 0.17-0.31 s; the ramp is near-instant after.
+# Use: actual_speed ~= MEASURED_VEL_RATIO[axis] * commanded. Not applied to any command (the follower is closed-loop);
+# it sets the sim speed limits in dev_arm_real so the sim can't outrun the real arm.
+MEASURED_VEL_RATIO = (0.486, 0.447, 0.472, 0.422, 0.490, 0.442)
+MEASURED_CMD_LAG_S = (0.27, 0.19, 0.22, 0.17, 0.31, 0.18)

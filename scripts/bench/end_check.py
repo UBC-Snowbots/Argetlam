@@ -25,15 +25,22 @@ import benchros  # noqa: E402
 BASE_Q = [0.104, -1.415, -0.997, -0.229, -0.482, -3.142]
 
 
-def drive_all(arm, target_fw, frac, timeout=40.0, hz=50.0):
-    dt, t_end = 1.0 / hz, time.monotonic() + timeout
+def drive_all(arm, target_fw, frac, kp=1.0, deadband=0.15, settle_s=1.0, timeout=60.0, hz=50.0):
+    """Capped P-loop on all six axes to target_fw, done once every axis has stayed inside `deadband` for `settle_s`.
+    kp is low (1/s): the firmware starts moving 0.17-0.31 s after a command (bench sweep 2026-10-23), so the old
+    kp 3 with an instant exit overshot; kp * lag stays well under pi/2."""
+    dt, t_end, t_in = 1.0 / hz, time.monotonic() + timeout, None
     while time.monotonic() < t_end:
         t0 = time.monotonic()
         rclpy.spin_once(arm, timeout_sec=0.0)
-        v = [benchlib.p_step(target_fw[i], arm.fw[i], i, frac) for i in range(6)]
+        v = [benchlib.p_step(target_fw[i], arm.fw[i], i, frac, kp=kp, deadband=deadband) for i in range(6)]
         arm.send_v(v)
         if all(x == 0.0 for x in v):
-            break
+            t_in = t_in or time.monotonic()
+            if time.monotonic() - t_in >= settle_s:
+                break
+        else:
+            t_in = None
         time.sleep(max(0.0, dt - (time.monotonic() - t0)))
     arm.send_v([0.0] * 6)
 

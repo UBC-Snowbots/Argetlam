@@ -36,7 +36,7 @@ def run_segment(arm, axis0, v, dur, hz=50.0):
     return ts, fw
 
 
-def return_to(arm, axis0, target, frac, kp=1.0, deadband=0.3, settle_s=1.0, timeout=20.0, hz=50.0):
+def return_to(arm, axis0, target, frac, kp=1.0, deadband=0.15, settle_s=1.0, timeout=20.0, hz=50.0):
     """Slow capped P-loop back to `target` (fw deg) on one axis, then zero. Needed because +v/-v velocity steps don't
     cancel: the ~0.5 s command-to-motion lag measured on axis 1 (2026-10-23) left the arm 1-3 deg off its start.
     kp is low (1/s) so kp * lag stays well under pi/2 (no oscillation). Returns the final error in deg."""

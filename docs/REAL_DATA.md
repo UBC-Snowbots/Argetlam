@@ -105,6 +105,33 @@ checks the start pose is inside firmware travel, sends all-zero 'V' on exit/Ctrl
 Steppers creep ~-0.005..-0.007 deg/s at zero command BEFORE homing; after a home, `/arm/feedback` is dead still
 (measured 0.000 deg/s on all axes for 497 s). So always home before a data session.
 
+## 4a. Measured on the bench, 2026-10-23 (all six axes)
+
+Sweeps with `axis_sweep.py --steps 5,10,16 --hold 1.5` from the homed base pose, re-analysed from the raw bags
+(`data/real_sessions/*_axis_sweep_a<N>/`) with a straight-line fit of the steady part of each step (the script's own
+peak-based table is noisy; trust these):
+
+| axis | actual / commanded speed | first motion after a command | notes |
+|---|---|---|---|
+| 1 | 0.49 | 0.27 s | |
+| 2 | 0.45 | 0.19 s | capped at 8 deg/s (0.2 x 40) |
+| 3 | 0.47 | 0.22 s | |
+| 4 | 0.42 | 0.17 s | gear ratio still being rechecked by Rowan: fw degrees here |
+| 5 | 0.49 | 0.31 s | |
+| 6 | 0.44 | 0.18 s | |
+
+- **The firmware runs 'V' at about HALF the commanded speed**, on every axis, both directions (consistent with the
+  two-phase step-pulse generation found in the firmware review). Feedback counts = generated steps, so the motors
+  really move at half speed. Firmware question for Rowan; not fixed on our side.
+- **Delay, not a slow ramp:** 0.17-0.31 s from a command to the first count change, then the speed is reached almost
+  at once. So "acceleration" is effectively instant; a P-loop on these axes needs a low gain (kp ~1/s) or it
+  overshoots (the old end_check kp 3 and the plain +v/-v sweep left 1-3 deg errors).
+- **After homing the arm does not drift** (0.000 deg/s for 28 min at base). Creep only happens before homing.
+- **Return-to-base overshoot on axis 6:** Rowan's driver declares "at base" at ~179.95, the arm settles ~0.6-0.7 deg
+  past (180.55-180.64), twice. Same delay effect in his return loop.
+- Applied: `control/stepper_map.py` MEASURED_VEL_RATIO / MEASURED_CMD_LAG_S, and dev_arm_real `max_vel` = 0.2 x fw x
+  ratio (what the real arm actually reaches at the follower's default command cap), so the sim can't outrun the arm.
+
 ## 5. First data session, exact order
 
     # on the VM, with the live link already up (arm-link / rover-stack)
