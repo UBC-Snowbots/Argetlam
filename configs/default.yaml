@@ -21,7 +21,9 @@ net:                                   # laptop -> VM over the tailnet
 body:
   profile: data/profiles/{arm}_pranav.json   # calibration profile (created by C / "calibrate"); used when present
   mode: position        # used until a calibration profile exists. position = wrist-rel-shoulder -> gripper offset;
-                        # gesture = swing/raise/reach -> yaw/height/reach (body/mirror.py)
+                        # gesture = swing/raise/reach -> yaw/height/reach (body/mirror.py);
+                        # arm_mirror = full-arm joint mirroring, no IK (body/arm_mirror.py; dev_arm_real default).
+                        # A saved calibration profile is NOT loaded in arm_mirror mode (it is a joint, not a TCP, map).
   clutch: {calib_s: 2.0, still_m: 0.03, palm_s: 1.0, raise_m: 0.05}  # F / open palm held up 1 s / left hand up
   gesture_gains: [2.5, 1.0, 0.6]   # rad yaw per m sideways, m height per m up, m reach per unit elbow extension
   # MediaPipe world axes (x image-right, y down, z toward camera = smaller) -> arm base (x fwd, y left, z up).
@@ -31,6 +33,20 @@ body:
   origin: [0.45, 0.0, 0.45]
   one_euro: {min_cutoff: 1.0, beta: 0.7}  # smooth when still, low lag when moving fast
   grip_from_hand: true  # fist closes the gripper; stand-in until EEG is live
+
+# Full-arm joint mirroring (body.mode = arm_mirror). Defaults here; dev_arm_real.yaml tunes neutral/gain/sign.
+# q_joint = clip(home + sign * gain * (raw_arm_angle - neutral), joint_limits). neutral is the raw arm angle (rad)
+# that maps to the base pose. See src/rover_intent/body/arm_mirror.py and docs/ARM_MIRROR.md.
+arm_mirror:
+  side: right
+  neutral: {az: -0.925, el: -0.419, elbow: 1.641, wrist: 0.0}   # rad; -53 -24 94 0 deg (Pranav 2026-10-23 medians)
+  gain:    {j1: 1.0, j2: 1.0, j3: 0.8, j5: 0.8}                 # rad robot per rad human
+  sign:    {j1: 1.0, j2: 1.0, j3: 1.0, j5: 1.0}
+  one_euro: {min_cutoff: 1.0, beta: 0.05}   # on the JOINT angles: steadier than the TCP filter (tuned on replay)
+  deadband_deg: 1.5          # hold a joint until its target drifts this far (cuts micro-jitter when still)
+  j1_hold_vert_deg: 20.0     # hold J1 (base yaw) when the upper arm is within this of vertical (azimuth undefined)
+  ramp_s: 2.0                # on engage, ease from the current pose to the mirrored pose over this long (no jump)
+  conf_gate: true            # skip a pose that is not visible (the arm holds)
 
 nemotron:
   base_url: https://api.tokenfactory.nebius.com/v1/

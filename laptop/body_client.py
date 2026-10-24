@@ -41,6 +41,7 @@ SKEL = [11, 12, 13, 14, 15, 16, 23, 24, 0]      # shoulders, elbows, wrists, hip
 ELBOW = {"right": 14, "left": 13}
 OTHER_SHOULDER = {"right": 11, "left": 12}
 HIPS = (23, 24)
+HANDPTS = {"right": (20, 18), "left": (19, 17)}  # (index, pinky) pose ids -> hand midpoint (arm_mirror wrist bend)
 MODELS = {
     "pose_landmarker_full.task": "https://storage.googleapis.com/mediapipe-models/pose_landmarker/"
                                  "pose_landmarker_full/float16/latest/pose_landmarker_full.task",
@@ -212,8 +213,18 @@ def extract(pose_res, hand_res, side, mirror=False):
     other_ok = (w[other_wr].visibility or 0.0) > 0.5   # MediaPipe guesses unseen wrists: don't trust those
     return {"wrist": pt(wr_i), "shoulder": pt(sh_i), "elbow": pt(ELBOW[track]),
             "shoulder_other": pt(OTHER_SHOULDER[track]), "wrist_other": pt(other_wr) if other_ok else None,
-            "hips": hips, "side": side,
+            "hips": hips, "side": side, "hand": hand_mid(w, track, pt),
             "skel2d": skel, "hand_open": openness, "visible": vis}, openness, hand
+
+
+def hand_mid(world, track, pt):
+    """World-landmark midpoint of the index + pinky knuckles for the tracked arm (arm_mirror wrist bend), or None
+    if either is not clearly visible. `pt(i)` is the extract()-local accessor (applies the mirror x flip).
+    Kept separate so the WIP cam-in-sim branch (which also edits body_client) merges cleanly."""
+    ix, pk = HANDPTS[track]
+    if min(world[ix].visibility or 0.0, world[pk].visibility or 0.0) <= 0.5:
+        return None
+    return [(pt(ix)[k] + pt(pk)[k]) / 2 for k in range(3)]
 
 
 class JumpGate:
