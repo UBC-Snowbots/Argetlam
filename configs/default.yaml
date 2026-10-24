@@ -44,6 +44,12 @@ real_arm:        # the button panel's HOME button (control/presets.py); off unle
   home_cmd: "source /opt/ros/jazzy/setup.bash && source ~/projects/ubc-rover-arm/RoverFlake2/install/setup.bash && ros2 topic pub --once /arm/command rover_msgs/msg/ArmCommand '{cmd_type: 72, cmd_value: 170}'"
   busy_s: 120    # presets refused for this long after a home; then the sim resets to arm.home
 
+confirm:          # voice safety: the app asks "say yes to confirm" before a move; stop words always bypass this
+  window_s: 5.0   # seconds to say yes/confirm/ok after the prompt; anything else or a timeout cancels
+  skills: false   # also require confirm for the autonomous pick/place/move voice skills. Off here so the sim gate
+                  # (scripts/gate.sh, dev_arm) keeps scripting skills without a yes; dev_arm_real turns it on.
+                  # Named-pose voice (stow/ready/return/home) ALWAYS needs confirm, regardless of this flag.
+
 eeg:
   p_on: 0.7      # p_grasp above this -> close (after hold_s)
   p_off: 0.3     # below this -> open

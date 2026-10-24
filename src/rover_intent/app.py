@@ -28,12 +28,12 @@ from .planner.nemotron import IntentParser, urgent_stop
 from .planner.scene import Scene
 from .robot.backends import IsaacArm, MockArm, RealArm
 from .transport.udp import Receiver
-from .planner.nemotron import fallback_parse
+from .planner.nemotron import fallback_parse, is_confirm
 from .body.clutch import Clutch
 from .config import load_config
 from .body.calib_session import CalibratedMapper, CalibrationSession
 from .body.calibration import Profile
-from .control.presets import HOME_HW, at_goal, plan_preset, preset_names, request_hw_home
+from .control.presets import HOME_HW, RETURN, at_goal, plan_preset, preset_names, request_hw_home
 from .session import SessionRecorder
 from .types import (Action, ArmPreset, BodyPose, ClutchMsg, EEGState, GripToggle, Intent, MirrorMsg, Query,
                     RealJoints, Utterance)
@@ -114,6 +114,10 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
     # the last real sample (the one shared clock); if it goes stale (> 0.5 s) the sim holds.
     mirror_real, real_q, real_fw, real_t = False, None, None, 0.0
     MIRROR_STALE_S = 0.5
+    conf = cfg.get("confirm", {}) or {}
+    confirm_window_s = float(conf.get("window_s", 5.0))
+    confirm_skills = bool(conf.get("skills", False))   # also gate the autonomous pick/place/move voice skills
+    confirm_pending = None   # a voice move waiting for a spoken yes: {"kind", ..., "deadline", "addr", "say"}
     lo_ws, hi_ws = cfg["safety"]["workspace_min"], cfg["safety"]["workspace_max"]
     sim = cfg.get("sim", {})
     default_cam = sim.get("views", {}).get(sim.get("default_view", "behind"))
@@ -178,8 +182,34 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
             arbiter.on_intent(Intent(action=Action.follow))
             body_target = last_target = None
 
+    def do_preset(name, now):
+        """Start a named joint-space preset move, reusing the button-panel path (plan_preset -> joint_goal, no IK).
+        Returns (ok, message). The SafetyLayer (vel/acc limits) runs it; the ghost cues clamping at the box edge."""
+        nonlocal joint_goal, goal_name
+        if hw_busy_until and now < hw_busy_until:
+            return False, f"refused: the real arm is homing ({hw_busy_until - now:.0f} s left)"
+        goal, why = plan_preset(name, presets, home, q_cmd, clutch.state, arm, safety.ws_min, safety.ws_max)
+        if goal is None:
+            return False, why
+        arbiter.on_intent(Intent(action=Action.stop))  # HOLD: the preset move owns the arm
+        joint_goal, goal_name = goal, name
+        return True, why
+
+    def run_confirmed(pend, addr):
+        """A spoken yes arrived inside the window: execute what was queued (a preset, or an autonomous skill)."""
+        if pend["kind"] == "preset":
+            ok, why = do_preset(pend["name"], time.time())
+            log.info("voice preset %s confirmed: %s", pend["name"], why)
+            rx.reply(addr, {"kind": "reply", "text": "confirm", "ok": ok, "say": why, "mode": arbiter.mode.value})
+        else:  # an autonomous skill the operator confirmed
+            arbiter.on_intent(pend["intent"])
+            log.info("voice skill confirmed: %s -> %s", pend["intent"].action.value, arbiter.mode.value)
+            rx.reply(addr, {"kind": "reply", "text": "confirm",
+                            "intent": pend["intent"].model_dump(mode="json", exclude_none=True),
+                            "say": arbiter.last_say or pend["intent"].say, "mode": arbiter.mode.value})
+
     def finish(text, addr, intent, latency):
-        nonlocal q_cmd, T_des, body_target, joint_goal, mirror_real
+        nonlocal q_cmd, T_des, body_target, joint_goal, mirror_real, confirm_pending
         log.info("heard %r -> %s (%.1fs)", text, intent.model_dump(exclude_none=True), latency)
         if intent.action in (Action.stop, Action.reset) and mirror_real:
             mirror_real = False  # STOP always leaves the mirror-real state
@@ -188,10 +218,35 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
             log.info("preset %s cancelled by %s", goal_name, intent.action.value)
             joint_goal = None
         if intent.action in (Action.stop, Action.reset):  # a slow cloud result must not restart the arm
+            if confirm_pending is not None:
+                log.info("pending confirm (%s) cancelled by %s", confirm_pending.get("name") or "skill",
+                         intent.action.value)
+                confirm_pending = None
             for p_text, p_addr, _, fut in pending:
                 fut.cancel()
                 rx.reply(p_addr, {"kind": "reply", "text": p_text, "say": "Cancelled by stop.", "mode": "hold"})
             pending.clear()
+        # a named pose (voice) or the autonomous skills (when confirm.skills is on): ask first, do not move yet.
+        want = RETURN if intent.action == Action.home else intent.preset if intent.action == Action.preset else None
+        if want is not None:
+            label = "the start pose" if want == RETURN else want
+            say = f"Moving to {label}. Say yes to confirm."
+            confirm_pending = {"kind": "preset", "name": want, "deadline": time.time() + confirm_window_s,
+                               "addr": addr, "say": say}
+            log.info("voice preset %s: waiting for confirm (%.0fs)", want, confirm_window_s)
+            rx.reply(addr, {"kind": "reply", "text": text, "latency_s": round(latency, 2), "confirm": True,
+                            "intent": intent.model_dump(mode="json", exclude_none=True),
+                            "say": say, "mode": arbiter.mode.value})
+            return
+        if confirm_skills and intent.action in (Action.pick, Action.place, Action.move):
+            say = f"{intent.say or 'Ready'} Say yes to confirm."
+            confirm_pending = {"kind": "intent", "intent": intent, "deadline": time.time() + confirm_window_s,
+                               "addr": addr, "say": say}
+            log.info("voice skill %s: waiting for confirm (%.0fs)", intent.action.value, confirm_window_s)
+            rx.reply(addr, {"kind": "reply", "text": text, "latency_s": round(latency, 2), "confirm": True,
+                            "intent": intent.model_dump(mode="json", exclude_none=True),
+                            "say": say, "mode": arbiter.mode.value})
+            return
         if intent.action == Action.follow:  # "follow me" = start the clutch (hold still -> calibrate -> follow)
             if clutch.state == "idle":
                 on_clutch(clutch.toggle(time.time()))
@@ -260,16 +315,27 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
                                 "mode": arbiter.mode.value})
             elif isinstance(msg, Utterance):
                 stop = urgent_stop(msg.text)
-                if stop is not None:  # handled in this tick; never queued behind a cloud call (STOP also leaves mirror)
-                    finish(msg.text, addr, stop, 0.0)
+                if stop is not None:  # handled in this tick; never queued behind a cloud call (STOP also leaves
+                    finish(msg.text, addr, stop, 0.0)  # mirror; finish clears any armed confirm)
                 elif mirror_real:  # any non-stop command is motion: refuse while mirroring the real arm
                     rx.reply(addr, {"kind": "reply", "text": msg.text, "mode": arbiter.mode.value, "mirror": True,
                                     "say": "Mirroring the real arm; say stop to leave."})
-                elif msg.offline:
-                    finish(msg.text, addr, fallback_parse(msg.text, scene.names()), 0.0)
-                else:  # Nemotron takes seconds: run it off the control loop
-                    pending.append((msg.text, addr, time.time(),
-                                    pool.submit(parser.parse, msg.text, scene.names(), descriptions)))
+                elif confirm_pending is not None and is_confirm(msg.text):
+                    pend, confirm_pending = confirm_pending, None   # a spoken yes inside the window: execute it
+                    run_confirmed(pend, addr)
+                else:
+                    if confirm_pending is not None:   # anything else cancels the armed confirm, then parse afresh
+                        log.info("pending confirm (%s) cancelled: %r",
+                                 confirm_pending.get("name") or "skill", msg.text)
+                        rx.reply(confirm_pending["addr"], {"kind": "reply", "text": "confirm", "ok": False,
+                                                           "say": "Cancelled.", "mode": arbiter.mode.value})
+                        confirm_pending = None
+                    if msg.offline:
+                        finish(msg.text, addr, fallback_parse(msg.text, scene.names(), list(presets)), 0.0)
+                    else:  # Nemotron takes seconds: run it off the control loop
+                        pending.append((msg.text, addr, time.time(),
+                                        pool.submit(parser.parse, msg.text, scene.names(), descriptions,
+                                                    list(presets))))
             elif isinstance(msg, EEGState):
                 arbiter.on_eeg(msg.p_grasp, t0)
             elif isinstance(msg, ArmPreset) and mirror_real:
@@ -289,15 +355,8 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
                         arbiter.on_intent(Intent(action=Action.stop))
                         joint_goal, goal_name = None, None
                         hw_busy_until = t0 + float(real_arm.get("busy_s", 120.0))
-                elif t0 < hw_busy_until:
-                    ok, why = False, f"refused: the real arm is homing ({hw_busy_until - t0:.0f} s left)"
                 else:
-                    goal, why = plan_preset(msg.name, presets, home, q_cmd, clutch.state, arm, safety.ws_min,
-                                            safety.ws_max)
-                    ok = goal is not None
-                    if ok:
-                        arbiter.on_intent(Intent(action=Action.stop))  # HOLD: the preset move owns the arm
-                        joint_goal, goal_name = goal, msg.name
+                    ok, why = do_preset(msg.name, t0)   # same path the voice confirm uses
                 log.info("preset %s%s: %s", msg.name, " (confirmed)" if msg.confirm else "", why)
                 rx.reply(addr, {"kind": "reply", "text": f"preset {msg.name}", "ok": ok, "say": why,
                                 "mode": arbiter.mode.value})
@@ -334,6 +393,11 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
                                 "objects": {n: {"pos": np.round(o.pos, 4).tolist(),
                                                 "bottom_z": round(float(o.pos[2] - o.grasp_z), 4)}
                                             for n, o in scene.objects.items()}})
+        if confirm_pending is not None and t0 > confirm_pending["deadline"]:   # no yes in time: cancel the move
+            log.info("pending confirm (%s) timed out", confirm_pending.get("name") or "skill")
+            rx.reply(confirm_pending["addr"], {"kind": "reply", "text": "confirm", "ok": False,
+                                               "say": "Confirmation timed out, cancelled.", "mode": arbiter.mode.value})
+            confirm_pending = None
         on_clutch(clutch.watchdog(t0, last_body_arrival, last_visible_t))  # auto-release on link/tracking loss
         for item in [x for x in pending if x[3].done()]:
             pending.remove(item)

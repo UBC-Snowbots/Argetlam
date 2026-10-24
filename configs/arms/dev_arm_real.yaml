@@ -52,6 +52,9 @@ sim:
     - {joints: [joint_1, joint_2, joint_3], stiffness: 2000.0, damping: 200.0, effort: 150.0, velocity: 1.5}
     - {joints: [joint_4, joint_5, joint_6], stiffness: 400.0, damping: 40.0, effort: 30.0, velocity: 3.0}
 
+confirm:
+  skills: true   # the physical arm: require a spoken "yes" before any autonomous pick/place/move too
+
 safety:
   # near-home box carved from the real reachable shell (axis-orient IK, real joint limits): contains the home TCP
   # (0.545, -0.027, 0.520); most of the interior is reachable, edges clamp (the ghost already cues amber there).

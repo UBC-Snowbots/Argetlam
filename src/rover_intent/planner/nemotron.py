@@ -10,15 +10,24 @@ import json
 import os
 import re
 
+from ..control.presets import RETURN
 from ..types import Action, Intent
 
 SYSTEM = """You control a 6-axis robot arm with a two-finger gripper, standing at a table.
 Objects on the table (name: description): {objects}.
 Turn what the user says into one JSON command. Actions:
 pick (grasp and lift an object), place (put the held object relative to a reference), move (pick + place),
-grasp (close the gripper), release (open it), home, stop, follow (mirror the user's arm), reset,
+grasp (close the gripper), release (open it),
+preset (move to a named stored pose: set "preset" to one of {presets}; "stow"/"rest" mean "base", and "go back" means "{ret}"),
+home (treat as preset "{ret}": go back to the start pose in the simulation - this NEVER homes the physical hardware),
+stop, follow (mirror the user's arm), reset,
 clarify (you are not sure what the user means: ask them in "say", and nothing moves), unknown (not a robot command).
 Use your own judgement. "say" is spoken back to the user; keep it short."""
+
+# Spoken aliases -> preset name. The targets must be real profile presets (RETURN is always valid; presets.py
+# refuses an unknown name). Voice "home" means RETURN (the sim start pose), NEVER the hardware home_hw button.
+_POSE_ALIASES = {"stow": "base", "rest": "base", "base": "base", "ready": "ready",
+                 "return": RETURN, "go back": RETURN, "back to start": RETURN, "home": RETURN}
 
 
 class IntentParser:
@@ -34,26 +43,49 @@ class IntentParser:
     def online(self) -> bool:
         return self.client is not None
 
-    def parse(self, text: str, objects: list[str], descriptions: dict[str, str] | None = None) -> Intent:
+    def parse(self, text: str, objects: list[str], descriptions: dict[str, str] | None = None,
+              presets: list[str] | None = None) -> Intent:
+        presets = list(presets or [])
         stop = urgent_stop(text)
         if stop is not None:
             return stop
         if not self.online:
-            return fallback_parse(text, objects)
+            return fallback_parse(text, objects, presets)
         desc = descriptions or {}
         listing = "; ".join(f"{o}: {desc[o]}" if desc.get(o) else o for o in objects)
+        preset_list = ", ".join([RETURN] + [p for p in presets if p != RETURN]) or RETURN
         resp = self.client.chat.completions.create(
             model=self.model,
             temperature=0,
-            messages=[{"role": "system", "content": SYSTEM.format(objects=listing)},
+            messages=[{"role": "system", "content": SYSTEM.format(objects=listing, presets=preset_list, ret=RETURN)},
                       {"role": "user", "content": text}],
             response_format={"type": "json_schema",
                              "json_schema": {"name": "intent", "schema": Intent.model_json_schema()}},
         )
         try:
-            return Intent.model_validate(json.loads(resp.choices[0].message.content))
+            return normalize_preset(Intent.model_validate(json.loads(resp.choices[0].message.content)))
         except Exception:
             return Intent(action=Action.unknown, say="Sorry, I didn't get that.")
+
+
+def normalize_preset(intent: Intent) -> Intent:
+    """Fold Nemotron's pose output onto a `preset` action with a canonical name. "home" from the model means the
+    sim start pose (RETURN), never the hardware home button; a spoken alias in `preset` is resolved via _POSE_ALIASES."""
+    if intent.action == Action.home:
+        intent.action, intent.preset = Action.preset, RETURN
+    elif intent.action == Action.preset:
+        intent.preset = _POSE_ALIASES.get((intent.preset or "").strip().lower(), intent.preset)
+    return intent
+
+
+_CONFIRM = re.compile(r"\b(yes|yeah|yep|yup|confirm|confirmed|okay|ok|sure|affirmative|proceed|do it|"
+                      r"go ahead|go for it)\b")
+
+
+def is_confirm(text: str) -> bool:
+    """A short 'yes' to the app's confirm prompt. Bare 'go' is deliberately NOT a confirm word: it collides with
+    the pose commands 'go back' / 'go home', so only the phrases 'go ahead' / 'go for it' count."""
+    return bool(_CONFIRM.search(text.lower()))
 
 
 _STOP = re.compile(r"\b(stop|freeze|halt|hold on|wait|whoa|emergency|abort)\b")
@@ -76,7 +108,7 @@ _REL = {"beside": "beside", "next to": "beside", "left of": "left_of", "right of
         "in front of": "in_front_of", "behind": "behind", "on": "on", "onto": "on", "into": "into", "in": "into"}
 
 
-def fallback_parse(text: str, objects: list[str]) -> Intent:
+def fallback_parse(text: str, objects: list[str], presets: list[str] | None = None) -> Intent:
     t = text.lower()
     found = sorted((m.start(), o) for o in objects for m in [re.search(rf"\b{re.escape(o)}\b", t)] if m)
     names = [o for _, o in found]
@@ -84,8 +116,14 @@ def fallback_parse(text: str, objects: list[str]) -> Intent:
         return Intent(action=Action.follow, say="Following you.")
     if re.search(r"\b(release|let go|drop|open)\b", t):
         return Intent(action=Action.release, say="Releasing.")
-    if re.search(r"\bhome\b", t):
-        return Intent(action=Action.home, say="Going home.")
+    # named poses (longest phrase first so "go back"/"back to start" beat "base"). RETURN is always valid;
+    # a named target must be a real profile preset when the list is known. "home" = RETURN (sim start, not hardware).
+    for phrase in sorted(_POSE_ALIASES, key=len, reverse=True):
+        if re.search(rf"\b{re.escape(phrase)}\b", t):
+            name = _POSE_ALIASES[phrase]
+            if name == RETURN or not presets or name in presets:
+                say = "Going back to the start pose." if name == RETURN else f"Moving to {name}."
+                return Intent(action=Action.preset, preset=name, say=say)
     for phrase, rel in sorted(_REL.items(), key=lambda kv: -len(kv[0])):
         if f" {phrase} " in f" {t} " and len(names) >= 2:
             return Intent(action=Action.move, object=names[0], relation=rel, reference=names[1],
