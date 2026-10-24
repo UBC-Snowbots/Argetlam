@@ -44,6 +44,26 @@ def video_status(age, fps):
     return (f"stale {age:.1f}s" if stale else f"{fps} fps"), stale
 
 
+def _strip0(s):
+    if s.startswith("0."):
+        return s[1:]
+    if s.startswith("-0."):
+        return "-" + s[2:]
+    return s
+
+
+def reach_status_line(m):
+    """Compact plane-tuning line, e.g. 'REACH >> | spd4.0 lat.20 vrt.15 db.015'. '' when not in plane mode."""
+    pt = m.get("plane_tune")
+    if not pt:
+        return ""
+    arrow = {">>": ">>", "<<": "<<", "hold": "--"}.get(pt.get("reach_state"), "--")
+    lat = _strip0("{:.2f}".format(pt["lateral"]))
+    vrt = _strip0("{:.2f}".format(pt["vertical"]))
+    db = _strip0("{:.3f}".format(pt["deadband"]))
+    return "REACH {} | spd{:.1f} lat{} vrt{} db{}".format(arrow, pt["max_speed"] * 100, lat, vrt, db)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=47130)
@@ -183,9 +203,22 @@ def main():
         grip = m.get("grip") or 0
         cv.create_text(W - 20, 356, text="gripper CLOSED" if grip >= 0.5 else "gripper open", anchor="e",
                        fill="#ffd166" if grip >= 0.5 else "#8892a0", font=("Helvetica", 13))
-        # body teleop mapping (plane or arm_mirror)
-        cv.create_text(W / 2, 420, text=f"mapping: {m.get('mapping', '?')}",
-                       fill="#5b6472", font=("Helvetica", 12))
+        # plane live-tuning: compact knob line (reach state + gains/thresholds)
+        rl = reach_status_line(m)
+        if rl:
+            rs = (m.get("plane_tune") or {}).get("reach_state")
+            cv.create_text(W / 2, 382, text=rl, fill="#22c55e" if rs in (">>", "<<") else "#9aa4b2",
+                           font=("Helvetica", 12, "bold"))
+        tune = m.get("tune")   # guided tune-check prompt
+        if tune and tune.get("active"):
+            cv.create_text(W / 2, 410, text=f"TUNE CHECK\n{tune.get('prompt', '')}", fill="#00e5ff",
+                           font=("Helvetica", 15, "bold"), width=W - 30, justify="center")
+            if tune.get("progress") is not None:
+                cv.create_rectangle(40, 445, 40 + (W - 80) * tune["progress"], 455, fill="#00e5ff", width=0)
+        else:
+            # body teleop mapping (plane or arm_mirror)
+            cv.create_text(W / 2, 420, text=f"mapping: {m.get('mapping', '?')}",
+                           fill="#5b6472", font=("Helvetica", 12))
         if m.get("assist"):
             cv.create_text(W / 2, 480, text="ASSIST: grabbing / releasing...", fill="#ff4fd8", font=("Helvetica", 14, "bold"))
         elif m.get("grab_ready"):

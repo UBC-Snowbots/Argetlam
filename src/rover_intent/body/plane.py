@@ -27,6 +27,10 @@ positive lateral gain that drives robot -y, i.e. the gripper to the operator's r
 """
 from __future__ import annotations
 
+import json
+import math
+from pathlib import Path
+
 import numpy as np
 
 from ..types import BodyPose
@@ -34,6 +38,27 @@ from .retarget import OneEuro
 
 # skel2d (body client SKEL) indices
 L_SH, R_SH, L_EL, R_EL, L_WR, R_WR, L_HIP, R_HIP, NOSE = range(9)
+
+# Live-tuning clamp bounds (shared by PlaneMapper.adjust/load and fit_reach_thresholds). A sign flip only changes a
+# sign, never a magnitude; these bound the magnitudes so no live tweak can leave a safe range.
+RR_MAX_LO, RR_MAX_HI = 0.01, 0.08     # reach speed cap, m/s (0.08 is still well inside the real arm's limits)
+LAT_LO, LAT_HI = 0.05, 0.35           # lateral gain, m per shoulder-width
+VRT_LO, VRT_HI = 0.05, 0.30           # vertical gain, m per shoulder-width
+FRAC_LO, FRAC_HI = 0.03, 0.60         # reach threshold fractions of the shoulder->hip torso span
+FRAC_MIN_GAP = 0.05                   # forward_frac must stay this far below back_frac (a non-zero dead zone)
+DB_LO, DB_HI = 0.0, 0.05              # position deadband, shoulder-widths
+STEP_SPEED = 1.25                     # reach_faster/slower multiply/divide
+STEP_GAIN = 1.2                       # more/less sensitive multiply/divide
+STEP_FRAC = 0.05                      # reach_*_sooner step
+STEP_DB = 0.005                       # dead-zone step
+
+
+def _clamp(v, lo, hi):
+    return min(max(float(v), lo), hi)
+
+
+def _sgn(v):
+    return 1 if v >= 0 else -1
 
 DEFAULTS = {
     "side": "right",                                  # the operator's CONTROL hand (lateral + vertical); other = reach
@@ -145,6 +170,8 @@ class PlaneMapper:
         self.clipped = False
         self.reach_rate = 0.0        # last signed reach speed, m/s (status: HUD shows >>/<< from the sign)
         self.reach_state = "hold"    # ">>" forward, "<<" back, "hold"
+        self._last_p = None          # last emitted target (so a sign flip can re-anchor without a jump)
+        self._defaults = self._persist_dict()   # the config baseline, for reset_tuning()
         self.reset()
 
     def reset(self):
@@ -158,6 +185,7 @@ class PlaneMapper:
         self._t_last = None        # rate mode: previous frame time for dt
         self.reach_rate = 0.0
         self.reach_state = "hold"
+        self._last_p = None
         self.filter.reset()
         self.clipped = False
 
@@ -175,6 +203,7 @@ class PlaneMapper:
         self._t_last = None
         self.reach_rate = 0.0
         self.reach_state = "hold"
+        self._last_p = None
         self.filter.reset()
         self.clipped = False
 
@@ -267,7 +296,268 @@ class PlaneMapper:
                 cl = np.clip(p, self.ws_min, self.ws_max)
                 self.clipped = bool(np.max(np.abs(cl - p)) > 0.005)   # > 5 mm outside the box: really out of reach
                 p = cl
+        self._last_p = np.asarray(p, float).copy()
         return p
+
+    # ---- live tuning (adjust / snapshot / save / load / reset) -------------------------------------------------
+    def _persist_dict(self) -> dict:
+        """The knobs that live-tuning changes and save()/load() persist (signed gains; magnitudes stay in range)."""
+        return {"reach_max_speed": float(self.rr_max),
+                "reach_gain": float(self.gain[0]), "lateral": float(self.gain[1]), "vertical": float(self.gain[2]),
+                "reach_sign": float(self.reach_sign),
+                "forward_frac": float(self.rr_fwd_frac), "back_frac": float(self.rr_back_frac),
+                "deadband": float(self.deadband)}
+
+    def snapshot(self) -> dict:
+        """Compact read-only view for the status line / HUD (magnitudes + current reach state)."""
+        return {"reach_state": self.reach_state, "reach_rate": round(float(self.reach_rate), 4),
+                "max_speed": round(float(self.rr_max), 4),
+                "lateral": round(abs(float(self.gain[1])), 3), "vertical": round(abs(float(self.gain[2])), 3),
+                "deadband": round(float(self.deadband), 4),
+                "forward_frac": round(float(self.rr_fwd_frac), 3), "back_frac": round(float(self.rr_back_frac), 3),
+                "sign_lateral": _sgn(self.gain[1]), "sign_vertical": _sgn(self.gain[2]),
+                "sign_reach": _sgn(self.reach_sign)}
+
+    def _set_mag(self, idx, mag, lo, hi):
+        """Set gain[idx] to a clamped MAGNITUDE, keeping its current sign (so a sensitivity change never flips)."""
+        s = 1.0 if self.gain[idx] == 0 else math.copysign(1.0, self.gain[idx])
+        self.gain[idx] = s * _clamp(mag, lo, hi)
+
+    def _fix_fracs(self):
+        """Clamp both reach-threshold fractions into range and keep a non-zero dead zone (forward < back)."""
+        self.rr_fwd_frac = _clamp(self.rr_fwd_frac, FRAC_LO, FRAC_HI)
+        self.rr_back_frac = _clamp(self.rr_back_frac, FRAC_LO, FRAC_HI)
+        if self.rr_back_frac - self.rr_fwd_frac < FRAC_MIN_GAP:
+            # push them apart around their midpoint, then re-clamp so both stay in [FRAC_LO, FRAC_HI]
+            mid = 0.5 * (self.rr_fwd_frac + self.rr_back_frac)
+            self.rr_fwd_frac = _clamp(mid - FRAC_MIN_GAP / 2, FRAC_LO, FRAC_HI - FRAC_MIN_GAP)
+            self.rr_back_frac = _clamp(self.rr_fwd_frac + FRAC_MIN_GAP, FRAC_LO + FRAC_MIN_GAP, FRAC_HI)
+
+    def _reanchor(self):
+        """Re-capture the current target as the anchor so a sign flip is continuous (no jump mid-follow)."""
+        if self._tcp0 is None:
+            return
+        if self._last_p is not None:
+            self._tcp0 = np.asarray(self._last_p, float).copy()
+        if self._held is not None:
+            self._n0 = self._held.copy()
+        self._reach_off = 0.0
+        self._reach_zone = "hold"
+
+    def adjust(self, op: str) -> str | None:
+        """Apply one bounded, clamped tuning step. Returns a spoken confirmation, or None for an unknown op. Does
+        NOT persist (save() does). A sign flip re-anchors so the arm never jumps."""
+        if op == "reach_faster":
+            self.rr_max = _clamp(self.rr_max * STEP_SPEED, RR_MAX_LO, RR_MAX_HI)
+            return f"Reach faster, {self.rr_max * 100:.1f} centimetres a second."
+        if op == "reach_slower":
+            self.rr_max = _clamp(self.rr_max / STEP_SPEED, RR_MAX_LO, RR_MAX_HI)
+            return f"Reach slower, {self.rr_max * 100:.1f} centimetres a second."
+        if op == "more_sensitive":
+            self._set_mag(1, abs(self.gain[1]) * STEP_GAIN, LAT_LO, LAT_HI)
+            self._set_mag(2, abs(self.gain[2]) * STEP_GAIN, VRT_LO, VRT_HI)
+            return f"More sensitive. Lateral {abs(self.gain[1]):.2f}, vertical {abs(self.gain[2]):.2f}."
+        if op == "less_sensitive":
+            self._set_mag(1, abs(self.gain[1]) / STEP_GAIN, LAT_LO, LAT_HI)
+            self._set_mag(2, abs(self.gain[2]) / STEP_GAIN, VRT_LO, VRT_HI)
+            return f"Less sensitive. Lateral {abs(self.gain[1]):.2f}, vertical {abs(self.gain[2]):.2f}."
+        if op == "reach_fwd_sooner":        # forward begins with less raising -> lower the forward threshold
+            self.rr_fwd_frac += STEP_FRAC
+            self._fix_fracs()
+            return f"Reach goes forward sooner (forward at {self.rr_fwd_frac:.2f})."
+        if op == "reach_back_sooner":       # back begins with less lowering -> raise the back threshold
+            self.rr_back_frac -= STEP_FRAC
+            self._fix_fracs()
+            return f"Reach goes back sooner (back at {self.rr_back_frac:.2f})."
+        if op == "bigger_deadzone":
+            self.deadband = _clamp(self.deadband + STEP_DB, DB_LO, DB_HI)
+            return f"Bigger dead zone, {self.deadband:.3f}."
+        if op == "smaller_deadzone":
+            self.deadband = _clamp(self.deadband - STEP_DB, DB_LO, DB_HI)
+            return f"Smaller dead zone, {self.deadband:.3f}."
+        if op == "flip_lateral":
+            self.gain[1] = -self.gain[1]
+            self._reanchor()
+            return "Flipped left and right."
+        if op == "flip_vertical":
+            self.gain[2] = -self.gain[2]
+            self._reanchor()
+            return "Flipped up and down."
+        if op == "flip_reach":
+            self.gain[0] = -self.gain[0]
+            self.reach_sign = -self.reach_sign
+            self._reanchor()
+            return "Flipped reach direction."
+        return None
+
+    def set_reach_thresholds(self, forward_frac, back_frac):
+        """Set the reach forward/back thresholds (used by the guided tune check), clamped with a live dead zone."""
+        self.rr_fwd_frac = float(forward_frac)
+        self.rr_back_frac = float(back_frac)
+        self._fix_fracs()
+
+    def save(self, path) -> None:
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(self._persist_dict(), indent=2))
+
+    def load(self, path) -> bool:
+        """Load a saved tuning override; every field is re-clamped defensively. Returns True if a file was read."""
+        path = Path(path)
+        if not path.exists():
+            return False
+        try:
+            d = json.loads(path.read_text())
+        except Exception:
+            return False
+        if "reach_max_speed" in d:
+            self.rr_max = _clamp(d["reach_max_speed"], RR_MAX_LO, RR_MAX_HI)
+        if "lateral" in d:
+            self.gain[1] = _sgn(d["lateral"]) * _clamp(abs(d["lateral"]), LAT_LO, LAT_HI)
+        if "vertical" in d:
+            self.gain[2] = _sgn(d["vertical"]) * _clamp(abs(d["vertical"]), VRT_LO, VRT_HI)
+        if "reach_sign" in d:
+            self.reach_sign = float(_sgn(d["reach_sign"]))
+        if "reach_gain" in d:
+            self.gain[0] = _sgn(d["reach_gain"]) * _clamp(abs(d["reach_gain"]), 0.01, 0.5)
+        if "forward_frac" in d:
+            self.rr_fwd_frac = float(d["forward_frac"])
+        if "back_frac" in d:
+            self.rr_back_frac = float(d["back_frac"])
+        self._fix_fracs()
+        if "deadband" in d:
+            self.deadband = _clamp(d["deadband"], DB_LO, DB_HI)
+        self._reanchor()
+        return True
+
+    def reset_tuning(self) -> None:
+        """Restore the config baseline captured at construction (discards any live tweaks / loaded override)."""
+        d = self._defaults
+        self.rr_max = d["reach_max_speed"]
+        self.gain = np.array([d["reach_gain"], d["lateral"], d["vertical"]], float)
+        self.reach_sign = float(d["reach_sign"])
+        self.rr_fwd_frac = d["forward_frac"]
+        self.rr_back_frac = d["back_frac"]
+        self.deadband = d["deadband"]
+        self._reanchor()
+
+
+def fit_reach_thresholds(samples: dict) -> dict:
+    """Pure fit: from the operator's measured left-hand heights at shoulder and waist (reach_up, shoulder-widths)
+    and their torso span (shoulder->hip, `span`), set the forward/back reach thresholds as fractions of that span.
+    The dead zone sits in the middle third of the measured shoulder->waist range, so holding near shoulder reads
+    FORWARD and near waist reads BACK. Clamped to [FRAC_LO, FRAC_HI] with a non-zero dead zone. Returns the chosen
+    fracs plus the measured ranges (for the report)."""
+    span = abs(float(samples.get("span", -1.0)))
+    if span < 1e-6:
+        span = 1.0
+    h_f = float(samples.get("shoulder", 0.0))      # reach_up near shoulder height (~0)
+    h_b = float(samples.get("waist", -1.0))        # reach_up near waist (more negative)
+    f_f = max(0.0, -h_f / span)                    # fraction of the span below the shoulders, shoulder sample
+    f_b = max(f_f, -h_b / span)                    # ... waist sample (never above the shoulder sample)
+    fwd = f_f + (f_b - f_f) / 3.0
+    back = f_f + 2.0 * (f_b - f_f) / 3.0
+    fwd = _clamp(fwd, FRAC_LO, FRAC_HI)
+    back = _clamp(back, FRAC_LO, FRAC_HI)
+    if back - fwd < FRAC_MIN_GAP:
+        back = _clamp(fwd + FRAC_MIN_GAP, FRAC_LO + FRAC_MIN_GAP, FRAC_HI)
+        if back - fwd < FRAC_MIN_GAP:
+            fwd = _clamp(back - FRAC_MIN_GAP, FRAC_LO, FRAC_HI - FRAC_MIN_GAP)
+    rx = samples.get("right_x")
+    return {"forward_frac": round(fwd, 3), "back_frac": round(back, 3),
+            "measured": {"shoulder_up": round(h_f, 3), "waist_up": round(h_b, 3), "span": round(span, 3),
+                         "right_x": (round(float(rx), 3) if rx is not None else None)}}
+
+
+class PlaneTuneCheck:
+    """Guided ~20 s reach-threshold check. Prompts the operator through three held poses (left hand to shoulder,
+    left hand to waist, right hand out), samples the in-plane coordinates, and fits forward/back fracs with
+    fit_reach_thresholds. Time + pose driven (tick it with plane_coords each frame); it only measures, it never
+    commands the arm. The app applies the fit and persists it on 'save tuning'."""
+
+    # (key, prompt, hold seconds, capture tag). Samples are taken in the latter part of each hold (after settling).
+    STAGES = [
+        ("ready", "Tune check: stand still with both hands down.", 2.5, None),
+        ("shoulder", "Raise your LEFT hand to shoulder height and hold.", 4.5, "reach_shoulder"),
+        ("waist", "Lower your LEFT hand to your waist and hold.", 4.5, "reach_waist"),
+        ("right", "Reach your RIGHT hand out to the side and hold.", 4.5, "ctrl_right"),
+    ]
+
+    def __init__(self):
+        self.active = False
+        self.finished = False
+        self.prompt = ""
+        self.result = None
+        self._said = ""
+        self._stage = 0
+        self._t0 = 0.0
+        self._reach = []
+        self._ctrl = []
+        self._span = None
+        self._store = {}
+
+    def start(self, now: float):
+        self.active = True
+        self.finished = False
+        self.result = None
+        self._stage = 0
+        self._t0 = now
+        self._reach = []
+        self._ctrl = []
+        self._span = None
+        self._store = {}
+        self.prompt = self.STAGES[0][1]
+        self._said = ""
+
+    def cancel(self):
+        self.active = False
+
+    def update(self, now: float, pc) -> None:
+        """Advance the state machine. `pc` is plane_coords(...) (or None if the pose is unusable this frame)."""
+        if not self.active:
+            return
+        _key, prompt, dur, cap = self.STAGES[self._stage]
+        self.prompt = prompt
+        if pc is not None and (now - self._t0) > dur * 0.4:        # collect only after the operator has settled
+            if cap in ("reach_shoulder", "reach_waist"):
+                self._reach.append(pc["reach_up"])
+            elif cap == "ctrl_right":
+                self._ctrl.append(pc["ctrl_x"])
+            if pc.get("hip_drop") is not None:
+                self._span = pc["hip_drop"]
+        if now - self._t0 >= dur:                                  # stage over: capture its sample, advance
+            if cap in ("reach_shoulder", "reach_waist") and self._reach:
+                self._store[cap] = float(np.median(self._reach))
+            elif cap == "ctrl_right" and self._ctrl:
+                self._store[cap] = float(np.median(self._ctrl))
+            self._reach, self._ctrl = [], []
+            self._stage += 1
+            self._t0 = now
+            if self._stage >= len(self.STAGES):
+                self._finish()
+
+    def _finish(self):
+        self.active = False
+        self.finished = True
+        samples = {"shoulder": self._store.get("reach_shoulder", 0.0),
+                   "waist": self._store.get("reach_waist", -1.0),
+                   "right_x": self._store.get("ctrl_right"),
+                   "span": self._span if self._span is not None else -1.0}
+        self.result = fit_reach_thresholds(samples)
+        self.prompt = "Tune check done."
+
+    def pop_prompt(self) -> str | None:
+        """Return the current prompt once each time it changes (so the app says it only on a stage boundary)."""
+        if self.prompt != self._said:
+            self._said = self.prompt
+            return self.prompt
+        return None
+
+    @property
+    def progress(self) -> float:
+        total = sum(s[2] for s in self.STAGES)
+        done = sum(self.STAGES[i][2] for i in range(min(self._stage, len(self.STAGES))))
+        return min(1.0, done / total) if total > 0 else 1.0
 
 
 class DropWatch:

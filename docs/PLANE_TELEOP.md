@@ -83,6 +83,53 @@ left/right the wrong way, your webcam is mirrored: press **M** in the body clien
 - `one_euro: {min_cutoff, beta}` on the normalized hand coords: lower min_cutoff = steadier but laggier.
 - `deadband` (shoulder-widths), `ramp_s`, `drop_below_hip_s`, `conf_gate` as above. `side` picks the control hand.
 
+## Live tuning (new 2026-10-24) - signs/gains/thresholds were set from recordings, so tune them live
+The plane knobs (reach speed, lateral/vertical sensitivity, reach thresholds, dead zone, sign flips) were all set
+from recordings. The joystick-rate reach has NEVER been driven live, so tomorrow's first session is a TUNING
+session: change a knob, feel it, change it again. Every change is bounded + clamped, speaks a confirmation, shows in
+the HUD, and can be saved. Nothing here can exceed the profile speed/box limits.
+
+Body-client keys (plane mode):
+- `+` / `-`  reach faster / slower (max_speed x/÷1.25, clamped 0.01..0.08 m/s)
+- `]` / `[`  more / less sensitive (lateral gain x/÷1.2 in 0.05..0.35; vertical in 0.05..0.30)
+- `.` / `,`  reach goes forward / back sooner (threshold fracs ±0.05 in 0.03..0.60, dead zone kept non-zero)
+- `g`  guided tune check    `o`  save tuning    `0`  reset tuning to the profile defaults
+
+Voice (instant, local; never reaches the cloud, never steals a jog like "move left 5 cm"):
+- "faster reach" / "slower reach", "more sensitive" / "less sensitive",
+  "reach forward sooner" / "reach back sooner", "bigger dead zone" / "smaller dead zone",
+  "flip left right" / "flip up down" / "flip reach", "save tuning", "reset tuning", "tune check".
+
+A sign flip re-anchors at the current target, so flipping mid-follow never jumps the arm.
+
+Compact HUD / client status line: `REACH >> | spd4.0 lat.20 vrt.15 db.015` (reach zone, reach speed cm/s, lateral
+and vertical gains, position dead band).
+
+Guided tune check (`g` / "tune check", ~20 s): prompts you to (1) raise your LEFT hand to shoulder height, (2) lower
+it to your waist, (3) reach your RIGHT hand out to the side, samples each held pose, and sets the forward/back reach
+thresholds from YOUR measured heights (as fractions of your shoulder-to-hip span). It reports the measured ranges;
+the fit applies live and is kept when you "save tuning".
+
+Save / reset / persistence: `o` / "save tuning" writes `data/profiles/plane_tune_<arm>.json` (gitignored); the app
+loads it at startup if present, so your tuning survives a stack restart. `0` / "reset tuning" restores the profile
+baseline (does not delete the file; save again to persist the reset).
+
+## Tuning session: 5-minute procedure for tomorrow
+1. Bring up the sim stack on the real profile (mock/isaac only; never drives the real arm):
+   `rover-stack on --arm dev_arm_real`, start the body client on the laptop (`python body_client.py --side right`,
+   add `--mirror` if the webcam mirrors). Face the camera, whole upper body in frame.
+2. Engage: press **F** (hold still ~2 s to calibrate), the arm starts following.
+3. Fix a wrong direction FIRST. Move your right hand right - gripper should go right; raise it - gripper up. If
+   either is reversed, say "flip left right" or "flip up down" (or press **M** if the whole webcam is mirrored).
+   Raise your LEFT hand - reach should go FORWARD; if it goes back, say "flip reach".
+4. Set the reach feel with the guided check: press **g** (or say "tune check") and follow the three prompts
+   (left hand to shoulder, to waist, right hand out). The dead zone and thresholds are now sized to YOUR body.
+5. Dial it in by feel: reach too slow/fast -> `+` / `-` ("faster/slower reach"); hand motion too touchy or too
+   stiff -> `[` / `]` ("less/more sensitive"); reach triggers too late/early -> `,` / `.` ("reach back/forward
+   sooner"); drifting when you hold still -> make the dead zone bigger. Watch the `REACH >>` line and the ghost.
+6. When it feels right, press **o** (or say "save tuning"). It is written to the gitignored profile and reloads on
+   the next stack start. If you overshoot, press **0** ("reset tuning") to go back to the profile defaults and redo.
+
 ## Try it live
 ```
 # VM: bring the sim stack up on the real profile (mock/isaac backend only; never drives the real arm)

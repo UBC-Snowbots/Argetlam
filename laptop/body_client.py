@@ -346,6 +346,41 @@ def minimap(frame, st):
             cv2.circle(frame, px(st["tcp"]), 4, (255, 255, 255), -1)
 
 
+def plane_tune_msg(op: str, now: float) -> dict:
+    """A plane live-tuning command to the app (keys + - [ ] , . g o 0). Handled only when the app is in plane mode."""
+    return {"kind": "plane_tune", "t": now, "op": op}
+
+
+# key -> plane-tune op (reach speed +/-, sensitivity [/], reach thresholds ,/. sooner, g check, o save, 0 reset).
+# "+" and "-" accept their shifted twins "=" / "_" so no shift gymnastics are needed.
+PLANE_TUNE_KEYS = {ord("+"): "reach_faster", ord("="): "reach_faster",
+                   ord("-"): "reach_slower", ord("_"): "reach_slower",
+                   ord("["): "less_sensitive", ord("]"): "more_sensitive",
+                   ord(","): "reach_back_sooner", ord("."): "reach_fwd_sooner",
+                   ord("g"): "tune_check", ord("o"): "save", ord("0"): "reset"}
+
+
+def _strip0(s: str) -> str:
+    """Drop a leading 0 before a decimal point for the compact status line (0.20 -> .20, -0.20 -> -.20)."""
+    if s.startswith("0."):
+        return s[1:]
+    if s.startswith("-0."):
+        return "-" + s[2:]
+    return s
+
+
+def reach_status_line(robot: dict) -> str:
+    """Compact plane-tuning status line, e.g. 'REACH >> | spd4.0 lat.20 vrt.15 db.015'. '' when not plane mode."""
+    pt = robot.get("plane_tune")
+    if not pt:
+        return ""
+    arrow = {">>": ">>", "<<": "<<", "hold": "--"}.get(pt.get("reach_state"), "--")
+    lat = _strip0("{:.2f}".format(pt["lateral"]))
+    vrt = _strip0("{:.2f}".format(pt["vertical"]))
+    db = _strip0("{:.3f}".format(pt["deadband"]))
+    return "REACH {} | spd{:.1f} lat{} vrt{} db{}".format(arrow, pt["max_speed"] * 100, lat, vrt, db)
+
+
 class ButtonPanel:
     """Clickable buttons on the right edge of the window: STOP, then the presets the app reports in its status
     ("return", profile presets, "home_hw" when a real arm is configured). HOME needs a second click within
@@ -560,6 +595,18 @@ def main():
         lat = f"rtt {rtt_ms:.0f} ms" if rtt_ms is not None else "rtt ?"
         cv2.putText(frame, f"robot: {status}   {lat}   loss {100 * robot.get('loss', 0):.0f}%   "
                            f"ghost {robot.get('ghost') or '-'}", (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
+        rl = reach_status_line(robot)   # plane tuning: compact "REACH >> | spd4.0 lat.20 vrt.15 db.015"
+        if rl:
+            col = (0, 220, 0) if robot.get("plane_tune", {}).get("reach_state") in (">>", "<<") else (200, 200, 200)
+            cv2.putText(frame, rl, (10, frame.shape[0] - 62), cv2.FONT_HERSHEY_SIMPLEX, 0.6, col, 2)
+            cv2.putText(frame, "+/- reach  [/] sens  ,/. sooner  g check  o save  0 reset",
+                        (10, frame.shape[0] - 40), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (180, 180, 180), 1)
+        tune = robot.get("tune")   # guided reach-threshold check prompt
+        if tune and tune.get("active"):
+            cv2.putText(frame, f"TUNE CHECK: {tune.get('prompt', '')}", (10, 150), cv2.FONT_HERSHEY_SIMPLEX,
+                        0.75, (0, 255, 255), 2)
+            if tune.get("progress") is not None:
+                cv2.rectangle(frame, (10, 160), (10 + int(300 * tune["progress"]), 170), (0, 255, 255), -1)
         if robot.get("assist"):
             cv2.putText(frame, "ASSIST: grabbing / releasing...", (10, 230), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 80, 220), 2)
         elif robot.get("grab_ready"):
@@ -613,6 +660,8 @@ def main():
             say("reset")
         elif k == ord("m"):
             mirror = not mirror   # flip left/right for a mirrored webcam (plane / arm_mirror re-anchor on engage)
+        elif k in PLANE_TUNE_KEYS:   # plane live-tuning: + - reach spd, [ ] sens, , . sooner, g check, o save, 0 reset
+            link.send(plane_tune_msg(PLANE_TUNE_KEYS[k], time.time()))
     cap.release()
     cv2.destroyAllWindows()
 

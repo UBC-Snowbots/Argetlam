@@ -406,7 +406,62 @@ def scale_speed(factor: float, mode: str) -> float:
     return factor
 
 
+# ---- PLANE live-tuning phrases (plane body teleop only; the app ignores a plane_tune step in other modes) -------
+# Each phrase is matched on the clause with filler words dropped, so "save the tuning" == "save tuning". These win
+# over the jog/pose parsers but only on an EXACT normalized phrase, so a plain jog ("move left 5 cm") is untouched.
+_TUNE_SAY = {
+    "reach_faster": "Reach faster.", "reach_slower": "Reach slower.",
+    "more_sensitive": "More sensitive.", "less_sensitive": "Less sensitive.",
+    "reach_fwd_sooner": "Reach forward sooner.", "reach_back_sooner": "Reach back sooner.",
+    "bigger_deadzone": "Bigger dead zone.", "smaller_deadzone": "Smaller dead zone.",
+    "flip_lateral": "Flipped left and right.", "flip_vertical": "Flipped up and down.",
+    "flip_reach": "Flipped reach direction.",
+    "save": "Tuning saved.", "reset": "Tuning reset.", "tune_check": "Starting the tune check.",
+}
+_TUNE_PHRASES = {
+    "reach_faster": {"reach faster", "faster reach", "speed up reach", "reach quicker", "reach speed up"},
+    "reach_slower": {"reach slower", "slower reach", "slow down reach", "reach gentler", "reach speed down"},
+    "more_sensitive": {"more sensitive", "more sensitivity", "increase sensitivity", "turn up sensitivity"},
+    "less_sensitive": {"less sensitive", "less sensitivity", "reduce sensitivity", "decrease sensitivity",
+                       "turn down sensitivity"},
+    "reach_fwd_sooner": {"reach forward sooner", "forward sooner", "reach forwards sooner", "forwards sooner"},
+    "reach_back_sooner": {"reach back sooner", "back sooner", "reach backward sooner", "reach backwards sooner",
+                          "backward sooner", "backwards sooner"},
+    "bigger_deadzone": {"bigger dead zone", "bigger deadzone", "larger dead zone", "wider dead zone",
+                        "bigger dead band", "bigger deadband"},
+    "smaller_deadzone": {"smaller dead zone", "smaller deadzone", "narrower dead zone", "tighter dead zone",
+                         "smaller dead band", "smaller deadband"},
+    "flip_lateral": {"flip left right", "flip lateral", "flip sideways", "flip left", "flip right",
+                     "flip side to side", "flip left and right"},
+    "flip_vertical": {"flip up down", "flip vertical", "flip up", "flip down", "flip up and down"},
+    "flip_reach": {"flip reach", "flip forward back", "flip reach direction", "flip forward and back"},
+    "save": {"save tuning", "save tune", "save settings", "save reach tuning"},
+    "reset": {"reset tuning", "reset tune", "reset settings", "reset tuning default", "reset reach tuning"},
+    "tune_check": {"tune check", "tuning check", "check tuning", "calibrate reach", "reach check", "run tune check"},
+}
+_TUNE_DROP = {"the", "please", "a", "my", "now", "to", "and", "it", "that", "your", "lets", "let"}
+
+
+def _norm_tune(clause: str) -> str:
+    toks = [t for t in re.findall(r"[a-z]+", clause.lower()) if t not in _TUNE_DROP]
+    return " ".join(toks)
+
+
+def _parse_plane_tune(clause: str) -> dict | None:
+    """A live-tuning command for PLANE teleop, or None. Matched on the whole (filler-stripped) clause."""
+    norm = _norm_tune(clause)
+    if not norm:
+        return None
+    for op, phrases in _TUNE_PHRASES.items():
+        if norm in phrases:
+            return {"kind": "plane_tune", "op": op, "say": _TUNE_SAY[op]}
+    return None
+
+
 def _parse_clause(clause: str, objects, presets) -> dict | None:
+    tune = _parse_plane_tune(clause)   # plane live-tuning phrases win (exact match only; a jog is never stolen)
+    if tune is not None:
+        return tune
     toks = _tokens(_fix_motion(clause))   # fold motion mishearings ("write"->"right", "for word"->"forward")
     if not toks:
         return None
