@@ -35,8 +35,8 @@ from .body.calib_session import CalibratedMapper, CalibrationSession
 from .body.calibration import Profile
 from .control.presets import HOME_HW, at_goal, plan_preset, preset_names, request_hw_home
 from .session import SessionRecorder
-from .types import (Action, ArmPreset, BodyPose, ClutchMsg, EEGState, GripToggle, Intent, MirrorMsg, Query,
-                    RealJoints, Utterance)
+from .types import (Action, ArmPreset, BodyPose, CameraFrame, ClutchMsg, EEGState, GripToggle, Intent, MirrorMsg,
+                    Query, RealJoints, Utterance)
 
 log = logging.getLogger("rover_intent")
 ROOT = Path(__file__).resolve().parents[2]
@@ -101,7 +101,12 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
     clutch = Clutch(calib_s=c.get("calib_s", 2.0), still_m=c.get("still_m", 0.03), palm_s=c.get("palm_s", 1.0),
                     raise_m=c.get("raise_m", 0.05))
     hud = (cfg["net"].get("hud_host", "127.0.0.1"), cfg["net"].get("hud_port", 47130))
+    hud_video = (cfg["net"].get("hud_host", "127.0.0.1"), cfg["net"].get("hud_video_port", 47131))
     last_body, last_target, last_body_arrival, last_visible_t = None, None, 0.0, 0.0
+    # "follower seen" heuristic for the real_following light: scripts/sim_to_real.py polls the app with Query several
+    # times a second, so a Query within the last second means the follower is live (it can't be known directly).
+    last_query_t, follower_ever = 0.0, False
+    goal_start = None  # q_cmd when the current button-panel preset move began (for the move-progress readout)
     set_mirror = None
     presets = cfg["arm"].get("presets", {}) or {}
     on_drop = cfg["arm"].get("on_drop")  # preset to go to when the body drops out of view (None = freeze)
@@ -155,7 +160,7 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
         If the arm profile sets `on_drop: <preset>`, losing the body ("tracking lost": your arm dropped out of view)
         sends the arm to that preset instead of freezing it. F / left-hand releases (deliberate re-centring) and
         "link lost" (nobody watching) still freeze in place."""
-        nonlocal body_target, last_target, retarget, joint_goal, goal_name
+        nonlocal body_target, last_target, retarget, joint_goal, goal_name, goal_start
         if ev is None:
             return
         log.info("clutch: %s (trigger=%s%s)", ev.kind, clutch.trigger,
@@ -171,7 +176,7 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
             goal, why = plan_preset(on_drop, presets, home, q_cmd, clutch.state, arm, safety.ws_min, safety.ws_max)
             if goal is not None:
                 arbiter.on_intent(Intent(action=Action.stop))  # HOLD: the preset move owns the arm
-                joint_goal, goal_name = goal, on_drop
+                joint_goal, goal_name, goal_start = goal, on_drop, q_cmd.copy()
             log.info("on_drop (%s): %s", clutch.release_reason, why)
         elif ev.kind == "engaged":
             retarget.engage(arm.fk(q_cmd)[:3, 3], ev.neutral)
@@ -277,6 +282,13 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
                 log.info("preset %s: %s", msg.name, why)
                 rx.reply(addr, {"kind": "reply", "text": f"preset {msg.name}", "ok": ok, "say": why,
                                 "mode": arbiter.mode.value, "mirror": True})
+            elif isinstance(msg, ArmPreset) and joint_goal is not None:
+                # a preset move is already running: do NOT chain-replace it (that cancelled the previous move and left
+                # Pranav seeing nothing). Refuse and tell him to STOP first; STOP (an Utterance) always gets through.
+                why = f"busy: {goal_name} still moving, press STOP first"
+                log.info("preset %s refused: %s", msg.name, why)
+                rx.reply(addr, {"kind": "reply", "text": f"preset {msg.name}", "ok": False, "say": why,
+                                "mode": arbiter.mode.value, "busy": True})
             elif isinstance(msg, ArmPreset):
                 if msg.name == HOME_HW:
                     if t0 < hw_busy_until:
@@ -297,7 +309,7 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
                     ok = goal is not None
                     if ok:
                         arbiter.on_intent(Intent(action=Action.stop))  # HOLD: the preset move owns the arm
-                        joint_goal, goal_name = goal, msg.name
+                        joint_goal, goal_name, goal_start = goal, msg.name, q_cmd.copy()
                 log.info("preset %s%s: %s", msg.name, " (confirmed)" if msg.confirm else "", why)
                 rx.reply(addr, {"kind": "reply", "text": f"preset {msg.name}", "ok": ok, "say": why,
                                 "mode": arbiter.mode.value})
@@ -320,7 +332,15 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
                 log.info("mirror real %s", "on" if mirror_real else "off")
                 rx.reply(addr, {"kind": "reply", "text": "mirror", "mirror": mirror_real, "mode": arbiter.mode.value,
                                 "say": "Mirroring the real arm." if mirror_real else "Mirror off."})
+            elif isinstance(msg, CameraFrame):
+                # live webcam stream for the panel under the HUD. Forward the frame straight to the HUD's video
+                # channel; keep it off the pose path entirely (separate message, not recorded, latest-wins at the HUD).
+                try:
+                    rx.reply(hud_video, msg.model_dump(mode="json"))
+                except OSError:
+                    pass  # nothing listening on the video port yet: drop it, never block the loop
             elif isinstance(msg, Query):
+                last_query_t, follower_ever = t0, True  # the follower polls here: drives the real_following light
                 rx.reply(addr, {"kind": "state", "mode": arbiter.mode.value, "held": arbiter.held,
                                 "clutch": clutch.state, "assist": arbiter.assist, "mapping": type(retarget).__name__,
                                 "gripper": arbiter.gripper, "tcp": np.round(arm.fk(q_cmd)[:3, 3], 4).tolist(),
@@ -424,6 +444,11 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
             pct = lambda i: round(100 * sum(x[i] for x in vis_seen) / len(vis_seen)) if vis_seen else None
             span = (seq_seen[-1][1] - seq_seen[0][1] + 1) if len(seq_seen) > 1 else len(seq_seen)
             loss = 1.0 - len(seq_seen) / span if span > 0 else 0.0
+            preset_progress = None
+            if joint_goal is not None and goal_start is not None:
+                span_q = float(np.linalg.norm(np.asarray(joint_goal) - goal_start))
+                done = float(np.linalg.norm(q_cmd - goal_start))
+                preset_progress = round(min(1.0, max(0.0, done / span_q)), 2) if span_q > 1e-6 else 1.0
             st = {"kind": "status", "mode": arbiter.mode.value, "tcp": np.round(tcp, 3).tolist(),
                   "target": None if ghost is None else np.round(ghost, 3).tolist(), "ghost": ghost_state,
                   "clipped": ghost_bad, "grip": grip, "clutch": clutch.state, "trigger": clutch.trigger, "release_reason": clutch.release_reason,
@@ -437,6 +462,8 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
                   "assist": arbiter.assist, "held": arbiter.held, "tcp_meas": np.round(tcp, 3).tolist(),
                   "presets": preset_names(presets, bool(real_arm.get("enabled"))),
                   "preset": goal_name if joint_goal is not None else None,
+                  "preset_progress": preset_progress,
+                  "real_following": (None if not follower_ever else (t0 - last_query_t < 1.0)),
                   "hw_busy": round(max(0.0, hw_busy_until - t0), 1) if hw_busy_until else 0.0}
             if body_addr is not None:
                 rx.reply(body_addr, st)

@@ -17,6 +17,7 @@ net:                                   # laptop -> VM over the tailnet
   isaac_cmd_port: 47110
   isaac_state_port: 47111
   hud_port: 47130       # VM-screen overlay (scripts/hud.py): skeleton PiP, clutch, latency
+  hud_video_port: 47131 # live webcam stream shown under the HUD (CameraFrame, forwarded by the app)
 
 body:
   profile: data/profiles/{arm}_pranav.json   # calibration profile (created by C / "calibrate"); used when present

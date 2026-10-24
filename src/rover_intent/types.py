@@ -107,6 +107,23 @@ class RealJoints(BaseModel):
     table: Optional[str] = None    # stepper_map table version that produced q (so a replay knows which table)
 
 
+class CameraFrame(BaseModel):
+    """Laptop -> VM: one JPEG webcam frame for the live video panel under the Isaac HUD.
+
+    The JPEG is base64-encoded so the frame rides the same JSON transport as every other message
+    (UDP, or newline-JSON over the SSH tunnel). It is a SEPARATE message from BodyPose: sent at its own
+    (lower) rate and dropped rather than queued, so pose latency is never affected. The app forwards the
+    frame straight to the HUD's video channel (net.hud_video_port); the HUD decodes and shows it.
+    `seq`/`t` are for drop/latency accounting like BodyPose."""
+    kind: Literal["camera_frame"] = "camera_frame"
+    t: float
+    jpeg_b64: str
+    width: int = 0
+    height: int = 0
+    seq: int = 0
+    source: str = "body_cam"
+
+
 class MirrorMsg(BaseModel):
     """-> VM: enter or leave the "mirror real" state. While on (and real_joints are fresh) the sim arm's joint
     targets are set straight from the real arm; body/voice motion is refused. STOP always leaves mirror."""
