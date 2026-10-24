@@ -13,6 +13,7 @@ import argparse
 import logging
 import os
 import time
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -32,7 +33,7 @@ from .robot.backends import IsaacArm, MockArm, RealArm
 from .transport.udp import Receiver
 from .planner.nemotron import fallback_parse, is_confirm
 from .planner.fast_path import (CART, DEFAULT_ANGLE, DEFAULT_DIST_M, J_NAMES, J_SIGN, J_WORDS, make_cart_step,
-                                make_joint_step, make_speed_step, parse_fast, scale_speed)
+                                make_joint_step, make_preset_step, make_speed_step, parse_fast, scale_speed)
 from .body.clutch import Clutch
 from .config import load_config
 from .body.calib_session import CalibratedMapper, CalibrationSession
@@ -86,7 +87,7 @@ def build(cfg: dict, backend: str):
         retarget = PlaneMapper(arm, home, cfg.get("plane"), cfg["safety"]["workspace_min"],
                                cfg["safety"]["workspace_max"])
     n = cfg["nemotron"]
-    parser = IntentParser(n["model"], n["base_url"], n["api_key_env"])
+    parser = IntentParser(n["model"], n["base_url"], n["api_key_env"], timeout_s=float(n.get("timeout_s", 6.0)))
     return arm, safety, robot, scene, arbiter, retarget, parser
 
 
@@ -142,6 +143,11 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
     base_max_vel = safety.max_vel.copy()   # the profile's velocity cap; voice "slower"/"faster" scales this
     voice_speed = 1.0                      # current voice velocity-cap factor (0.25 .. 1.0 of base_max_vel)
     voice_seq = []           # remaining steps of a running voice sequence; next starts when this one reaches at_goal
+    # Short motion history (fix 1, 2026-10-23): the last few EXECUTED voice motion commands, so "again" / "the other
+    # way" resolve locally and Nemotron gets a compact context. current_pose = the preset we are at (None once a jog
+    # moves off it). STOP does not clear this: a new command after STOP still sees the history.
+    motion_history = deque(maxlen=5)   # each: {"steps": [step, ...]} (preset steps carry their from_pose)
+    current_pose = RETURN              # the sim starts at arm.home, which is the RETURN pose
     lo_ws, hi_ws = cfg["safety"]["workspace_min"], cfg["safety"]["workspace_max"]
     sim = cfg.get("sim", {})
     default_cam = sim.get("views", {}).get(sim.get("default_view", "behind"))
@@ -217,7 +223,7 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
     def do_preset(name, now):
         """Start a named joint-space preset move, reusing the button-panel path (plan_preset -> joint_goal, no IK).
         Returns (ok, message). The SafetyLayer (vel/acc limits) runs it; the ghost cues clamping at the box edge."""
-        nonlocal joint_goal, goal_name
+        nonlocal joint_goal, goal_name, current_pose
         if hw_busy_until and now < hw_busy_until:
             return False, f"refused: the real arm is homing ({hw_busy_until - now:.0f} s left)"
         goal, why = plan_preset(name, presets, home, q_cmd, clutch.state, arm, safety.ws_min, safety.ws_max)
@@ -225,13 +231,16 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
             return False, why
         arbiter.on_intent(Intent(action=Action.stop))  # HOLD: the preset move owns the arm
         joint_goal, goal_name = goal, name
+        current_pose = name            # the named pose we are now at / heading to (for "undo")
         return True, why
 
     def run_confirmed(pend, addr):
         """A spoken yes arrived inside the window: execute what was queued (a preset, a fast-path motion sequence,
         or an autonomous skill)."""
         if pend["kind"] == "preset":
+            prev_pose = current_pose
             ok, why = do_preset(pend["name"], time.time())
+            record_command([make_preset_step(pend["name"])], prev_pose, ok)
             log.info("voice preset %s confirmed: %s", pend["name"], why)
             rx.reply(addr, {"kind": "reply", "text": "confirm", "ok": ok, "say": why, "mode": arbiter.mode.value})
         elif pend["kind"] == "fast":   # a voice motion / sequence the operator confirmed
@@ -247,7 +256,7 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
         """Cartesian jog: solve IK for the current TCP + a base-frame delta, holding the current tool orientation
         (iterated to convergence, not one ik_step), then run it through the same joint_goal -> SafetyLayer path as
         the presets. Returns (ok, message); refuses with a spoken reason if it can't reach there or leaves the box."""
-        nonlocal joint_goal, goal_name
+        nonlocal joint_goal, goal_name, current_pose
         if hw_busy_until and now < hw_busy_until:
             return False, f"refused: the real arm is homing ({hw_busy_until - now:.0f} s left)"
         axis, sign = CART[direction]
@@ -263,12 +272,13 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
             return False, why
         arbiter.on_intent(Intent(action=Action.stop))   # HOLD: the jog owns the arm, same as a preset
         joint_goal, goal_name = goal, f"jog {direction}"
+        current_pose = None            # a jog moves us off any named pose
         return True, why
 
     def start_joint_jog(joint_idx, angle_rad, now):
         """Joint jog: current joints + a signed delta on one joint, CLAMPED to the joint limits, through the same
         checks/path as the presets. Returns (ok, message)."""
-        nonlocal joint_goal, goal_name
+        nonlocal joint_goal, goal_name, current_pose
         if hw_busy_until and now < hw_busy_until:
             return False, f"refused: the real arm is homing ({hw_busy_until - now:.0f} s left)"
         goal_q = np.array(q_cmd, float).copy()
@@ -280,6 +290,7 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
             return False, why
         arbiter.on_intent(Intent(action=Action.stop))
         joint_goal, goal_name = goal, f"jog {J_NAMES[joint_idx]}"
+        current_pose = None            # a jog moves us off any named pose
         return True, why
 
     def apply_speed(mode):
@@ -289,6 +300,30 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
         safety.max_vel = base_max_vel * voice_speed
         log.info("voice speed %s -> %.2fx of the profile cap", mode, voice_speed)
         return True, ""
+
+    def record_command(steps, prev_pose, ok):
+        """Append an executed voice motion command to the history (fix 1), so "again" / "the other way" can replay
+        or reverse it. Each preset step stores the pose we were at just before it (for a reversed = "undo" move).
+        prev_pose is current_pose captured BEFORE the command ran (the executors update current_pose as it runs)."""
+        if not ok:
+            return
+        rec, cur = [], prev_pose
+        for s in steps:
+            s2 = dict(s)
+            if s2["kind"] == "preset":
+                s2["from_pose"] = cur
+                cur = s2["name"]
+            elif s2["kind"] in ("cartjog", "jointjog"):
+                cur = None
+            rec.append(s2)
+        if any(s["kind"] in ("preset", "cartjog", "jointjog") for s in rec):
+            motion_history.append({"steps": rec})
+
+    def context_str():
+        """Compact recent context for the Nemotron prompt: the last 3 commands + the current named pose."""
+        parts = [" ".join(s.get("say", "") for s in c["steps"]).strip() for c in list(motion_history)[-3:]]
+        where = f"at the {current_pose} pose" if current_pose else "not at a named pose"
+        return ("; ".join(p for p in parts if p) + f" [{where}]").strip()
 
     def _start_step(step, now):
         """Run one parsed step. Returns (ok, spoken text). A motion step sets joint_goal; speed is instant."""
@@ -324,8 +359,10 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
     def start_sequence(steps, text, addr, latency):
         """Execute a parsed fast-path command (one step or a 'then' sequence) with NO spoken confirm."""
         nonlocal voice_seq
+        prev_pose = current_pose       # snapshot BEFORE the steps run (executors update current_pose)
         voice_seq = list(steps)
         ok, say = _advance_sequence(time.time())
+        record_command(steps, prev_pose, ok)
         combined = " ".join(s["say"] for s in steps if s.get("say"))
         arbiter.last_say = combined if ok else say
         log.info("voice fast-path %r -> %s (%.3fs)", text, [s["say"] for s in steps], latency)
@@ -396,7 +433,9 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
         # a named pose (voice) or the autonomous skills (when confirm.skills is on): ask first, do not move yet.
         want = RETURN if intent.action == Action.home else intent.preset if intent.action == Action.preset else None
         if want is not None and not confirm_presets:   # "just push it" (dev_arm_real): move now, no spoken yes
+            prev_pose = current_pose
             ok, why = do_preset(want, time.time())
+            record_command([make_preset_step(want)], prev_pose, ok)
             log.info("voice preset %s (no confirm): %s", want, why)
             rx.reply(addr, {"kind": "reply", "text": text, "latency_s": round(latency, 2), "ok": ok,
                             "intent": intent.model_dump(mode="json", exclude_none=True),
@@ -526,7 +565,7 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
                         confirm_pending = None
                     # one local grammar for the fast path: parse_fast wraps quick_pose for poses AND adds the motion
                     # grammar, so it resolves the "base" pose vs base-joint collision ("turn the base left 30 deg").
-                    fp = parse_fast(msg.text, scene.names(), list(presets))
+                    fp = parse_fast(msg.text, scene.names(), list(presets), history=list(motion_history))
                     if fp is not None and len(fp["steps"]) == 1 and fp["steps"][0]["kind"] == "preset":
                         step = fp["steps"][0]   # a lone named pose: reuse the pose path (confirm.presets, reply+intent)
                         finish(msg.text, addr, Intent(action=Action.preset, preset=step["name"], say=step["say"]), 0.0)
@@ -537,7 +576,7 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
                     else:  # Nemotron takes seconds: run it off the control loop
                         pending.append((msg.text, addr, time.time(),
                                         pool.submit(parser.parse, msg.text, scene.names(), descriptions,
-                                                    list(presets))))
+                                                    list(presets), context_str())))
             elif isinstance(msg, EEGState):
                 arbiter.on_eeg(msg.p_grasp, t0)
             elif isinstance(msg, ArmPreset) and mirror_real:

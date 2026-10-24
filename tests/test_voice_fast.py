@@ -52,6 +52,61 @@ def test_parse_fast_positives(text, kind, checks):
         assert step[k] == pytest.approx(v) if isinstance(v, float) else step[k] == v
 
 
+# --- fix 2: default joint when none is named (base for rotation/left-right, shoulder for up/down) ----------------
+@pytest.mark.parametrize("text,joint,sign_pos", [
+    ("Go right by 10 degrees", 1, False),     # right = -q1
+    ("go left by 10 degrees", 1, True),       # left  = +q1
+    ("rotate by 10 degrees", 1, True),        # no direction -> base, default positive (left/ccw)
+    ("turn by 30 degrees", 1, True),
+    ("spin 45 degrees", 1, True),
+    ("up 10 degrees", 2, False),              # shoulder up = -q2
+    ("down 15 degrees", 2, True),             # shoulder down = +q2
+    ("rotate the elbow by 10 degrees", 3, True),   # joint named, no direction -> joint's positive (elbow up)
+])
+def test_default_joint_when_none_named(text, joint, sign_pos):
+    r = parse_fast(text, OBJ, PRE)
+    assert r is not None and len(r["steps"]) == 1
+    step = r["steps"][0]
+    assert step["kind"] == "jointjog" and step["joint"] == joint
+    assert (step["angle_rad"] > 0) == sign_pos
+
+
+# --- fix 4: US/UK spellings, plurals, number words up to ninety, halves, "rotate the <joint> ..." ----------------
+@pytest.mark.parametrize("text,kind,checks", [
+    ("Move left 5 centimeters.", "cartjog", {"direction": "left", "dist_m": 0.05}),
+    ("Move down 10 centimeters.", "cartjog", {"direction": "down", "dist_m": 0.10}),
+    ("Move up 15 centimeters.", "cartjog", {"direction": "up", "dist_m": 0.15}),
+    ("go forward 1 meter", "cartjog", {"direction": "forward", "dist_m": 0.15}),      # 1 m clamps to 15 cm
+    ("nudge up half a centimeter", "cartjog", {"direction": "up", "dist_m": 0.005}),
+    ("move left one and a half cm", "cartjog", {"direction": "left", "dist_m": 0.015}),
+    ("turn the base left forty five degrees", "jointjog", {"joint": 1}),
+    ("Rotate the elbow by 10 degrees.", "jointjog", {"joint": 3}),
+    ("could you please move left 5 cm now", "cartjog", {"direction": "left", "dist_m": 0.05}),
+    ("shoulder up by thirty degrees", "jointjog", {"joint": 2}),
+])
+def test_grammar_spellings_and_fillers(text, kind, checks):
+    r = parse_fast(text, OBJ, PRE)
+    assert r is not None and len(r["steps"]) == 1
+    step = r["steps"][0]
+    assert step["kind"] == kind
+    for k, v in checks.items():
+        assert step[k] == pytest.approx(v) if isinstance(v, float) else step[k] == v
+
+
+# --- tonight's real-mic utterances (2026-10-23), verbatim incl. punctuation/caps, must parse on the fast path ----
+@pytest.mark.parametrize("text,kind", [
+    ("Go right by 10 degrees", "jointjog"),
+    ("rotate by 10 degrees", "jointjog"),
+    ("Move left 5 centimeters.", "cartjog"),
+    ("Move down 10 centimeters.", "cartjog"),
+    ("Move up 15 centimeters.", "cartjog"),
+    ("Rotate the elbow by 10 degrees.", "jointjog"),
+])
+def test_tonight_utterances_parse_on_fast_path(text, kind):
+    r = parse_fast(text, OBJ, PRE)
+    assert r is not None and len(r["steps"]) == 1 and r["steps"][0]["kind"] == kind
+
+
 def test_parse_fast_pose_and_sequence():
     assert parse_fast("stow", OBJ, PRE)["steps"][0] == {"kind": "preset", "name": "base", "say": "Moving to base."}
     assert parse_fast("go back", OBJ, PRE)["steps"][0]["name"] == RETURN
@@ -65,8 +120,9 @@ def test_parse_fast_pose_and_sequence():
     "pick up the block",
     "move the cup to the left",
     "left", "up",                          # a bare direction with no cue -> defer
-    "elbow 20 degrees",                    # a joint jog with no direction -> defer
-    "move up 5 degrees",                   # Cartesian direction with a joint unit -> defer
+    "elbow 20 degrees",                    # a joint jog with no direction and no rotate verb -> defer
+    "move up 5 inches",                    # an unknown unit -> defer (cm/mm/m/deg only)
+    "spin around",                         # no magnitude: left to Nemotron (base +360, clamped) -> defer
     "open the gripper", "follow me",
     "move left 5 cm then pick up the cup",  # a mixed sequence: the whole thing defers (never half-execute)
     "go to the ready pose when you are ready and then stow it and then wait",  # > 6 clause words etc.

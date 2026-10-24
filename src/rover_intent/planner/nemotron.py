@@ -27,8 +27,13 @@ joint_jog (turn ONE joint: set "joint" to base/shoulder/elbow/forearm/wrist/tool
 speed (set "speed" to slower/faster/normal to change how fast voice moves run),
 stop, follow (mirror the user's arm), reset,
 clarify (you are not sure what the user means: ask them in "say", and nothing moves), unknown (not a robot command).
-Only use jog/joint_jog for a direct nudge with no object; to move an OBJECT use pick/place/move. "say" is spoken back
-to the user; keep it short. Use your own judgement."""
+Only use jog/joint_jog for a direct nudge with no object; to move an OBJECT use pick/place/move.
+Defaults when a turn is asked in degrees with NO joint named: "rotate"/"turn"/"spin" (or "left"/"right") by N degrees
+means joint_jog the base by N degrees; "up"/"down" by N degrees means joint_jog the shoulder by N degrees.
+Recent commands, oldest to newest (use these if the user refers back): {context}.
+"again"/"repeat" means redo the last command; "the other way"/"opposite"/"reverse"/"undo" means the last motion
+reversed (a reversed preset = go back to the previous pose). "say" is spoken back to the user; keep it short.
+Use your own judgement."""
 
 # Spoken aliases -> preset name. The targets must be real profile presets (RETURN is always valid; presets.py
 # refuses an unknown name). Voice "home" means RETURN (the sim start pose), NEVER the hardware home_hw button.
@@ -37,8 +42,9 @@ _POSE_ALIASES = {"stow": "base", "rest": "base", "base": "base", "ready": "ready
 
 
 class IntentParser:
-    def __init__(self, model: str, base_url: str, api_key_env: str = "NEBIUS_API_KEY", timeout_s: float = 8.0):
+    def __init__(self, model: str, base_url: str, api_key_env: str = "NEBIUS_API_KEY", timeout_s: float = 6.0):
         self.model = model
+        self.timeout_s = timeout_s
         key = os.environ.get(api_key_env)
         self.client = None
         if key:
@@ -50,7 +56,7 @@ class IntentParser:
         return self.client is not None
 
     def parse(self, text: str, objects: list[str], descriptions: dict[str, str] | None = None,
-              presets: list[str] | None = None) -> Intent:
+              presets: list[str] | None = None, context: str = "") -> Intent:
         presets = list(presets or [])
         stop = urgent_stop(text)
         if stop is not None:
@@ -60,14 +66,20 @@ class IntentParser:
         desc = descriptions or {}
         listing = "; ".join(f"{o}: {desc[o]}" if desc.get(o) else o for o in objects)
         preset_list = ", ".join([RETURN] + [p for p in presets if p != RETURN]) or RETURN
-        resp = self.client.chat.completions.create(
-            model=self.model,
-            temperature=0,
-            messages=[{"role": "system", "content": SYSTEM.format(objects=listing, presets=preset_list, ret=RETURN)},
-                      {"role": "user", "content": text}],
-            response_format={"type": "json_schema",
-                             "json_schema": {"name": "intent", "schema": Intent.model_json_schema()}},
-        )
+        system = SYSTEM.format(objects=listing, presets=preset_list, ret=RETURN, context=context or "(none)")
+        try:
+            resp = self.client.chat.completions.create(
+                model=self.model,
+                temperature=0,
+                messages=[{"role": "system", "content": system},
+                          {"role": "user", "content": text}],
+                response_format={"type": "json_schema",
+                                 "json_schema": {"name": "intent", "schema": Intent.model_json_schema()}},
+            )
+        except Exception as e:  # a timeout (the client's timeout_s) must not hang the loop or sound like an error
+            if "timeout" in type(e).__name__.lower():
+                return Intent(action=Action.unknown, say="Sorry, I didn't catch that in time.")
+            raise
         try:
             return normalize_preset(Intent.model_validate(json.loads(resp.choices[0].message.content)))
         except Exception:
