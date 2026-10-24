@@ -55,6 +55,29 @@ sim:
 confirm:
   skills: true   # the physical arm: require a spoken "yes" before any autonomous pick/place/move too
 
+body:
+  mode: arm_mirror   # full-arm joint mirroring, no IK (body/arm_mirror.py). The old position/calibrated modes stay
+                     # available on the other profiles. A saved calibration profile is NOT loaded in this mode.
+  clutch: {calib_s: 2.0, still_m: 0.03, palm_s: 1.0, raise_m: 0.05}
+
+# Full-arm mirror mapping for the real dev_arm. neutral = the raw arm angle (rad) that maps to the base pose
+# (home). Defaults are Pranav's 2026-10-23 session medians (camera in FRONT). Tune per docs/ARM_MIRROR.md; with the
+# recommended camera BESIDE the operator the az neutral/sign usually need a one-time retune. gains/signs picked so
+# the reachable arm range covers the joint travel with little clamping (replay 2026-10-23).
+arm_mirror:
+  side: right
+  neutral: {az: -0.925, el: -0.419, elbow: 1.641, wrist: 0.0}
+  # gains tuned on the 2026-10-23 replay (clamp 22% -> 14%). J2/J3 use <1.0 because the robot's shoulder/elbow sit
+  # near their LOWER travel limits at home (base pose), so the downward/fold side of the human range clamps first;
+  # the residual J3 clamp is the arm hitting its real elbow-fold limit (ghost cues amber). Retune per operator.
+  gain:    {j1: 1.0, j2: 0.6, j3: 0.6, j5: 0.7}
+  sign:    {j1: 1.0, j2: 1.0, j3: 1.0, j5: 1.0}
+  one_euro: {min_cutoff: 1.0, beta: 0.05}
+  deadband_deg: 1.5
+  j1_hold_vert_deg: 20.0
+  ramp_s: 2.0
+  conf_gate: true
+
 safety:
   # near-home box carved from the real reachable shell (axis-orient IK, real joint limits): contains the home TCP
   # (0.545, -0.027, 0.520); most of the interior is reachable, edges clamp (the ghost already cues amber there).

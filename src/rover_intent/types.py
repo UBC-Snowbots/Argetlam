@@ -41,6 +41,7 @@ class BodyPose(BaseModel):
     elbow: Optional[tuple[float, float, float]] = None           # for pose mirroring
     shoulder_other: Optional[tuple[float, float, float]] = None  # the other shoulder (torso frame)
     hips: Optional[tuple[float, float, float]] = None            # hip midpoint (torso "up")
+    hand: Optional[tuple[float, float, float]] = None            # index/pinky world midpoint (arm_mirror wrist bend)
     side: Literal["right", "left"] = "right"
     wrist_other: Optional[tuple[float, float, float]] = None      # the other wrist (left-hand clutch)
     skel2d: Optional[list[tuple[float, float]]] = None            # normalized image points for the overlay skeleton
