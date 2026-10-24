@@ -143,3 +143,15 @@ class MirrorMsg(BaseModel):
     kind: Literal["mirror"] = "mirror"
     t: float = 0.0
     on: bool = True
+
+
+class PlaneTune(BaseModel):
+    """Laptop -> VM: a live-tuning command for PLANE body teleop (body/plane.py). Handled ONLY while plane mode is
+    active; a bounded, clamped step on one knob (or save / reset / tune_check). Each op replies a spoken "say" and a
+    knob snapshot. `value` is an optional explicit value (unused by the bounded-step ops; reserved)."""
+    kind: Literal["plane_tune"] = "plane_tune"
+    t: float = 0.0
+    op: Literal["reach_faster", "reach_slower", "more_sensitive", "less_sensitive",
+                "reach_fwd_sooner", "reach_back_sooner", "bigger_deadzone", "smaller_deadzone",
+                "flip_lateral", "flip_vertical", "flip_reach", "save", "reset", "tune_check"]
+    value: Optional[float] = None

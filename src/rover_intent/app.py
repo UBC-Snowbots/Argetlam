@@ -22,7 +22,7 @@ import yaml
 
 from .body.mirror import GestureMirror
 from .body.arm_mirror import ArmMirror
-from .body.plane import PlaneMapper, DropWatch, plane_coords
+from .body.plane import PlaneMapper, DropWatch, PlaneTuneCheck, plane_coords
 from .body.retarget import Retargeter
 from .control.arbiter import Arbiter, Mode
 from .control.kinematics import ArmModel
@@ -41,7 +41,7 @@ from .body.calibration import Profile
 from .control.presets import HOME_HW, RETURN, at_goal, check_joint_goal, plan_preset, preset_names, request_hw_home
 from .session import SessionRecorder
 from .types import (Action, ArmPreset, BodyPose, CameraFrame, ClutchMsg, EEGState, GripToggle, Intent, MirrorMsg,
-                    Query, RealJoints, Utterance)
+                    PlaneTune, Query, RealJoints, Utterance)
 
 log = logging.getLogger("rover_intent")
 ROOT = Path(__file__).resolve().parents[2]
@@ -106,6 +106,10 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
     plane_on = isinstance(retarget, PlaneMapper)      # image-plane TCP teleop (IK path); left-hand clutch disabled
     plain_gripper = arm_mirror_on or plane_on         # teleop modes: plain open/close gripper, no AUTO grab-assist
     plane_drop = DropWatch(float((cfg.get("plane") or {}).get("drop_below_hip_s", 0.7)))
+    # Live tuning of plane teleop: a saved override (data/profiles/plane_tune_<arm>.json, gitignored) loaded at start,
+    # and a guided reach-threshold "tune check". Both no-ops unless plane mode is active.
+    tune_check = PlaneTuneCheck()
+    tune_path = ROOT / f"data/profiles/plane_tune_{cfg['arm_profile']}.json"
     body_target, body_t = None, 0.0
     body_joint_target = None   # arm_mirror: the 6-vector joint target (instead of body_target's TCP)
     q_cmd = robot.read_joints()  # commanded trajectory state (the drives track it; see WINDUP)
@@ -170,6 +174,12 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
     elif arm_mirror_on:
         log.info("body mode: arm_mirror (full-arm joint mirroring, no IK; side=%s)", retarget.side)
     elif plane_on:
+        if tune_path.exists():   # load a saved live-tuning override on top of the profile knobs (if present)
+            try:
+                if retarget.load(tune_path):
+                    log.info("plane tuning override loaded: %s | %s", tune_path.name, retarget.snapshot())
+            except Exception as exc:
+                log.warning("plane tuning override %s failed to load: %s", tune_path.name, exc)
         log.info("body mode: plane (image-plane TCP teleop, depth ignored, IK orient=%s; control hand=%s)",
                  teleop_orient, retarget.side)
     else:
@@ -193,6 +203,41 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
             retarget = CalibratedMapper(effects["profile"], lo_ws, hi_ws, camera)
         if effects.get("engage") and clutch.state == "idle":
             on_clutch(clutch.toggle(time.time()))
+
+    def apply_plane_tune(op, addr=None, text="plane_tune"):
+        """One live-tuning op for plane teleop (typed PlaneTune message or a voice phrase). Handled ONLY in plane
+        mode; each op replies a spoken "say" + a knob snapshot, is logged, and (via the snapshot in status) shows on
+        the HUD / body client. save writes the gitignored override, reset restores the profile baseline, tune_check
+        starts the guided reach-threshold check."""
+        if not plane_on:
+            if addr is not None:
+                rx.reply(addr, {"kind": "reply", "text": text, "ok": False,
+                                "say": "Tuning is only available in plane mode.", "mode": arbiter.mode.value})
+            return
+        if op == "tune_check":
+            tune_check.start(time.time())
+            say_txt = tune_check.prompt
+        elif op == "save":
+            retarget.save(tune_path)
+            say_txt = f"Tuning saved to {tune_path.name}."
+        elif op == "reset":
+            retarget.reset_tuning()
+            say_txt = "Tuning reset to the profile defaults."
+        else:
+            say_txt = retarget.adjust(op)
+            if say_txt is None:
+                if addr is not None:
+                    rx.reply(addr, {"kind": "reply", "text": text, "ok": False,
+                                    "say": f"Unknown tuning command {op!r}.", "mode": arbiter.mode.value})
+                return
+        snap = retarget.snapshot()
+        arbiter.last_say = say_txt
+        rx.reply(bubble, {"state": "reply", "text": say_txt})   # Pranav's voice bubble on the VM screen
+        log.info("plane tune %s -> %s | %s", op, say_txt, snap)
+        if addr is not None:
+            rx.reply(addr, {"kind": "reply", "text": text, "ok": True, "say": say_txt,
+                            "mode": arbiter.mode.value, "plane_tune": snap})
+
     seq_seen = []  # (t, seq) over the last second, for packet loss
     vis_seen = []  # (t, arm visible, in position, hand found) over the last second: tracking quality
 
@@ -534,6 +579,23 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
                             on_clutch(clutch._release("right arm dropped"))
                     else:
                         plane_drop.reset()
+                    if plane_on and tune_check.active:   # guided reach-threshold check: sample poses, fit on done
+                        tune_check.update(t0, plane_coords(msg, retarget.side) if msg.visible else None)
+                        if tune_check.active:
+                            prm = tune_check.pop_prompt()
+                            if prm:
+                                arbiter.last_say = prm
+                                rx.reply(bubble, {"state": "reply", "text": prm})
+                        if tune_check.finished:
+                            res = tune_check.result
+                            tune_check.finished = False
+                            retarget.set_reach_thresholds(res["forward_frac"], res["back_frac"])
+                            done_say = (f"Tune check done. Forward {res['forward_frac']:.2f}, "
+                                        f"back {res['back_frac']:.2f}. Say save tuning to keep it.")
+                            arbiter.last_say = done_say
+                            rx.reply(bubble, {"state": "reply", "text": done_say})
+                            log.info("plane tune check: fwd=%.3f back=%.3f measured=%s | %s",
+                                     res["forward_frac"], res["back_frac"], res["measured"], retarget.snapshot())
                     if msg.visible and clutch.state == "following" and arbiter.mode == Mode.FOLLOW:
                         tgt = retarget(msg)
                         if tgt is not None and arm_mirror_on:
@@ -588,7 +650,10 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
                     # one local grammar for the fast path: parse_fast wraps quick_pose for poses AND adds the motion
                     # grammar, so it resolves the "base" pose vs base-joint collision ("turn the base left 30 deg").
                     fp = parse_fast(msg.text, scene.names(), list(presets), history=list(motion_history))
-                    if fp is not None and len(fp["steps"]) == 1 and fp["steps"][0]["kind"] == "preset":
+                    if fp is not None and fp["steps"] and all(s["kind"] == "plane_tune" for s in fp["steps"]):
+                        for s in fp["steps"]:   # spoken plane-tuning phrase (plane mode only; replies in-tick)
+                            apply_plane_tune(s["op"], addr, msg.text)
+                    elif fp is not None and len(fp["steps"]) == 1 and fp["steps"][0]["kind"] == "preset":
                         step = fp["steps"][0]   # a lone named pose: reuse the pose path (confirm.presets, reply+intent)
                         finish(msg.text, addr, Intent(action=Action.preset, preset=step["name"], say=step["say"]), 0.0)
                     elif fp is not None:    # jog / joint jog / speed / "then" sequence: also parsed in-tick, no cloud
@@ -653,6 +718,8 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
                 log.info("mirror real %s", "on" if mirror_real else "off")
                 rx.reply(addr, {"kind": "reply", "text": "mirror", "mirror": mirror_real, "mode": arbiter.mode.value,
                                 "say": "Mirroring the real arm." if mirror_real else "Mirror off."})
+            elif isinstance(msg, PlaneTune):   # live tuning of plane teleop (body client keys); plane mode only
+                apply_plane_tune(msg.op, addr, "plane_tune")
             elif isinstance(msg, CameraFrame):
                 # live webcam stream for the panel under the HUD. Forward the frame straight to the HUD's video
                 # channel; keep it off the pose path entirely (separate message, not recorded, latest-wins at the HUD).
@@ -815,7 +882,12 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
                   "preset": goal_name if joint_goal is not None else None,
                   "preset_progress": preset_progress,
                   "real_following": (None if not follower_ever else (t0 - last_query_t < 1.0)),
-                  "hw_busy": round(max(0.0, hw_busy_until - t0), 1) if hw_busy_until else 0.0}
+                  "hw_busy": round(max(0.0, hw_busy_until - t0), 1) if hw_busy_until else 0.0,
+                  # plane live-tuning: knob snapshot (reach state + gains/thresholds) for the compact HUD line, and
+                  # the guided tune-check prompt while it runs
+                  "plane_tune": retarget.snapshot() if plane_on else None,
+                  "tune": ({"active": True, "prompt": tune_check.prompt, "progress": round(tune_check.progress, 2)}
+                           if plane_on and tune_check.active else None)}
             if body_addr is not None:
                 rx.reply(body_addr, st)
                 set_mirror = None if set_mirror else set_mirror  # sent once
