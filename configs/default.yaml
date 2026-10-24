@@ -64,7 +64,10 @@ confirm:          # voice safety: the app asks "say yes to confirm" before a mov
   window_s: 5.0   # seconds to say yes/confirm/ok after the prompt; anything else or a timeout cancels
   skills: false   # also require confirm for the autonomous pick/place/move voice skills. Off here so the sim gate
                   # (scripts/gate.sh, dev_arm) keeps scripting skills without a yes; dev_arm_real turns it on.
-                  # Named-pose voice (stow/ready/return/home) ALWAYS needs confirm, regardless of this flag.
+  presets: true   # named poses (stow/ready/return/home) ask "say yes" first. dev_arm_real sets this false ("just
+                  # push it", Pranav 2026-10-23: the 2-step confirm was too slow on the real mic).
+  motion: true    # the no-camera voice jogs (Cartesian jog / joint jog / "then" sequence / speed) ask first too;
+                  # dev_arm_real sets this false. STOP is always instant and bypasses every confirm.
 
 eeg:
   p_on: 0.7      # p_grasp above this -> close (after hold_s)
