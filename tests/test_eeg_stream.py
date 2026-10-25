@@ -348,3 +348,57 @@ def test_clench_path_sends_toggle_on_double_clench():
     msg = _MSG.validate_python(json.loads(data))
     assert isinstance(msg, GripToggle) and msg.source == "clench"
     assert sender.sent > 0  # frames were also streamed while the clench job ran
+
+
+def test_stream_loop_no_data_watchdog_reopens_a_frozen_board():
+    """BrainFlow can freeze silently (Muse sleeps / BLE drop, 2026-10-25): no samples, no error. The watchdog must
+    reopen the board and frames must resume."""
+    import threading as _th
+    import time as _t
+
+    import numpy as _np
+
+    from rover_intent.eeg.stream_tx import stream_loop
+
+    class Board:
+        def __init__(self, n_good):
+            self.n_good = n_good
+
+        def get_board_data(self):
+            if self.n_good > 0:
+                self.n_good -= 1
+                return _np.ones((4, 12))
+            return _np.zeros((4, 0))     # frozen: no data, no error
+
+        def stop_stream(self):
+            pass
+
+        def release_session(self):
+            pass
+
+    class Sender:
+        sent, dropped, connected = 0, 0, True
+
+        def __init__(self):
+            self.frames = []
+
+        def submit(self, f):
+            self.frames.append(f)
+
+    sender, stop, opened = Sender(), _th.Event(), []
+
+    def reopen():
+        b = Board(10 ** 6)               # the reopened board streams again
+        opened.append(b)
+        return b, [0, 1, 2, 3]
+
+    th = _th.Thread(target=stream_loop, args=(Board(3), 256, [0, 1, 2, 3], sender),
+                    kwargs=dict(period=0.01, quiet=True, stop=stop, reopen=reopen, stall_s=0.3), daemon=True)
+    th.start()
+    t_end = _t.time() + 3.0
+    while _t.time() < t_end and not (opened and len(sender.frames) > 10):
+        _t.sleep(0.05)
+    stop.set()
+    th.join(timeout=2)
+    assert len(opened) == 1               # reopened exactly once
+    assert len(sender.frames) > 10        # frames resumed after the reconnect (3 before the freeze)

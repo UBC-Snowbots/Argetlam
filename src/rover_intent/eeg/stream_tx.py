@@ -104,17 +104,36 @@ class HubSender:
 
 
 def stream_loop(board, fs, chans, sender: HubSender, *, detector: ClenchDetector | None = None,
-                udp=None, app_addr=None, period=0.05, quiet=False, stop: threading.Event | None = None):
-    """Read the board ~every `period` s: frame -> hub, and (if detector) clench -> UDP toggle. Returns on stop/Ctrl+C."""
+                udp=None, app_addr=None, period=0.05, quiet=False, stop: threading.Event | None = None,
+                reopen=None, stall_s: float = 3.0):
+    """Read the board ~every `period` s: frame -> hub, and (if detector) clench -> UDP toggle. Returns on stop/Ctrl+C.
+    No-data watchdog: if the board delivers no samples for `stall_s` (BrainFlow can freeze silently when the Muse
+    sleeps or drops BLE, 2026-10-25), and `reopen` is given, call reopen() -> (board, chans) and keep going; a failed
+    reopen is retried every 2 s."""
     stop = stop or threading.Event()
     seq = 0
     n_toggles = 0
     last_print = 0.0
     score = 0.0
+    last_data = time.time()
+    reconnects = 0
     try:
         while not stop.is_set():
+            if reopen is not None and time.time() - last_data > stall_s:
+                print(f"\n{time.strftime('%H:%M:%S')} NO DATA for {time.time() - last_data:.1f} s: "
+                      f"reconnecting the board", flush=True)
+                try:
+                    board, chans = reopen()
+                    reconnects += 1
+                    print(f"{time.strftime('%H:%M:%S')} board reconnected (#{reconnects})", flush=True)
+                    last_data = time.time()
+                except Exception as e:  # noqa: BLE001  (keep the loop alive; retry)
+                    print(f"{time.strftime('%H:%M:%S')} reconnect failed: {e}; retrying in 2 s", flush=True)
+                    last_data = time.time() - stall_s + 2.0
+                continue
             x = _read(board, chans)
             if x.shape[1]:
+                last_data = time.time()
                 now = time.time()  # ~ time of the LAST sample in this chunk
                 sender.submit(make_frame(seq, now, x))
                 seq += 1
@@ -131,7 +150,7 @@ def stream_loop(board, fs, chans, sender: HubSender, *, detector: ClenchDetector
                     width = min(20, int(20 * score / (2 * detector.cfg.on_ratio)))
                     bar = f" clench {score:5.1f}x |{'#' * width:<20}|"
                 print(f"\rfs={fs:g} sent={sender.sent} hub={'yes' if sender.connected else 'no '} "
-                      f"dropped={sender.dropped} seq={seq}{bar}", end="", flush=True)
+                      f"dropped={sender.dropped} seq={seq} reconnects={reconnects}{bar}", end="", flush=True)
                 last_print = time.time()
             time.sleep(period)
     except KeyboardInterrupt:
@@ -151,6 +170,8 @@ def main(argv=None) -> int:
     ap.add_argument("--app-host", default="rover-vm")
     ap.add_argument("--app-port", type=int, default=47100)
     ap.add_argument("--period", type=float, default=0.05, help="board read period in seconds (~chunk cadence)")
+    ap.add_argument("--stall-s", type=float, default=3.0,
+                    help="no-data watchdog: reconnect the board after this many seconds without samples (0 = off)")
     args = ap.parse_args(argv)
 
     board, fs, chans = open_board(args.board, args.serial, args.mac, args.name)
@@ -169,13 +190,30 @@ def main(argv=None) -> int:
         app_addr = (args.app_host, args.app_port)
         print(f"clench enabled: double-clench to toggle, threshold {detector.cfg.on_ratio}x relaxed.", flush=True)
 
+    held = {"board": board}
+
+    def reopen():
+        try:
+            held["board"].stop_stream()
+            held["board"].release_session()
+        except Exception:  # noqa: BLE001  (a frozen session may not close cleanly)
+            pass
+        time.sleep(1.0)
+        nb, _fs, nchans = open_board(args.board, args.serial, args.mac, args.name)
+        held["board"] = nb
+        return nb, nchans
+
     print(f"streaming raw EEG to hub {args.hub_host}:{args.hub_port}. Ctrl+C to stop.", flush=True)
     try:
-        stream_loop(board, fs, chans, sender, detector=detector, udp=udp, app_addr=app_addr, period=args.period)
+        stream_loop(board, fs, chans, sender, detector=detector, udp=udp, app_addr=app_addr, period=args.period,
+                    reopen=None if args.stall_s <= 0 else reopen, stall_s=args.stall_s)
     finally:
         sender.stop()
-        board.stop_stream()
-        board.release_session()
+        try:
+            held["board"].stop_stream()
+            held["board"].release_session()
+        except Exception:  # noqa: BLE001
+            pass
     return 0
 
 
