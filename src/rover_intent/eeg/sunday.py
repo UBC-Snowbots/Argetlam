@@ -24,7 +24,7 @@ Usage (laptop with the Muse; Bluetooth on that machine):
   python -m rover_intent.eeg.sunday --board muse2 --name pranav --only clench_double   # re-record one block
   python -m rover_intent.eeg.sunday --board muse2 --name pranav --only train           # refit from saved blocks
   python -m rover_intent.eeg.sunday --board muse2 --name pranav --only live --host <vm> # live test to the sim
-  --board muse2 (native BLE) | muse2-bled (BLED112 dongle, --serial COM3) | petal (LSL from Petal Metrics) | synthetic (dry run)
+  --board muse2 (native BLE) | muse2-bled (BLED112 dongle, --serial COM3) | synthetic (dry run)
   Live test goes to a SPARE sim port (default 47195), never 47100 and never the real arm.
 """
 from __future__ import annotations
@@ -605,12 +605,6 @@ def preflight(session_dir: Path | None = None) -> dict:
     except Exception:  # noqa: BLE001
         check("import pygame (only needed for --with-ssvep)", False, "missing; optional unless --with-ssvep",
               fatal=False)
-    try:
-        import pylsl  # noqa: F401
-        check("import pylsl (only needed for --board petal)", True, f"present ({pylsl.__version__})", fatal=False)
-    except Exception:  # noqa: BLE001
-        check("import pylsl (only needed for --board petal)", False, "missing; pip install pylsl for Petal Metrics",
-              fatal=False)
 
     # Bluetooth presence (best effort; only meaningful on the real laptop, which is Windows)
     bt = _bluetooth_present()
@@ -704,7 +698,7 @@ def ssvep_block(scfg: SundayConfig, board_kind: str, session_dir: Path, freqs=(1
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--preflight", action="store_true", help="Saturday: no Muse, synthetic end-to-end, < 3 min")
-    ap.add_argument("--board", choices=["muse2", "muse2-bled", "petal", "synthetic"], default="muse2")
+    ap.add_argument("--board", choices=["muse2", "muse2-bled", "synthetic"], default="muse2")
     ap.add_argument("--serial", default="", help="BLED112 dongle port for muse2-bled (COM3, /dev/ttyACM0)")
     ap.add_argument("--mac", default="", help="Muse MAC address (optional)")
     ap.add_argument("--muse-name", default="", help="specific Muse, e.g. Muse-1A2B")

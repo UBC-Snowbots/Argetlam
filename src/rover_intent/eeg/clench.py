@@ -17,8 +17,7 @@ Usage (laptop with the Muse; Bluetooth must be on that machine; `python clench.p
   python -m rover_intent.eeg.clench calibrate --out data/profiles/clench_pranav.json      # ~1.5 min, guided
   python -m rover_intent.eeg.clench run --profile data/profiles/clench_pranav.json --host <vm>
   python -m rover_intent.eeg.clench replay --profile ... --file data/eeg_recordings/clench_*.npz
-  --board muse2 (native BLE, default) | muse2-bled (BLED112 dongle, --serial COM3) | petal (LSL stream from Petal
-          Metrics) | synthetic (pipeline smoke only)
+  --board muse2 (native BLE, default) | muse2-bled (BLED112 dongle, --serial COM3) | synthetic (pipeline smoke only)
 """
 from __future__ import annotations
 
@@ -238,9 +237,6 @@ def calibrate(rest: np.ndarray, clench: np.ndarray, other: np.ndarray | None, fs
 
 # --- board I/O (BrainFlow) -------------------------------------------------------------------------------------------
 def open_board(kind: str, serial: str = "", mac: str = "", name: str = ""):
-    if kind == "petal":   # Muse via an LSL stream (Petal Metrics), not BrainFlow Bluetooth
-        from rover_intent.eeg.lsl_board import open_lsl
-        return open_lsl()
     from brainflow.board_shim import BoardIds, BoardShim, BrainFlowInputParams
 
     ids = {"muse2": BoardIds.MUSE_2_BOARD, "muse2-bled": BoardIds.MUSE_2_BLED_BOARD,
@@ -370,7 +366,7 @@ def main(argv=None) -> int:
     sub = ap.add_subparsers(dest="cmd", required=True)
     for name in ("calibrate", "run"):
         p = sub.add_parser(name)
-        p.add_argument("--board", choices=["muse2", "muse2-bled", "petal", "synthetic"], default="muse2")
+        p.add_argument("--board", choices=["muse2", "muse2-bled", "synthetic"], default="muse2")
         p.add_argument("--serial", default="", help="BLED112 dongle port for muse2-bled (COM3, /dev/ttyACM0)")
         p.add_argument("--mac", default="", help="Muse MAC address (optional)")
         p.add_argument("--name", default="", help="Muse name, e.g. Muse-1A2B (optional; picks that headband)")

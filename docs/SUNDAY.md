@@ -38,30 +38,6 @@ If any fatal line says MISSING, run the `pip install` it prints and re-run the p
 
 ---
 
-## Using Petal Metrics instead of BrainFlow Bluetooth (`--board petal`)
-
-Petal Metrics (petal.tech) connects to the Muse itself and streams the EEG over LSL. Our tools then read that stream
-instead of opening Bluetooth through BrainFlow. Everything else (blocks, fitting, profile, live test) is the same.
-
-1. `pip install -e ".[muse]"` (now includes `pylsl`; the preflight shows `import pylsl ... OK`).
-2. In Petal Metrics: connect the Muse, choose **LSL** as the streaming protocol, press **Stream**.
-3. **Test locally first** (laptop only, nothing is sent anywhere):
-   ```
-   python -m rover_intent.eeg.lsl_board --seconds 15
-   ```
-   You want `OK: stream '...' ... at 256 Hz`, four numbers per line, and the numbers jumping when you clench your
-   jaw. It ends with `OK: received ~256 samples/s`.
-4. Then run the session exactly as below, with `--board petal` instead of `--board muse2`:
-   ```
-   python -m rover_intent.eeg.sunday --board petal --name pranav --host <vm-ip> --port 47195
-   ```
-   (`<vm-ip>` is the VM address as the laptop sees it: on bench-laptop that is rover-vm.)
-
-Keep the Muse connected to Petal only (close the Muse phone app). Calibrate and run with the same source: a profile
-fit on Petal data should be used with `--board petal`.
-
----
-
 ## SUNDAY (~15-25 min total) - the real session
 
 0. **Bring up the SIM** on a SPARE port (never 47100, never the real arm). In one terminal on the VM:
