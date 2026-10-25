@@ -17,7 +17,8 @@ lines up, grabs and lifts it, then hands control back. Hold an OPEN hand ~0.5 s 
 Stand ~1.5-2 m from the camera with your shoulders, elbow, wrist and hips in view. Two body teleop modes (set by
 body.mode on the VM):
   plane      - image-plane teleop (default): your right hand drives the gripper left/right + up/down in the camera
-               plane, your left hand height drives reach (depth is ignored). See docs/BODY_TELEOP.md.
+               plane; your LEFT hand THUMB drives reach (thumb up = reach forward, thumb down = back, anything else
+               holds). Depth is ignored. See docs/BODY_TELEOP.md / docs/PLANE_TELEOP.md.
   arm_mirror - full-arm joint mirroring: your whole arm's pose drives the robot joints directly (no IK).
 The green ghost ball in Isaac shows where the gripper is heading (red = out of reach, clamped).
 Only the chosen arm's hand is used (--side, default right); the other hand is ignored.
@@ -247,6 +248,11 @@ def extract(pose_res, hand_res, side, mirror=False):
     sh_i, wr_i = SIDES[track]
     hand = pick_hand(pose_res, hand_res, wr_i)
     openness = hand_openness(hand) if hand is not None else None  # None = not found (NOT "open")
+    other_wr = SIDES["left" if track == "right" else "right"][1]
+    # The REACH hand (the one NOT driving lateral/vertical): its 21 landmarks drive the LEFT-thumb reach on the VM.
+    reach_hand = pick_hand(pose_res, hand_res, other_wr)
+    reach_hand2d = ([[round(1 - l.x if mirror else l.x, 3), round(l.y, 3)] for l in reach_hand]
+                    if reach_hand is not None else None)   # mirror-corrected x, y down (matches skel2d); None = none
     if not pose_res.pose_world_landmarks:
         return None, openness, hand
     w = pose_res.pose_world_landmarks[0]
@@ -254,14 +260,13 @@ def extract(pose_res, hand_res, side, mirror=False):
     sx = -1.0 if mirror else 1.0
     pt = lambda i: [sx * w[i].x, w[i].y, w[i].z]
     hips = [(pt(HIPS[0])[k] + pt(HIPS[1])[k]) / 2 for k in range(3)]
-    other_wr = SIDES["left" if track == "right" else "right"][1]
     img = pose_res.pose_landmarks[0] if pose_res.pose_landmarks else None
     skel = [[round(1 - img[i].x if mirror else img[i].x, 3), round(img[i].y, 3)] for i in SKEL] if img else None
     other_ok = (w[other_wr].visibility or 0.0) > 0.5   # MediaPipe guesses unseen wrists: don't trust those
     return {"wrist": pt(wr_i), "shoulder": pt(sh_i), "elbow": pt(ELBOW[track]),
             "shoulder_other": pt(OTHER_SHOULDER[track]), "wrist_other": pt(other_wr) if other_ok else None,
             "hips": hips, "side": side, "hand": hand_mid(w, track, pt),
-            "skel2d": skel, "hand_open": openness, "visible": vis}, openness, hand
+            "skel2d": skel, "reach_hand2d": reach_hand2d, "hand_open": openness, "visible": vis}, openness, hand
 
 
 def hand_mid(world, track, pt):
@@ -351,13 +356,13 @@ def plane_tune_msg(op: str, now: float) -> dict:
     return {"kind": "plane_tune", "t": now, "op": op}
 
 
-# key -> plane-tune op (reach speed +/-, sensitivity [/], reach thresholds ,/. sooner, g check, o save, 0 reset).
+# key -> plane-tune op (reach speed +/-, sensitivity [/], o save, 0 reset). Reach is the LEFT-hand THUMB now (up to
+# reach, down to pull back), so the old height-threshold keys (, . sooner, g tune check) were dropped from the client.
 # "+" and "-" accept their shifted twins "=" / "_" so no shift gymnastics are needed.
 PLANE_TUNE_KEYS = {ord("+"): "reach_faster", ord("="): "reach_faster",
                    ord("-"): "reach_slower", ord("_"): "reach_slower",
                    ord("["): "less_sensitive", ord("]"): "more_sensitive",
-                   ord(","): "reach_back_sooner", ord("."): "reach_fwd_sooner",
-                   ord("g"): "tune_check", ord("o"): "save", ord("0"): "reset"}
+                   ord("o"): "save", ord("0"): "reset"}
 
 
 def _strip0(s: str) -> str:
@@ -370,15 +375,16 @@ def _strip0(s: str) -> str:
 
 
 def reach_status_line(robot: dict) -> str:
-    """Compact plane-tuning status line, e.g. 'REACH >> | spd4.0 lat.20 vrt.15 db.015'. '' when not plane mode."""
+    """Compact plane status line with the detected thumb state, e.g.
+    'REACH >> thumb:UP | spd4.0 lat.20 vrt.15'. '' when not plane mode."""
     pt = robot.get("plane_tune")
     if not pt:
         return ""
     arrow = {">>": ">>", "<<": "<<", "hold": "--"}.get(pt.get("reach_state"), "--")
+    thumb = {"up": "UP", "down": "DOWN", "none": "none"}.get(pt.get("thumb"), "none")
     lat = _strip0("{:.2f}".format(pt["lateral"]))
     vrt = _strip0("{:.2f}".format(pt["vertical"]))
-    db = _strip0("{:.3f}".format(pt["deadband"]))
-    return "REACH {} | spd{:.1f} lat{} vrt{} db{}".format(arrow, pt["max_speed"] * 100, lat, vrt, db)
+    return "REACH {} thumb:{} | spd{:.1f} lat{} vrt{}".format(arrow, thumb, pt["max_speed"] * 100, lat, vrt)
 
 
 class ButtonPanel:
@@ -599,7 +605,7 @@ def main():
         if rl:
             col = (0, 220, 0) if robot.get("plane_tune", {}).get("reach_state") in (">>", "<<") else (200, 200, 200)
             cv2.putText(frame, rl, (10, frame.shape[0] - 62), cv2.FONT_HERSHEY_SIMPLEX, 0.6, col, 2)
-            cv2.putText(frame, "+/- reach  [/] sens  ,/. sooner  g check  o save  0 reset",
+            cv2.putText(frame, "LEFT thumb UP=reach fwd  DOWN=back   +/- reach spd  [/] sens  o save  0 reset",
                         (10, frame.shape[0] - 40), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (180, 180, 180), 1)
         tune = robot.get("tune")   # guided reach-threshold check prompt
         if tune and tune.get("active"):

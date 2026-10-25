@@ -48,7 +48,7 @@ Built by UBC Rover for the **Nebius × NVIDIA Global AI Hackathon** (Physical AI
 
 | Input | What you do | What the arm does |
 |---|---|---|
-| **Body** (webcam) | move your right hand (default **plane** mode: image-plane only) | the gripper follows left/right and up/down in the frame you see; the left hand drives a joystick-rate reach |
+| **Body** (webcam) | move your right hand (default **plane** mode: image-plane only) | the gripper follows left/right and up/down in the frame you see; the left hand's thumb drives reach (thumb up = forward, down = back) |
 | **Hand** | make a fist / open your hand | the gripper closes / opens |
 | **Voice** | "move left 10 centimetres", "go to ready", "stow then home" | the instant local fast path runs it in the same tick, no cloud round trip |
 | **Voice** | "put the red cup next to the tall bottle" | Nemotron parses it; the arm plans and executes the pick-and-place |
@@ -137,8 +137,8 @@ round-trip time (excluding the app's own hold time) and packet loss.
 ### Teleop modes
 
 - **`plane`** (default on the real arm, [`docs/PLANE_TELEOP.md`](docs/PLANE_TELEOP.md)): the camera sits in front of
-  you and only the image plane is used. The right hand moves the gripper left/right and up/down; the left hand is a
-  joystick-rate reach (hold it high to creep forward, low to pull back, a dead zone in between). Depth, the noisiest
+  you and only the image plane is used. The right hand moves the gripper left/right and up/down; the left hand's
+  THUMB is a joystick-rate reach (thumb up = creep forward, thumb down = pull back, anything else = hold). Depth, the noisiest
   MediaPipe axis, is ignored, so there is no calibration capture. This is the mode behind the real-arm sessions.
 - **`arm_mirror`** ([`docs/ARM_MIRROR.md`](docs/ARM_MIRROR.md)): full-arm joint mirroring, no IK. Your shoulder,
   elbow and wrist angles map straight to the arm's joints. Also has no calibration capture.

@@ -55,6 +55,10 @@ class BodyPose(BaseModel):
     side: Literal["right", "left"] = "right"
     wrist_other: Optional[tuple[float, float, float]] = None      # the other wrist (left-hand clutch)
     skel2d: Optional[list[tuple[float, float]]] = None            # normalized image points for the overlay skeleton
+    reach_hand2d: Optional[list[tuple[float, float]]] = None       # 21 MediaPipe Hands landmarks of the REACH (other)
+                                                                  # hand, normalized image coords (mirror-corrected x,
+                                                                  # y down); drives the LEFT-thumb reach. None (old
+                                                                  # clients, or hand not found) = reach holds.
     seq: int = 0                                                  # for loss / latency measurement
     rtt_ms: Optional[float] = None                                # client-measured round trip, echoed to the HUD
     in_position: Optional[bool] = None                            # client's stand-here guide is green

@@ -43,32 +43,28 @@ def test_sensitivity_clamps_both_ends():
     assert abs(m.gain[1]) == pytest.approx(LAT_LO) and abs(m.gain[2]) == pytest.approx(VRT_LO)
 
 
-def test_deadzone_clamps_both_ends():
+def test_deadzone_ops_are_noops():
+    """Reach is the LEFT thumb now (no height dead zone), so bigger/smaller_deadzone are no-ops: they stay valid
+    PlaneTune ops (old body clients), reply a spoken note, and leave the deadband unchanged."""
     m, _ = _mapper()
-    for _ in range(40):
-        m.adjust("bigger_deadzone")
-    assert m.deadband == pytest.approx(DB_HI)
-    for _ in range(40):
-        m.adjust("smaller_deadzone")
-    assert m.deadband == pytest.approx(DB_LO)
+    db0 = m.deadband
+    msg = m.adjust("bigger_deadzone")
+    assert msg and "thumb" in msg.lower() and m.deadband == db0
+    msg2 = m.adjust("smaller_deadzone")
+    assert msg2 and "thumb" in msg2.lower() and m.deadband == db0
 
 
-def test_reach_fracs_stay_in_bounds_and_ordered():
+def test_reach_threshold_ops_are_noops():
+    """reach_fwd_sooner / reach_back_sooner are the old HEIGHT thresholds; with thumb reach they are no-ops that
+    reply a note and leave the stored fracs untouched (so old tuning files still load unchanged)."""
     m, _ = _mapper()
-    for _ in range(40):                       # forward threshold pushed to one extreme
-        m.adjust("reach_fwd_sooner")
-    for _ in range(40):                       # back threshold pushed to the other
-        m.adjust("reach_back_sooner")
-    assert FRAC_LO <= m.rr_fwd_frac <= FRAC_HI and FRAC_LO <= m.rr_back_frac <= FRAC_HI
-    assert m.rr_back_frac - m.rr_fwd_frac >= FRAC_MIN_GAP - 1e-9   # a non-zero dead zone survives
-    # one step from the default moves the thresholds the intended way
-    m2, _ = _mapper()
-    f0, b0 = m2.rr_fwd_frac, m2.rr_back_frac
-    m2.adjust("reach_fwd_sooner")
-    assert m2.rr_fwd_frac > f0                 # forward begins sooner = lower (larger frac below shoulders)
-    m3, _ = _mapper()
-    m3.adjust("reach_back_sooner")
-    assert m3.rr_back_frac < b0                 # back begins sooner = higher (smaller frac below shoulders)
+    f0, b0 = m.rr_fwd_frac, m.rr_back_frac
+    msg = m.adjust("reach_fwd_sooner")
+    assert msg and "thumb" in msg.lower()
+    msg2 = m.adjust("reach_back_sooner")
+    assert msg2 and "thumb" in msg2.lower()
+    assert m.rr_fwd_frac == f0 and m.rr_back_frac == b0   # unchanged
+    assert FRAC_LO <= m.rr_fwd_frac < m.rr_back_frac <= FRAC_HI
 
 
 # --- sign flips must not jump --------------------------------------------------
@@ -86,14 +82,14 @@ def test_flip_lateral_no_jump_then_reverses():
 
 def test_flip_reach_no_jump_then_reverses():
     m, tcp0 = _mapper()
-    _settle(m, tcp0, [dict(lwy=0.30)] * 120)        # driving reach forward
-    x_before = m(_pose(0.033 * 200, lwy=0.30))[0]
+    _settle(m, tcp0, [dict(thumb="up")] * 120)      # thumb up: driving reach forward
+    x_before = m(_pose(0.033 * 200, thumb="up"))[0]
     m.adjust("flip_reach")
-    x_after = m(_pose(0.033 * 201, lwy=0.30))[0]
+    x_after = m(_pose(0.033 * 201, thumb="up"))[0]
     assert abs(x_after - x_before) < 0.01           # one integration step at most, not a jump
     x_end = None
     for i in range(60):
-        x_end = m(_pose(0.033 * (202 + i), lwy=0.30))[0]   # hand still up, but reach is now flipped -> goes back
+        x_end = m(_pose(0.033 * (202 + i), thumb="up"))[0]   # thumb still up, but reach is now flipped -> goes back
     assert x_end < x_before - 0.02 and m.reach_rate < 0
 
 

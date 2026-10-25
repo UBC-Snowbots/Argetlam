@@ -8,11 +8,12 @@ midpoint as the origin, so the mapping is independent of how far the operator st
 Mapping (relative / clutched; the hand positions and the current TCP are captured on engage so there is no jump):
     robot y (lateral)  <- RIGHT hand horizontal   hand to the operator's RIGHT -> gripper to their right (robot -y)
     robot z (vertical) <- RIGHT hand vertical      raise -> up
-    robot x (reach)    <- LEFT hand height, as a JOYSTICK RATE (reach_mode "rate", the dev_arm_real default): the
-                          hand ABOVE ~shoulder height drives reach forward, BELOW ~mid torso drives it back, in
-                          between holds; speed scales with how far past the (body-absolute) threshold the hand is,
-                          up to a max, integrated onto tcp0's x and clamped to the box (no wind-up at the wall).
-                          reach_mode "position" keeps the old height->x position map (raise -> forward, lower -> back).
+    robot x (reach)    <- LEFT (reach) hand THUMB, as a JOYSTICK RATE (reach_mode "rate", the dev_arm_real default):
+                          thumb UP drives reach forward at +max_speed, thumb DOWN drives it back at -max_speed, and
+                          anything else (open hand, fist, sideways thumb, missing hand) holds. The signed rate is
+                          integrated onto tcp0's x and clamped to the box (no wind-up at the wall). A short dwell
+                          (body/thumb.py) stops flicker from jogging the arm. reach_mode "position" keeps the old
+                          height->x position map (raise -> forward, lower -> back; legacy, not thumb-driven).
     lateral/vertical:  target = tcp0 + ramp * gain * (hand_now - hand0)      (gain in metres per shoulder-width)
 then a One-Euro filter on the normalized hand coordinates, a small deadband, a 2 s engage ramp, and the SafetyLayer
 workspace box (targets outside the box are clamped and `.clipped` is flagged, so the ghost shows amber). The clamped
@@ -35,6 +36,7 @@ import numpy as np
 
 from ..types import BodyPose
 from .retarget import OneEuro
+from .thumb import ThumbReach, classify_thumb
 
 # skel2d (body client SKEL) indices
 L_SH, R_SH, L_EL, R_EL, L_WR, R_WR, L_HIP, R_HIP, NOSE = range(9)
@@ -69,24 +71,22 @@ DEFAULTS = {
     "ramp_s": 2.0,                                    # ease the gain in from 0 over this long on engage (no jump)
     "drop_below_hip_s": 0.7,                          # right wrist below the hip line this long -> "right arm dropped"
     "conf_gate": True,                                # skip a pose that is not visible (the TCP holds)
-    # reach_mode: "rate" = JOYSTICK reach from the LEFT-hand height (default on dev_arm_real); "position" = the old
-    # height->x position map (reach = tcp0 + gain * height-delta). Rate reach fixes the live finding that height->x
-    # as a position map gave almost no forward room and was engage-relative (docs/PLANE_TELEOP.md 2026-10-23).
+    # reach_mode: "rate" = JOYSTICK reach from the LEFT (reach) hand THUMB (default on dev_arm_real); "position" = the
+    # old height->x position map (reach = tcp0 + gain * height-delta; legacy, not thumb-driven). Thumb reach replaces
+    # the earlier height-threshold rate control (docs/PLANE_TELEOP.md 2026-10-25).
     "reach_mode": "rate",
-    # Joystick reach thresholds, ABSOLUTE to the operator's own body (image plane only, never engage-relative). The
-    # left-wrist height is read in shoulder-widths above the shoulder midpoint; the shoulder (0) -> hip-midpoint line
-    # defines the torso, and the two thresholds are fractions of that torso span measured DOWN from the shoulders:
-    #   reach_up ABOVE the forward threshold (around shoulder height)       -> reach moves FORWARD, speed scales
-    #   reach_up BELOW the back threshold    (around lower chest/mid torso) -> reach moves BACK
-    #   in between                                                          -> dead zone, reach HOLDS
-    # Speed grows linearly past a threshold and saturates at max_speed once full_scale shoulder-widths past it. A
-    # little hysteresis stops chatter at a threshold. If the reach hand is not tracked the rate is 0 (reach holds).
+    # Rate reach from the thumb (reach_mode "rate"): thumb UP -> +max_speed (forward), thumb DOWN -> -max_speed (back),
+    # otherwise 0 (hold). The signed rate is integrated onto tcp0's x and clamped to the box (no wind-up). dwell_s is
+    # the anti-flicker dwell before a direction commits. forward_frac/back_frac/full_scale/hysteresis are LEGACY (the
+    # old height thresholds): kept so old saved tuning files still load and the HUD/snapshot stay shaped, but the thumb
+    # control does not read them.
     "reach_rate": {
-        "forward_frac": 0.10,   # fraction of the shoulder->hip span below the shoulders where FORWARD begins
-        "back_frac": 0.45,      # fraction below the shoulders where BACK begins (~lower chest / mid torso)
-        "max_speed": 0.04,      # m/s cap on the reach speed (well inside the real arm's limits, REAL_DATA 4a)
-        "full_scale": 0.5,      # shoulder-widths past a threshold at which max_speed is reached
-        "hysteresis": 0.08,     # shoulder-widths of hysteresis at each threshold (anti-chatter)
+        "max_speed": 0.04,      # m/s reach speed when the thumb is up/down (well inside the real arm's limits)
+        "dwell_s": 0.2,         # thumb must hold ~this long to start reaching (anti-flicker)
+        "forward_frac": 0.10,   # LEGACY (old height threshold); unused by the thumb control
+        "back_frac": 0.45,      # LEGACY (old height threshold); unused by the thumb control
+        "full_scale": 0.5,      # LEGACY (old height speed scale); unused by the thumb control
+        "hysteresis": 0.08,     # LEGACY (old height hysteresis); unused by the thumb control
     },
 }
 
@@ -162,11 +162,13 @@ class PlaneMapper:
         self.conf_gate = bool(_cfg(cfg, "conf_gate"))
         self.reach_mode = str(_cfg(cfg, "reach_mode"))
         rr = _cfg(cfg, "reach_rate")
-        self.rr_fwd_frac = float(rr["forward_frac"])
-        self.rr_back_frac = float(rr["back_frac"])
+        self.rr_fwd_frac = float(rr["forward_frac"])   # LEGACY height thresholds: kept for save/load + snapshot shape,
+        self.rr_back_frac = float(rr["back_frac"])     # not read by the thumb reach control
         self.rr_max = float(rr["max_speed"])
         self.rr_full = max(1e-6, float(rr["full_scale"]))
         self.rr_hyst = float(rr["hysteresis"])
+        self._thumb = ThumbReach(float(rr.get("dwell_s", 0.2)))   # LEFT-thumb reach, with an anti-flicker dwell
+        self.thumb_state = "none"    # last committed thumb reading ("up"/"down"/"none") for the HUD / overlay
         self.clipped = False
         self.reach_rate = 0.0        # last signed reach speed, m/s (status: HUD shows >>/<< from the sign)
         self.reach_state = "hold"    # ">>" forward, "<<" back, "hold"
@@ -185,6 +187,8 @@ class PlaneMapper:
         self._t_last = None        # rate mode: previous frame time for dt
         self.reach_rate = 0.0
         self.reach_state = "hold"
+        self.thumb_state = "none"
+        self._thumb.reset()
         self._last_p = None
         self.filter.reset()
         self.clipped = False
@@ -203,36 +207,11 @@ class PlaneMapper:
         self._t_last = None
         self.reach_rate = 0.0
         self.reach_state = "hold"
+        self.thumb_state = "none"
+        self._thumb.reset()
         self._last_p = None
         self.filter.reset()
         self.clipped = False
-
-    def _reach_rate_speed(self, reach_up, hip_drop):
-        """Joystick reach speed (m/s, BEFORE the reach sign) + a HUD label, from the reach-hand height vs the body.
-        Thresholds are fractions of the shoulder(0) -> hip(hip_drop) torso span, measured DOWN from the shoulders, so
-        they are absolute to the operator's body and never engage-relative. Hysteresis latches the zone to stop
-        chatter at a threshold; the speed grows linearly past the threshold and saturates at max_speed."""
-        span = abs(hip_drop)                    # torso height, shoulder-widths (hips sit below -> hip_drop < 0)
-        fwd_t = -self.rr_fwd_frac * span         # reach_up >= fwd_t (near the shoulders)        -> forward
-        back_t = -self.rr_back_frac * span       # reach_up <= back_t (near lower chest/mid torso) -> back
-        h = self.rr_hyst
-        z = self._reach_zone
-        if z == "fwd" and reach_up < fwd_t - h:          # only leave a zone once past its threshold by hysteresis
-            z = "hold"
-        elif z == "back" and reach_up > back_t + h:
-            z = "hold"
-        if z == "hold":
-            if reach_up >= fwd_t:
-                z = "fwd"
-            elif reach_up <= back_t:
-                z = "back"
-        self._reach_zone = z
-        gain = self.rr_max / self.rr_full        # m/s per shoulder-width past the threshold
-        if z == "fwd":
-            return min(self.rr_max, gain * max(0.0, reach_up - fwd_t)), ">>"
-        if z == "back":
-            return -min(self.rr_max, gain * max(0.0, back_t - reach_up)), "<<"
-        return 0.0, "hold"
 
     def __call__(self, pose: BodyPose):
         if self._tcp0 is None:
@@ -261,19 +240,25 @@ class PlaneMapper:
         p = self._tcp0 + s * self.gain * delta                    # position map on all three axes
 
         if self.reach_mode == "rate":
-            # x (reach) is a joystick RATE, not a position: integrate a body-relative speed onto tcp0's x.
+            # x (reach) is a joystick RATE from the LEFT-hand THUMB: thumb UP -> +max_speed, DOWN -> -max_speed, else
+            # 0 (hold). A short dwell (ThumbReach) stops flicker; a missing/low-confidence reach hand classifies as
+            # "none" -> hold. The signed rate is integrated onto tcp0's x; the box clamp below pins it (anti-wind-up).
             dt = 0.0 if self._t_last is None else max(0.0, min(REACH_MAX_DT, pose.t - self._t_last))
-            if c["reach_ok"]:
-                speed, state = self._reach_rate_speed(self._held[0], c["hip_drop"])
-            else:                                                 # reach hand not tracked -> hold (rate 0)
-                self._reach_zone = "hold"
+            raw = classify_thumb(getattr(pose, "reach_hand2d", None))
+            thumb = self._thumb.update(raw, pose.t)
+            self.thumb_state = thumb
+            if thumb == "up":
+                speed, state = self.rr_max, ">>"
+            elif thumb == "down":
+                speed, state = -self.rr_max, "<<"
+            else:
                 speed, state = 0.0, "hold"
             self.reach_rate = self.reach_sign * speed * s         # the 2 s engage ramp eases the rate in too
             self.reach_state = state
             self._reach_off += self.reach_rate * dt
             p[0] = self._tcp0[0] + self._reach_off                # raw; the box clamp below pins it with anti-wind-up
         else:
-            self.reach_rate, self.reach_state = 0.0, "hold"
+            self.reach_rate, self.reach_state, self.thumb_state = 0.0, "hold", "none"
         self._t_last = pose.t
 
         if self.ws_min is not None:
@@ -309,8 +294,9 @@ class PlaneMapper:
                 "deadband": float(self.deadband)}
 
     def snapshot(self) -> dict:
-        """Compact read-only view for the status line / HUD (magnitudes + current reach state)."""
+        """Compact read-only view for the status line / HUD (magnitudes + current reach / thumb state)."""
         return {"reach_state": self.reach_state, "reach_rate": round(float(self.reach_rate), 4),
+                "thumb": self.thumb_state,
                 "max_speed": round(float(self.rr_max), 4),
                 "lateral": round(abs(float(self.gain[1])), 3), "vertical": round(abs(float(self.gain[2])), 3),
                 "deadband": round(float(self.deadband), 4),
@@ -361,20 +347,13 @@ class PlaneMapper:
             self._set_mag(1, abs(self.gain[1]) / STEP_GAIN, LAT_LO, LAT_HI)
             self._set_mag(2, abs(self.gain[2]) / STEP_GAIN, VRT_LO, VRT_HI)
             return f"Less sensitive. Lateral {abs(self.gain[1]):.2f}, vertical {abs(self.gain[2]):.2f}."
-        if op == "reach_fwd_sooner":        # forward begins with less raising -> lower the forward threshold
-            self.rr_fwd_frac += STEP_FRAC
-            self._fix_fracs()
-            return f"Reach goes forward sooner (forward at {self.rr_fwd_frac:.2f})."
-        if op == "reach_back_sooner":       # back begins with less lowering -> raise the back threshold
-            self.rr_back_frac -= STEP_FRAC
-            self._fix_fracs()
-            return f"Reach goes back sooner (back at {self.rr_back_frac:.2f})."
-        if op == "bigger_deadzone":
-            self.deadband = _clamp(self.deadband + STEP_DB, DB_LO, DB_HI)
-            return f"Bigger dead zone, {self.deadband:.3f}."
-        if op == "smaller_deadzone":
-            self.deadband = _clamp(self.deadband - STEP_DB, DB_LO, DB_HI)
-            return f"Smaller dead zone, {self.deadband:.3f}."
+        if op in ("reach_fwd_sooner", "reach_back_sooner"):
+            # Reach is the LEFT-hand thumb now (up/down), not the hand height, so the forward/back thresholds no
+            # longer apply. Kept as a no-op (still a valid PlaneTune op for old body clients) with a spoken note.
+            return "Reach is the left thumb now; the forward and back thresholds do nothing."
+        if op in ("bigger_deadzone", "smaller_deadzone"):
+            # The old reach dead zone was the height band between the thresholds; thumb reach has no height dead zone.
+            return "Reach is the left thumb now; the reach dead zone does nothing."
         if op == "flip_lateral":
             self.gain[1] = -self.gain[1]
             self._reanchor()
@@ -443,7 +422,9 @@ class PlaneMapper:
 
 
 def fit_reach_thresholds(samples: dict) -> dict:
-    """Pure fit: from the operator's measured left-hand heights at shoulder and waist (reach_up, shoulder-widths)
+    """LEGACY (height reach). Unused by the live thumb reach control, kept as a pure utility (and for old tuning
+    files that stored forward_frac/back_frac). Pure fit: from the operator's measured left-hand heights at shoulder
+    and waist (reach_up, shoulder-widths)
     and their torso span (shoulder->hip, `span`), set the forward/back reach thresholds as fractions of that span.
     The dead zone sits in the middle third of the measured shoulder->waist range, so holding near shoulder reads
     FORWARD and near waist reads BACK. Clamped to [FRAC_LO, FRAC_HI] with a non-zero dead zone. Returns the chosen
@@ -470,7 +451,9 @@ def fit_reach_thresholds(samples: dict) -> dict:
 
 
 class PlaneTuneCheck:
-    """Guided ~20 s reach-threshold check. Prompts the operator through three held poses (left hand to shoulder,
+    """LEGACY (height reach). The live app no longer starts this (reach is the left thumb); kept as a pure,
+    time+pose-driven utility for tests and for a possible return to height reach.
+    Guided ~20 s reach-threshold check. Prompts the operator through three held poses (left hand to shoulder,
     left hand to waist, right hand out), samples the in-plane coordinates, and fits forward/back fracs with
     fit_reach_thresholds. Time + pose driven (tick it with plane_coords each frame); it only measures, it never
     commands the arm. The app applies the fit and persists it on 'save tuning'."""

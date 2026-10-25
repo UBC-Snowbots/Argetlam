@@ -53,15 +53,16 @@ def _strip0(s):
 
 
 def reach_status_line(m):
-    """Compact plane-tuning line, e.g. 'REACH >> | spd4.0 lat.20 vrt.15 db.015'. '' when not in plane mode."""
+    """Compact plane line with the detected thumb state, e.g. 'REACH >> thumb:UP | spd4.0 lat.20 vrt.15'.
+    '' when not in plane mode."""
     pt = m.get("plane_tune")
     if not pt:
         return ""
     arrow = {">>": ">>", "<<": "<<", "hold": "--"}.get(pt.get("reach_state"), "--")
+    thumb = {"up": "UP", "down": "DOWN", "none": "none"}.get(pt.get("thumb"), "none")
     lat = _strip0("{:.2f}".format(pt["lateral"]))
     vrt = _strip0("{:.2f}".format(pt["vertical"]))
-    db = _strip0("{:.3f}".format(pt["deadband"]))
-    return "REACH {} | spd{:.1f} lat{} vrt{} db{}".format(arrow, pt["max_speed"] * 100, lat, vrt, db)
+    return "REACH {} thumb:{} | spd{:.1f} lat{} vrt{}".format(arrow, thumb, pt["max_speed"] * 100, lat, vrt)
 
 
 def main():
