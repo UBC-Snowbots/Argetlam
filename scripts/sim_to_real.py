@@ -33,6 +33,7 @@ import time
 # copy of these constants inline; both must match stepper_map.
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 from rover_intent.control.stepper_map import DEFAULT_TABLE  # noqa: E402
+from rover_intent.control import ee_limits as eel  # noqa: E402  (EE / gripper limits + mapping, gated)
 
 import rclpy  # noqa: E402
 from rclpy.node import Node  # noqa: E402
@@ -71,6 +72,7 @@ class SimQuery:
         self.s.settimeout(0.05)
         self.hw_busy = 0.0
         self.mirror = False   # True = the app is mirroring the real arm; the follower must not command it (one-way)
+        self.grip = 0.0       # app gripper command, 0 open .. 1 closed (used only when EE control is enabled)
 
     def joints(self):
         self.s.sendto(json.dumps({"kind": "query", "t": time.time()}).encode(), self.addr)
@@ -84,6 +86,7 @@ class SimQuery:
             if msg.get("kind") == "state" and "q_meas" in msg:
                 self.hw_busy = float(msg.get("hw_busy", 0.0) or 0.0)
                 self.mirror = bool(msg.get("mirror", False))
+                self.grip = float(msg.get("gripper", 0.0) or 0.0)
                 return [float(x) for x in msg["q_meas"][:6]]
         return None
 
@@ -92,18 +95,20 @@ class Follower(Node):
     def __init__(self, dry):
         super().__init__("sim_to_real")
         self.dry, self.fw, self.t_fw = dry, None, 0.0
+        self.ee_fw = None        # EE firmware deg (/arm/feedback positions[6]); None until a length-7 sample arrives
         self.create_subscription(ArmCommand, "/arm/feedback", self.on_fb, 10)
         self.pub = self.create_publisher(ArmCommand, "/arm/command", 10)
 
     def on_fb(self, m):
         if len(m.positions) >= 6:
             self.fw, self.t_fw = [float(x) for x in m.positions[:6]], time.monotonic()
+            self.ee_fw = float(m.positions[6]) if len(m.positions) >= 7 else None
 
-    def send(self, v):
+    def send(self, v, ee=0.0):
         m = ArmCommand()
         m.cmd_type = V_CMD
         m.velocities = [float(x) for x in v]
-        m.end_effector = 0.0
+        m.end_effector = float(ee)        # EE velocity (fw deg/s); 0 unless EE control is enabled
         if not self.dry:
             self.pub.publish(m)
 
@@ -118,9 +123,20 @@ def main():
     ap.add_argument("--max-start-err", type=float, default=30.0, help="deg; refuse to start beyond this")
     ap.add_argument("--hz", type=float, default=20.0)
     ap.add_argument("--dry", action="store_true", help="print, send nothing")
+    ap.add_argument("--ee", action="store_true", help="ALSO drive the gripper (EE) from the app grip value; gated: "
+                    "only active if --ee is passed AND the limits file exists (scripts/bench/ee_limits.py)")
+    ap.add_argument("--ee-limits", default=str(eel.DEFAULT_LIMITS_PATH), help="EE limits file")
+    ap.add_argument("--ee-speed", type=float, default=eel.EE_DEFAULT_SPEED_DEG_S,
+                    help=f"EE speed, mis-scaled fw deg/s (default {eel.EE_DEFAULT_SPEED_DEG_S}, hard cap "
+                         f"{eel.EE_SPEED_CAP_DEG_S})")
+    ap.add_argument("--ee-kp", type=float, default=eel.EE_DEFAULT_KP, help="EE P gain, 1/s")
+    ap.add_argument("--ee-deadband", type=float, default=eel.EE_DEFAULT_DEADBAND, help="EE deadband, fw deg")
     a = ap.parse_args()
     axes = [int(x) - 1 for x in a.axes.split(",")]
     speed = min(a.speed, 0.5)
+    ee_on = eel.ee_enabled(a.ee, a.ee_limits)      # gated: limits file exists AND --ee
+    ee_cap = eel.cap_ee_speed(a.ee_speed)
+    limits = eel.load(a.ee_limits) if ee_on else None
     filelog, logpath = _file_logger()
     rclpy.init()
     node, sim = Follower(a.dry), SimQuery()
@@ -155,6 +171,23 @@ def main():
             error(f"axes {bad} are more than {a.max_start_err} deg from the sim: move the sim closer, "
                   "or leave them out of --axes. Not starting.")
             return
+        if ee_on:
+            if node.ee_fw is None:
+                error("EE control requested but /arm/feedback carries no EE (positions[6]); EE control OFF.")
+                ee_on = False
+            elif not limits.reference_ok(node.ee_fw):
+                error(f"EE feedback {node.ee_fw:.1f} is OUTSIDE the reference window for the saved limits "
+                      f"(open {limits.open_fw:.1f}, closed {limits.closed_fw:.1f}): the per-power-on EE reference is "
+                      f"stale (fresh power-on or it crept). Re-reference with "
+                      f"`scripts/bench/ee_limits.py --re-reference`, then restart with --ee. EE control OFF.")
+                ee_on = False
+            else:
+                lo, hi = limits.soft_limits()
+                info(f"EE control ON: grip 0..1 -> fw {limits.open_fw:.1f}..{limits.closed_fw:.1f}, "
+                     f"soft [{lo:.1f}, {hi:.1f}], cap {ee_cap:.1f} fw deg/s, EE now {node.ee_fw:.1f}")
+        if not ee_on:
+            info("EE control OFF (end_effector stays 0)"
+                 + ("" if a.ee else "; pass --ee with a saved limits file to enable"))
         if a.dry:
             info("dry run: nothing sent")
             return
@@ -199,11 +232,15 @@ def main():
                 if abs(e) > a.deadband:
                     cap = FW_MAX_VEL[i] * speed
                     v[i] = max(-cap, min(cap, a.kp * e))
-            node.send(v)
+            ee_v = eel.ee_command(ee_on, sim.grip, node.ee_fw, limits, ee_cap, a.ee_kp, a.ee_deadband)
+            node.send(v, ee_v)
             if now - last_log > 1.0:
                 last_log = now
-                info("err " + " ".join(f"{(min(max(to_fw(q[i], i), a.margin), FW_MAX_DEG[i] - a.margin) - node.fw[i]):6.1f}"
-                                       for i in range(6)) + " | v " + " ".join(f"{x:5.1f}" for x in v))
+                msg_log = ("err " + " ".join(f"{(min(max(to_fw(q[i], i), a.margin), FW_MAX_DEG[i] - a.margin) - node.fw[i]):6.1f}"
+                                             for i in range(6)) + " | v " + " ".join(f"{x:5.1f}" for x in v))
+                if ee_on:
+                    msg_log += f" | grip {sim.grip:.2f} ee {node.ee_fw:6.1f}->{limits.grip_to_fw(sim.grip):6.1f} eev {ee_v:5.1f}"
+                info(msg_log)
             time.sleep(max(0.0, dt - (time.monotonic() - t0)))
     except KeyboardInterrupt:
         pass

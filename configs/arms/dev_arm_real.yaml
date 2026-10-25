@@ -130,3 +130,9 @@ scene:
   cup:    {pos: [0.45, 0.20, 0.055], height: 0.09, radius: 0.035, mass: 0.15, shape: cylinder, desc: "short red cup"}
   bottle: {pos: [0.45, -0.20, 0.185], height: 0.22, radius: 0.035, mass: 0.50, shape: cylinder, desc: "tall blue bottle"}
   block:  {pos: [0.56, 0.00, 0.035], height: 0.05, radius: 0.025, mass: 0.10, shape: box, desc: "small yellow cube"}
+
+real_arm:
+  # Gripper (EE) control gate (config equivalent of the follower's --ee). EE control is active only when the EE
+  # limits file exists (configs/arms/dev_arm_real_ee.yaml, from scripts/bench/ee_limits.py) AND this is true or the
+  # follower is launched with --ee. Default false: end_effector stays 0 everywhere until the gripper is marked.
+  ee: false

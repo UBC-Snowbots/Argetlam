@@ -657,6 +657,10 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
                 # not the payload's t. Recorded above like every other inbound message.
                 if len(msg.q) >= 6:
                     real_q, real_fw, real_t = np.array(msg.q[:6], float), list(msg.fw), t_recv
+                    # when real_to_sim has the EE limits it also sends a mapped gripper value: while mirroring, show
+                    # the real EE as the sim gripper (arbiter is in HOLD, so this flows to the command + query/status).
+                    if mirror_real and msg.grip is not None:
+                        arbiter.gripper = float(msg.grip)
             elif isinstance(msg, MirrorMsg):
                 if msg.on and not mirror_real:  # entering mirror: drop the clutch and HOLD so the body can't fight it
                     if clutch.state != "idle":

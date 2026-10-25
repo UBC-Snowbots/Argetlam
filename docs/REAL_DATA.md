@@ -164,3 +164,79 @@ peak-based table is noisy; trust these):
 Frozen-wrist teleop is on by default for the real arm (`dev_arm_real` `teleop_orient: frozen`): position-only IK on
 joints 1-3, wrist held, so the wrist never spins to chase a pose. Tool tilt stays ~7 deg on a 5 cm reach, ~12 deg at
 10 cm. `axis` (free the roll) is still available in the profile.
+
+## 6. Gripper (EE, firmware axis 7 'ee_prismatic')
+
+The gripper is a lead-screw LINEAR axis, driven through Rowan's driver as the `end_effector` velocity (fw deg/s) in
+a cmd_type 86 'V' command; feedback is `/arm/feedback` positions[6]. THREE facts make it dangerous and finicky:
+
+- NO limit switch, and home-all (cmd_value 170 = 0xAA) skips it, so its zero is ARBITRARY after every power-on.
+  Everything below is RELATIVE TO THIS POWER-ON. Re-mark (or re-reference) EACH SESSION.
+- The firmware converts EE steps with AXIS 6's gear ratio (a known bug), so the reported EE "degrees" are a
+  mis-scaled, arbitrary unit. Only RELATIVE positions mean anything; never read them as an angle or a length.
+- One end has a mechanical HARD STOP (Pranav thinks the opening end, unconfirmed); the other can SQUEEZE/STALL.
+  Treat BOTH ends as dangerous until marked. Feedback is OPEN-LOOP (commanded step counts), so a mechanical stall
+  does NOT show in the numbers -- watch and LISTEN, and stop with any non-move key.
+
+### 6a. Mark the limits at the bench (Pranav, at the arm)
+
+    source /opt/ros/jazzy/setup.bash && source ~/projects/ubc-rover-arm/RoverFlake2/install/setup.bash
+    python3 scripts/bench/ee_limits.py --i-am-at-the-bench        # prints a plan, waits for Enter
+
+It drives ONLY the EE (joints held at 0), at <= 10 fw deg/s (hard cap 30), and records its own bag via
+`record_real.sh`. First it CALIBRATES the open direction: tap `o` once (it nudges one step in +fw), then type whether
+the fingers OPENED or CLOSED -> that fixes `open_sign` (which fw-velocity sign opens). Then jog and mark:
+
+    o = open one step      c = close one step      (holding a key = OS auto-repeat = repeated steps)
+    [ = halve the step     ] = double the step
+    m = mark here (it then asks: open-stop or closed?)   s = save   q / Ctrl-C = stop and quit
+    any other key          = STOP (zero velocity)
+
+Jog gently to the OPEN stop, press `m`, answer `o`. Jog to the CLOSED end, press `m`, answer `c`. Press `s` to save
+to `configs/arms/dev_arm_real_ee.yaml`. The saved numbers:
+
+- `open_fw`, `closed_fw`  : EE fw deg at the two marks (mis-scaled unit, relative to this power-on).
+- `open_sign`             : +1 or -1, the fw-velocity sign that OPENS the fingers.
+- `margin_fw`             : fw deg kept clear of each stop (default 5). SOFT LIMITS = the [open, closed] travel
+                            contracted by `margin_fw` at each end; the follower never commands outside them.
+- `marked_at`, `notes`    : a reminder the reference is per-power-on.
+
+WATCH/LISTEN FOR: grinding or a motor that keeps whining while the fingers have stopped = a stall into a stop (the
+feedback keeps counting, so it will NOT tell you). Back off a step and re-mark a touch inside.
+
+### 6b. Re-reference a later session (faster than re-marking both ends)
+
+    python3 scripts/bench/ee_limits.py --i-am-at-the-bench --re-reference
+
+Jog to the OPEN position by eye (o/c), press `m`, press `s`. It shifts the saved open/closed so OPEN matches where
+you are now, KEEPING the span. Use this at the start of each session instead of re-marking both ends.
+
+### 6c. Drive the gripper from the sim (follower), GATED
+
+The sim->real follower drives the gripper ONLY when BOTH are true: the limits file exists AND `--ee` is passed (the
+config equivalent is `real_arm.ee: true` in `dev_arm_real.yaml`, default false). Otherwise `end_effector` stays 0
+everywhere.
+
+    python3 tools/sim_to_real.py --axes 1,2,3,5,6 --ee        # joints + gripper
+    python3 tools/sim_to_real.py --axes 1,2,3,5,6 --ee --ee-speed 8   # slower gripper
+
+The app's gripper value (`grip` 0 open .. 1 closed) maps to an EE target `open_fw + grip*(closed_fw - open_fw)`,
+clamped to the soft limits, driven with its own slow capped P-loop (default 10 fw deg/s). On start the follower
+REFUSES EE control if the current EE feedback is outside `[closed - 2*margin, open + 2*margin]` (a stale per-power-on
+reference -- a fresh power-on or it crept); it then runs with EE OFF and tells you to re-reference. `end_effector` is
+zeroed on stale feedback / mirror / homing / exit, exactly like the joints.
+
+The `real_to_sim` mirror shows the real EE back as the sim gripper value (inverse map) when the limits file exists,
+so you can watch the real gripper state on the sim.
+
+### 6d. Open question for Rowan
+
+Is it OK to gently drive the gripper INTO the hard stop to get a repeatable open reference (the lead-screw would
+stall there), or must we never stall it? If stalling the hard stop is safe, the re-reference step can use a light
+touch of that stop instead of eyeballing the open position. Until Rowan confirms, re-reference BY EYE only.
+
+### 6e. What is not verified until the real gripper is in front of us
+
+Direction (which fw sign opens -> `open_sign`), the EE speed units (mis-scaled fw deg/s; start low), and the stall
+behaviour at each end are all UNKNOWN until Pranav marks them at the bench. The code starts slow and gated for that
+reason.
