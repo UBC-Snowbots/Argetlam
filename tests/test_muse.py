@@ -279,3 +279,20 @@ def test_grip_toggle_in_hold_only_when_enabled():
     assert a.gripper == 1.0 and a.mode == Mode.HOLD   # closes in place, stays in HOLD (no assist, no motion)
     a.on_grip_toggle(None)
     assert a.gripper == 0.0
+
+
+def test_grip_auto_open_after_clench_in_hold():
+    import time as _t
+    from rover_intent.control.arbiter import Arbiter, Mode
+    from rover_intent.planner.scene import Scene
+    a = Arbiter(Scene({"cup": {"pos": [0.55, 0.15, 0.10]}}))
+    a.grip_toggle_in_hold, a.grip_auto_open_s = True, 2.0
+    a.on_grip_toggle(None)
+    t = _t.time()
+    assert a.gripper == 1.0
+    assert a.target(None, None, now=t + 1.0)[1] == 1.0     # still closed before the delay
+    assert a.target(None, None, now=t + 2.5)[1] == 0.0     # reopened after it
+    assert a.mode == Mode.HOLD
+    a.grip_auto_open_s = 0.0
+    a.on_grip_toggle(None)
+    assert a.target(None, None, now=_t.time() + 10)[1] == 1.0   # 0 = no auto-open (plain toggle)

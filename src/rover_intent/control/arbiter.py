@@ -43,6 +43,8 @@ class Arbiter:
         self.mode = Mode.HOLD
         self.gripper = 0.0
         self.grip_toggle_in_hold = False   # eeg.grip_toggle_in_hold: a clench also opens/closes the gripper in HOLD
+        self.grip_auto_open_s = 0.0        # eeg.grip_auto_open_s: > 0 = a clench-closed gripper (HOLD) reopens after this
+        self._auto_open_at: float | None = None
         self.held: str | None = None  # object believed to be in the gripper (set by skills)
         self.eeg_on, self.eeg_off, self.eeg_hold_s = eeg_on, eeg_off, eeg_hold_s
         self.assist_radius, self.assist_gain = assist_radius, assist_gain
@@ -145,6 +147,8 @@ class Arbiter:
             # Muse-only test (eeg.grip_toggle_in_hold): plain open/close in place, no assisted grab, no arm motion
             self.gripper = 0.0 if self.gripper > 0.5 else 1.0
             self.last_say = "Gripper closed." if self.gripper > 0.5 else "Gripper open."
+            self._auto_open_at = (time.time() + self.grip_auto_open_s
+                                  if self.gripper > 0.5 and self.grip_auto_open_s > 0 else None)
             return
         if self.mode != Mode.FOLLOW:
             return
@@ -196,6 +200,10 @@ class Arbiter:
     def target(self, tcp_now: np.ndarray, body_target: np.ndarray | None,
                now: float | None = None) -> tuple[np.ndarray | None, float]:
         """Returns (TCP position target or None = hold, gripper command)."""
+        if self._auto_open_at is not None and (time.time() if now is None else now) >= self._auto_open_at:
+            self._auto_open_at = None   # clench-closed gripper: open again after eeg.grip_auto_open_s
+            if self.mode == Mode.HOLD and self.gripper > 0.5:
+                self.gripper, self.last_say = 0.0, "Gripper open."
         if self.mode == Mode.AUTO:
             if not self._plan:
                 if self.assist:   # assisted grab/release finished: hand control back to the body mapping

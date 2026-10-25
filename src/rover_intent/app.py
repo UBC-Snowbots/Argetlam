@@ -68,6 +68,7 @@ def build(cfg: dict, backend: str):
     e, s = cfg["eeg"], cfg["assist"]
     arbiter = Arbiter(scene, e["p_on"], e["p_off"], e["hold_s"], s["radius"], s["gain"])
     arbiter.grip_toggle_in_hold = bool(e.get("grip_toggle_in_hold", False))   # Muse-only tests (no body teleop)
+    arbiter.grip_auto_open_s = float(e.get("grip_auto_open_s", 0.0))          # >0: clench-close reopens after this
     arbiter.z_max = cfg["safety"]["workspace_max"][2] - 0.005
     b = cfg["body"]
     # Two body-teleop modes: PLANE (default everywhere) and ARM_MIRROR (fallback). The legacy position / calibrated /
