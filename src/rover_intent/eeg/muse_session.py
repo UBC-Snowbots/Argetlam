@@ -272,7 +272,7 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("cmd", nargs="?", default="record", choices=["record"])
     ap.add_argument("--check-display", action="store_true", help="measure flicker timing only, no board")
-    ap.add_argument("--board", choices=["muse2", "muse2-bled", "synthetic"], default="muse2")
+    ap.add_argument("--board", choices=["muse2", "muse2-bled", "synthetic", "hub"], default="muse2")
     ap.add_argument("--serial", default="")
     ap.add_argument("--mac", default="")
     ap.add_argument("--name", default="")

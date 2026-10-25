@@ -698,7 +698,7 @@ def ssvep_block(scfg: SundayConfig, board_kind: str, session_dir: Path, freqs=(1
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--preflight", action="store_true", help="Saturday: no Muse, synthetic end-to-end, < 3 min")
-    ap.add_argument("--board", choices=["muse2", "muse2-bled", "synthetic"], default="muse2")
+    ap.add_argument("--board", choices=["muse2", "muse2-bled", "synthetic", "hub"], default="muse2")
     ap.add_argument("--serial", default="", help="BLED112 dongle port for muse2-bled (COM3, /dev/ttyACM0)")
     ap.add_argument("--mac", default="", help="Muse MAC address (optional)")
     ap.add_argument("--muse-name", default="", help="specific Muse, e.g. Muse-1A2B")

@@ -245,7 +245,7 @@ def main(argv=None):
         p.add_argument("--profile", default="", help="per-user profile json (alpha threshold, TRCA)")
         p.add_argument("--emit", choices=["grip_toggle", "eeg_select"], default="grip_toggle")
     r = sub.choices["run"]
-    r.add_argument("--board", choices=["muse2", "muse2-bled", "synthetic"], default="muse2")
+    r.add_argument("--board", choices=["muse2", "muse2-bled", "synthetic", "hub"], default="muse2")
     r.add_argument("--serial", default="")
     r.add_argument("--mac", default="")
     r.add_argument("--name", default="")

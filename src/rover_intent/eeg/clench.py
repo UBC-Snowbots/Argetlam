@@ -237,6 +237,17 @@ def calibrate(rest: np.ndarray, clench: np.ndarray, other: np.ndarray | None, fs
 
 # --- board I/O (BrainFlow) -------------------------------------------------------------------------------------------
 def open_board(kind: str, serial: str = "", mac: str = "", name: str = ""):
+    if kind == "hub":  # live EEG relayed from the laptop by eeg.stream_hub; no BrainFlow needed here
+        import os
+
+        from rover_intent.eeg.stream_hub import FANOUT_PORT, HubBoard
+        host = os.environ.get("HUB_FANOUT_HOST", "127.0.0.1")
+        port = int(os.environ.get("HUB_FANOUT_PORT", str(FANOUT_PORT)))
+        board = HubBoard(host, port)
+        board.prepare_session()
+        board.start_stream()
+        return board, board.fs, [0, 1, 2, 3]
+
     from brainflow.board_shim import BoardIds, BoardShim, BrainFlowInputParams
 
     ids = {"muse2": BoardIds.MUSE_2_BOARD, "muse2-bled": BoardIds.MUSE_2_BLED_BOARD,
@@ -366,7 +377,7 @@ def main(argv=None) -> int:
     sub = ap.add_subparsers(dest="cmd", required=True)
     for name in ("calibrate", "run"):
         p = sub.add_parser(name)
-        p.add_argument("--board", choices=["muse2", "muse2-bled", "synthetic"], default="muse2")
+        p.add_argument("--board", choices=["muse2", "muse2-bled", "synthetic", "hub"], default="muse2")
         p.add_argument("--serial", default="", help="BLED112 dongle port for muse2-bled (COM3, /dev/ttyACM0)")
         p.add_argument("--mac", default="", help="Muse MAC address (optional)")
         p.add_argument("--name", default="", help="Muse name, e.g. Muse-1A2B (optional; picks that headband)")
