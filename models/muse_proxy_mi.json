@@ -1,0 +1,122 @@
+{
+  "task": "imagined fist (T1/T2) vs rest (T0), EEGMMIDB imagery runs 4/8/12",
+  "fs": 160,
+  "band": [
+    8.0,
+    30.0
+  ],
+  "epoch_s": [
+    0.5,
+    2.5
+  ],
+  "win_s": 2.0,
+  "chance": 0.5,
+  "n_subjects": 20,
+  "subjects": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14,
+    15,
+    16,
+    17,
+    18,
+    19,
+    20
+  ],
+  "skipped": [],
+  "channel_sets": {
+    "muse_proxy": [
+      "T9",
+      "AF7",
+      "AF8",
+      "T10"
+    ],
+    "motor_8": [
+      "FC3",
+      "FC4",
+      "C3",
+      "Cz",
+      "C4",
+      "CP3",
+      "CP4",
+      "Pz"
+    ],
+    "eog_control": [
+      "AF7",
+      "AF8"
+    ]
+  },
+  "proxy_note": "T9/T10 stand in for Muse TP9/TP10 (nearest temporal sites)",
+  "results": {
+    "muse_proxy": {
+      "csp_lda": {
+        "within_subject_cv": 0.6511,
+        "within_std": 0.1191,
+        "within_ge_0.60": "13/20",
+        "leave_subjects_out": 0.5689,
+        "loso_std": 0.0996
+      },
+      "riemann_ts_lr": {
+        "within_subject_cv": 0.6689,
+        "within_std": 0.1122,
+        "within_ge_0.60": "14/20",
+        "leave_subjects_out": 0.5939,
+        "loso_std": 0.0857
+      },
+      "bandpower_lda": {
+        "within_subject_cv": 0.5917,
+        "within_std": 0.0872,
+        "within_ge_0.60": "8/20",
+        "leave_subjects_out": 0.5689,
+        "loso_std": 0.0601
+      }
+    },
+    "motor_8": {
+      "csp_lda": {
+        "within_subject_cv": 0.68,
+        "within_std": 0.1084,
+        "within_ge_0.60": "15/20",
+        "leave_subjects_out": 0.5517,
+        "loso_std": 0.0776
+      },
+      "riemann_ts_lr": {
+        "within_subject_cv": 0.6906,
+        "within_std": 0.1052,
+        "within_ge_0.60": "15/20",
+        "leave_subjects_out": 0.5672,
+        "loso_std": 0.0863
+      },
+      "bandpower_lda": {
+        "within_subject_cv": 0.6072,
+        "within_std": 0.0741,
+        "within_ge_0.60": "11/20",
+        "leave_subjects_out": 0.5806,
+        "loso_std": 0.0515
+      }
+    },
+    "eog_control": {
+      "eog_bandpower_lda": {
+        "within_subject_cv": 0.6594,
+        "within_std": 0.1098,
+        "within_ge_0.60": "14/20",
+        "leave_subjects_out": 0.6383,
+        "loso_std": 0.1089
+      }
+    }
+  },
+  "eog_control_verdict": "EOG control matches/beats the main model: the Muse-proxy 'imagery' accuracy may be eye artifact, not motor imagery.",
+  "eog_control_loso": 0.6383,
+  "main_loso": 0.5939,
+  "main_model": "riemann_ts_lr"
+}
