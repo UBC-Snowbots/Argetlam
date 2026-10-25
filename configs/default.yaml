@@ -98,6 +98,7 @@ eeg:
   p_on: 0.7      # p_grasp above this -> close (after hold_s)
   p_off: 0.3     # below this -> open
   hold_s: 0.5
+  grip_toggle_in_hold: false   # true = a Muse double clench also opens/closes the gripper in HOLD (Muse-only tests)
 
 assist:
   radius: 0.08

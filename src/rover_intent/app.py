@@ -67,6 +67,7 @@ def build(cfg: dict, backend: str):
     scene = Scene(cfg["scene"], support_z=cfg.get("table", {}).get("top", 0.0))
     e, s = cfg["eeg"], cfg["assist"]
     arbiter = Arbiter(scene, e["p_on"], e["p_off"], e["hold_s"], s["radius"], s["gain"])
+    arbiter.grip_toggle_in_hold = bool(e.get("grip_toggle_in_hold", False))   # Muse-only tests (no body teleop)
     arbiter.z_max = cfg["safety"]["workspace_max"][2] - 0.005
     b = cfg["body"]
     # Two body-teleop modes: PLANE (default everywhere) and ARM_MIRROR (fallback). The legacy position / calibrated /

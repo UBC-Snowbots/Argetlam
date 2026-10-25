@@ -265,3 +265,17 @@ def test_report_ssvep_snr_peaks_at_the_flicker_frequency():
     rep = MR.build_report(eeg, FS, markers, meta, fr)
     best_ch = rep["ssvep_snr_best_channel"]["15"]
     assert rep["ssvep_snr_db"]["15"][best_ch] > 0
+
+
+def test_grip_toggle_in_hold_only_when_enabled():
+    from rover_intent.control.arbiter import Arbiter, Mode
+    from rover_intent.planner.scene import Scene
+    a = Arbiter(Scene({"cup": {"pos": [0.55, 0.15, 0.10]}}))
+    assert a.mode == Mode.HOLD
+    a.on_grip_toggle(None)
+    assert a.gripper == 0.0            # default: HOLD ignores the clench (unchanged behaviour)
+    a.grip_toggle_in_hold = True
+    a.on_grip_toggle(None)
+    assert a.gripper == 1.0 and a.mode == Mode.HOLD   # closes in place, stays in HOLD (no assist, no motion)
+    a.on_grip_toggle(None)
+    assert a.gripper == 0.0

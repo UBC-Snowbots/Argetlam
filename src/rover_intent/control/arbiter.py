@@ -42,6 +42,7 @@ class Arbiter:
         self.scene = scene
         self.mode = Mode.HOLD
         self.gripper = 0.0
+        self.grip_toggle_in_hold = False   # eeg.grip_toggle_in_hold: a clench also opens/closes the gripper in HOLD
         self.held: str | None = None  # object believed to be in the gripper (set by skills)
         self.eeg_on, self.eeg_off, self.eeg_hold_s = eeg_on, eeg_off, eeg_hold_s
         self.assist_radius, self.assist_gain = assist_radius, assist_gain
@@ -140,6 +141,11 @@ class Arbiter:
     def on_grip_toggle(self, tcp=None) -> None:
         """One-shot close/open (Muse 2 double jaw clench, eeg/clench.py). The detector already debounced it, so no dwell
         here. Same behaviour as a held fist / open hand: near an object = assisted grab; holding = assisted release."""
+        if self.mode == Mode.HOLD and self.grip_toggle_in_hold:
+            # Muse-only test (eeg.grip_toggle_in_hold): plain open/close in place, no assisted grab, no arm motion
+            self.gripper = 0.0 if self.gripper > 0.5 else 1.0
+            self.last_say = "Gripper closed." if self.gripper > 0.5 else "Gripper open."
+            return
         if self.mode != Mode.FOLLOW:
             return
         closed = self.gripper > 0.5 or self.held is not None
