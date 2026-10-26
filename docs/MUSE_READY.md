@@ -82,6 +82,38 @@ pause
 PYTHONPATH is how brainflow/numpy get imported without the blocked venv launcher. SciPy may be blocked on the laptop;
 `clench.py` falls back to the numpy-only filters in `eeg/np_signal.py`, so base Python + numpy + brainflow is enough.)
 
+## Reading the live display (can you see it detecting your clench?)
+
+STEP 3 (READY CHECK) and STEP 4 (GO) show one status line, refreshed ~10 times a second:
+
+```
+JAW [########|#......]   5.9x (need 4.7x) base  7.6x  CLENCH 1 of 2         gripper: OPEN
+```
+
+- The bar fills with the current ratio; the `|` is the threshold, so a clench visibly pushes the fill past the marker.
+- `5.9x (need 4.7x)` is the live ratio vs the on threshold. In moving mode `base 7.6x` is the tracked floor (your
+  current resting level while you move); in fixed mode there is no `base`.
+- The state word walks `RELAXED -> CLENCH 1 of 2 -> GOT 1 of 2 - clench again -> CLENCH 2 of 2 -> GOT 2 - confirming`.
+  If a double is rejected you see WHY: `single clench (need a quick second)`, `looked like chewing (3+), ignored`,
+  `held too long, ignored`, `second clench too late`.
+- Every toggle prints its own big line (not overwritten), tracking the expected gripper state (the laptop never hears
+  the robot's state back, so it is the EXPECTED state, alternating from OPEN):
+
+```
+>>> GRIPPER CLOSED sent  (toggle #1 -> CLOSED expected, 17:42:10)
+```
+
+In STEP 4 the stream/network health (`hub=yes drop=0 seq=... rec=...`) rides as a compact tail on the same line so it
+does not drown the clench feedback.
+
+### Baseline mode (sitting still vs body teleop)
+
+A jaw clench is detected as a short SPIKE. The default `--baseline moving` tracks your CURRENT muscle level, so it
+still catches a clench while you are moving your body (arms raised, head turning, talking) - where the old fixed mode
+sat permanently "high" and never completed a double. For a sit-still demo you can force `--baseline fixed`. ANSI colour
+degrades gracefully; add `--no-color` for a plain cmd.exe. `--score-log run.csv` writes a ~5 Hz CSV
+(`t, raw_score, baseline, rel_score, state, n_toggles`) so a teleop run can be compared against rest afterwards.
+
 ## Privacy
 
 The clench profile and any raw EEG stay under the gitignored `data/` tree (`data/profiles/`, `data/eeg_sessions/`,

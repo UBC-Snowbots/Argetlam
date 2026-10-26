@@ -37,10 +37,15 @@ import numpy as np
 from rover_intent.eeg.clench import (
     MUSE_CHANNELS,
     ClenchDetector,
+    ScoreLogger,
     _read,
     _record,
+    apply_baseline,
     calibrate,
+    enable_ansi,
     open_board,
+    status_line,
+    toggle_banner,
 )
 from rover_intent.eeg.sunday import (
     Block,
@@ -209,12 +214,13 @@ def quick_calibrate(board, fs, chans, name: str, cfg: ReadyConfig, *, profiles_d
 
 # --- step 3: ready check (an Enter button) -------------------------------------------------------------------------
 def ready_check(board, fs, chans, profile: dict, *, quiet: bool = False, ask=input,
-                stop: threading.Event | None = None) -> int:
-    """Live clench score bar with the new profile. A detected double clench prints TOGGLE (test, NOT sent). Nothing is
-    sent to the app here. Returns when the wearer presses Enter. Returns the number of test toggles seen."""
+                stop: threading.Event | None = None, color: bool = False) -> int:
+    """Live clench status line with the new profile. A detected double clench prints a TOGGLE banner (test, NOT sent).
+    Nothing is sent to the app here. Returns when the wearer presses Enter. Returns the number of test toggles seen."""
     _hdr("STEP 3/4", "READY CHECK  -  try it before it is live")
-    print("Try a double clench: you should see TOGGLE. Nothing is sent yet.", flush=True)
-    print("Press Enter when ready to go LIVE.", flush=True)
+    print("Try a double clench: watch the JAW bar and the state walk CLENCH 1 of 2 -> CLENCH 2 of 2 -> TOGGLE.",
+          flush=True)
+    print("Nothing is sent yet. Press Enter when ready to go LIVE.", flush=True)
     det = ClenchDetector.from_profile(profile, t0=time.time())
     go = stop or threading.Event()
 
@@ -233,10 +239,9 @@ def ready_check(board, fs, chans, profile: dict, *, quiet: bool = False, ask=inp
         if x.shape[1]:
             for _t in det.push(x):
                 n_toggles += 1
-                print(f"\n  TOGGLE (test, not sent)  [{n_toggles}]", flush=True)
+                print("\n  " + toggle_banner(det.status(), dry=True, color=color) + "  (test, not sent)", flush=True)
         if not quiet and time.time() - last_print > 0.1:
-            width = min(30, int(30 * det.score / (2 * det.cfg.on_ratio)))
-            print(f"\r  clench {det.score:5.1f}x |{'#' * width:<30}| (Enter to go)", end="", flush=True)
+            print("\r  " + status_line(det.status(), color=color) + "  (Enter to go)   ", end="", flush=True)
             last_print = time.time()
         time.sleep(0.02)
     print("", flush=True)
@@ -249,11 +254,13 @@ def run(name: str, board_kind: str = "muse2", *, serial: str = "", mac: str = ""
         app_host: str = "rover-vm", app_port: int = 47100, skip_calib: bool = False,
         profile_path: str | None = None, no_stream: bool = False, profiles_dir: str = "data/profiles",
         cfg: ReadyConfig | None = None, quiet: bool | None = None, ask=input, poll_enter=_poll_enter,
-        stop: threading.Event | None = None, stream_seconds: float | None = None) -> dict:
+        stop: threading.Event | None = None, stream_seconds: float | None = None,
+        baseline: str | None = None, score_log: str | None = None, no_color: bool = False) -> dict:
     """The whole routine on ONE already-chosen board. Opens the Muse once and keeps it open through all four steps."""
     cfg = cfg or ReadyConfig(line_hz=line_hz)
     quiet = (board_kind == "synthetic") if quiet is None else quiet
     scfg = SundayConfig(name=name, line_hz=cfg.line_hz)
+    color = enable_ansi(no_color)
     result: dict = {"name": name, "board": board_kind}
 
     _say(f"Muse ready routine for '{name}'. Board: {board_kind}. About 2-3 minutes. The console is your guide.")
@@ -273,10 +280,12 @@ def run(name: str, board_kind: str = "muse2", *, serial: str = "", mac: str = ""
             _say(f"Using existing profile {profile_path} (threshold {profile['config']['on_ratio']}x relaxed).")
         else:
             profile = quick_calibrate(board, fs, chans, name, cfg, profiles_dir=profiles_dir, quiet=quiet, ask=ask)
+        profile = apply_baseline(profile, baseline)  # CLI --baseline wins over the stored mode for the live run
         result["profile"] = profile.get("stats", {})
+        result["baseline_mode"] = profile.get("config", {}).get("baseline_mode", "moving")
 
         # 3. ready check (Enter button)
-        result["ready_toggles"] = ready_check(board, fs, chans, profile, quiet=quiet, ask=ask)
+        result["ready_toggles"] = ready_check(board, fs, chans, profile, quiet=quiet, ask=ask, color=color)
 
         if no_stream:
             _say("Stopping before streaming (--no-stream). Profile is saved and the fit is confirmed.")
@@ -292,7 +301,7 @@ def run(name: str, board_kind: str = "muse2", *, serial: str = "", mac: str = ""
             board, fs, chans, board_kind=board_kind, hub_host=hub_host, hub_port=hub_port,
             clench_profile=profile, app_host=app_host, app_port=app_port,
             serial=serial, mac=mac, name=muse_name, quiet=quiet, stop=go_stop,
-            announce=not quiet, close_board=True)
+            announce=not quiet, close_board=True, baseline=baseline, score_log=score_log, no_color=no_color)
         closed = True  # stream_session closed the board
         result["streamed"] = True
         return result
@@ -321,6 +330,12 @@ def main(argv=None) -> int:
     ap.add_argument("--profile", default=None, help="existing clench profile for --skip-calib")
     ap.add_argument("--no-stream", action="store_true", help="stop after the Enter (do not go live)")
     ap.add_argument("--profiles-dir", default="data/profiles")
+    ap.add_argument("--baseline", choices=["fixed", "moving"], default=None,
+                    help="clench baseline: moving tracks the current level (body teleop), fixed uses the calibrated "
+                         "relaxed level (sitting still). Default = moving (the profile's own setting).")
+    ap.add_argument("--score-log", default=None,
+                    help="write a ~5 Hz CSV (t, raw score, baseline, rel score, state, toggles) during the GO stream")
+    ap.add_argument("--no-color", action="store_true", help="plain text, no ANSI colours (safe everywhere)")
     args = ap.parse_args(argv)
 
     if args.app_port == 47100 and args.app_host not in ("rover-vm",):
@@ -328,7 +343,8 @@ def main(argv=None) -> int:
     res = run(args.name, args.board, serial=args.serial, mac=args.mac, muse_name=args.muse_name,
               line_hz=args.line_hz, hub_host=args.hub_host, hub_port=args.hub_port,
               app_host=args.app_host, app_port=args.app_port, skip_calib=args.skip_calib,
-              profile_path=args.profile, no_stream=args.no_stream, profiles_dir=args.profiles_dir)
+              profile_path=args.profile, no_stream=args.no_stream, profiles_dir=args.profiles_dir,
+              baseline=args.baseline, score_log=args.score_log, no_color=args.no_color)
     return 0 if res else 1
 
 

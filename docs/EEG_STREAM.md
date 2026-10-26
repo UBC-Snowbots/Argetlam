@@ -102,6 +102,19 @@ python -m rover_intent.eeg.muse_detect  run --board hub
 
 `hub` is now a choice in `clench`, `sunday`, `muse_detect`, and `muse_session`.
 
+## Clench feedback + moving baseline (2026-10-25)
+
+`stream_tx` (with `--clench-profile`) now shows the same glanceable clench status line as `muse_ready` STEP 4: a JAW
+bar with a `|` threshold marker, the live ratio, the moving baseline, a plain-English state (RELAXED -> CLENCH 1 of 2
+-> ... -> TOGGLE SENT, with the rejection reason when a double is dropped), and a big `>>> GRIPPER CLOSED/OPEN sent`
+line per toggle. Stream health (`hub=yes drop=0 seq=... rec=...`) rides as a compact tail so it does not drown the
+clench feedback. See `docs/MUSE_READY.md` for a worked example of the line.
+
+Flags on `stream_tx` (and `muse_ready`): `--baseline fixed|moving` (default moving - tracks the current muscle level
+so a clench is caught during body teleop, not just sitting still), `--score-log <path>` (a ~5 Hz CSV of
+`t, raw_score, baseline, rel_score, state, n_toggles` to compare teleop vs rest later), and `--no-color` (plain
+cmd.exe). The detector exposes a read-only `ClenchDetector.status()` -> `ClenchStatus` that drives the display.
+
 ## Privacy
 
 Raw EEG is personal biometric data. It only ever goes from Pranav's laptop to Pranav's own VM over Tailscale (no third

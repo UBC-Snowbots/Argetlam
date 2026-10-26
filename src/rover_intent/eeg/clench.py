@@ -23,8 +23,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
+from collections import deque
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -54,6 +56,13 @@ class ClenchConfig:
     confirm_s: float = 0.5
     quiet_s: float = 1.0
     refractory_s: float = 0.5
+    # Moving baseline: detect a clench as a spike relative to the CURRENT level, not a FIXED relaxed level. The
+    # baseline is a robust (running-median) estimate of the recent score, so during body teleop (arms raised, head
+    # moving) the score floor is tracked out and a clench both exceeds on_ratio AND releases below off_ratio again.
+    # "fixed" reproduces the original behaviour exactly (baseline == 1.0). At true rest the median sits at ~1.0, so
+    # "moving" reduces to "fixed" there and loses no detections.
+    baseline_mode: str = "moving"  # "fixed" | "moving"
+    baseline_s: float = 4.0        # window of the running-median baseline (moving mode)
 
     @property
     def off_ratio(self) -> float:
@@ -98,7 +107,10 @@ class ClenchDetector:
         self.front = EmgFrontEnd(self.fs, len(self.rest_level), self.cfg)
         self.rest = np.maximum(np.asarray(self.rest_level, float), 1e-9)
         self.n = 0
-        self.score = 0.0
+        self.score = 0.0          # raw score: median over channels of envelope / calibrated relaxed level
+        self.baseline = 1.0       # moving-baseline estimate of the recent score floor (1.0 in fixed mode)
+        self.score_rel = 0.0      # score / baseline: what the thresholds actually compare against
+        self._base: deque = deque(maxlen=max(1, int(self.cfg.baseline_s * self.fs)))
         self._above_since = self._below_since = None
         self._on_start = None  # start time of the clench in progress
         self._long = False
@@ -106,6 +118,10 @@ class ClenchDetector:
         self._quiet_until = -np.inf
         self._refractory_until = -np.inf
         self.log: list[tuple[str, float]] = []  # ("clench", t) / ("chew", t) / ("long", t) / ("toggle", t)
+        # read-only state for the live display (so the console shows what the detector sees, not a guess)
+        self.n_toggles = 0
+        self.last_reject: tuple[str, float] | None = None  # (reason, t) of the most recent discarded sequence
+        self._last_toggle_t = -np.inf
 
     @classmethod
     def from_profile(cls, profile: dict, t0: float = 0.0) -> "ClenchDetector":
@@ -115,6 +131,20 @@ class ClenchDetector:
     def scores(self, x: np.ndarray) -> np.ndarray:
         return np.median(self.front.push(x) / self.rest[:, None], axis=0)
 
+    def _update_baseline(self) -> float:
+        """Robust slow estimate of the recent score floor. Running median over the last baseline_s, never below 1.0
+        (the calibrated rest level). The floor tracks the CURRENT level (rest, or raised during body teleop), but is
+        frozen whenever a clench candidate is live - a bite in progress (_on_start) OR a sequence already underway
+        (_clenches). Freezing the whole candidate keeps every bite of a chew train visible, so the 3+ rhythm
+        rejection still fires, and stops a sustained clench from pulling the floor up before the next double. The
+        median also shrugs off the brief onset samples. Fixed mode -> 1.0 (original behaviour, byte for byte)."""
+        if self.cfg.baseline_mode != "moving":
+            return 1.0
+        base = max(1.0, float(np.median(self._base))) if self._base else 1.0
+        if self._on_start is None and not self._clenches:  # quiet (or steadily elevated): let the floor track it
+            self._base.append(self.score)
+        return base
+
     def push(self, x: np.ndarray) -> list[float]:
         """Feed raw samples (n_ch, n). Returns the times of any toggles that completed inside this chunk."""
         c, out = self.cfg, []
@@ -123,6 +153,9 @@ class ClenchDetector:
             t = self.t0 + self.n / self.fs
             self.n += 1
             self.score = float(s)
+            self.baseline = self._update_baseline()
+            s = self.score / self.baseline  # detect on the score RELATIVE to the current level
+            self.score_rel = float(s)
             if self._on_start is None:  # waiting for an onset
                 if s > c.on_ratio:
                     self._above_since = t if self._above_since is None else self._above_since
@@ -144,29 +177,37 @@ class ClenchDetector:
                         self._long = True  # sustained clench (or a pressed jaw): never part of a toggle
                         self.log.append(("long", t))
                         self._clenches = []
+                        self._reject("held too long, ignored", t)
             toggled = self._check_sequence(t)
             if toggled is not None:
                 out.append(toggled)
         return out
 
+    def _reject(self, reason: str, t: float) -> None:
+        self.last_reject = (reason, t)
+
     def _end_clench(self, start: float, end: float) -> None:
         c = self.cfg
         if end - start > c.max_clench_s:
             self._clenches = []
+            self._reject("held too long, ignored", end)
             return
         if start < self._quiet_until:  # still inside a chewing episode: keep waiting for real quiet
             self._quiet_until = max(self._quiet_until, end + c.quiet_s)
+            self._reject("waiting for quiet after chewing", end)
             return
         if start < self._refractory_until:
             return
         self.log.append(("clench", start))
         if self._clenches and start - self._clenches[-1][1] > c.max_gap_s:
             self._clenches = []  # previous single clench timed out
+            self._reject("second clench too late", end)
         self._clenches.append((start, end))
         if len(self._clenches) >= 3:  # rhythmic: chewing / talking
             self.log.append(("chew", start))
             self._clenches = []
             self._quiet_until = end + c.quiet_s
+            self._reject("looked like chewing (3+), ignored", end)
 
     def _check_sequence(self, t: float) -> float | None:
         c = self.cfg
@@ -178,13 +219,171 @@ class ClenchDetector:
         if len(self._clenches) == 1:
             if t - last_end > c.max_gap_s:
                 self._clenches = []  # single clench: ignore
+                self._reject("single clench (need a quick second)", t)
             return None
         if t - last_end >= c.confirm_s:  # exactly two, then quiet
             self._clenches = []
             self._refractory_until = t + c.refractory_s
             self.log.append(("toggle", t))
+            self.n_toggles += 1
+            self._last_toggle_t = t
+            self.last_reject = None
             return t
         return None
+
+    # --- read-only state for the live display -------------------------------------------------------------------
+    def in_double(self) -> int:
+        """How many clenches of the current double have been accepted so far (0, 1 or 2). A clench in progress that
+        will extend the count is included, so the display can say 'CLENCH 1 of 2' while the first bite is happening."""
+        n = len(self._clenches)
+        if self._on_start is not None and not self._long and n < 2:
+            n += 1  # the bite happening right now
+        return n
+
+    def state_word(self) -> str:
+        """Plain-English state the wearer walks through, derived from the detector's own fields (not guessed)."""
+        if self._on_start is not None:
+            if self._long:
+                return "HELD (ignored)"
+            return f"CLENCH {self.in_double()} of 2"
+        if self._last_toggle_t > -np.inf and (self.t0 + self.n / self.fs) - self._last_toggle_t < 0.8:
+            return "TOGGLE SENT"
+        if self._clenches:
+            n = len(self._clenches)
+            return "GOT 2 - confirming" if n >= 2 else "GOT 1 of 2 - clench again"
+        return "RELAXED"
+
+    def status(self) -> "ClenchStatus":
+        """A snapshot of everything the console display needs; read-only, cheap, safe to call every frame."""
+        rej = self.last_reject[0] if self.last_reject is not None else ""
+        return ClenchStatus(
+            score=self.score, baseline=self.baseline, rel=self.score_rel,
+            on_ratio=self.cfg.on_ratio, off_ratio=self.cfg.off_ratio,
+            moving=(self.cfg.baseline_mode == "moving"),
+            state=self.state_word(), in_double=self.in_double(),
+            clenching=self._on_start is not None and not self._long,
+            n_toggles=self.n_toggles, last_reject=rej)
+
+
+@dataclass
+class ClenchStatus:
+    """Immutable view of the detector for the live console display."""
+    score: float       # raw envelope ratio vs the calibrated relaxed level
+    baseline: float    # moving-baseline floor (1.0 in fixed mode)
+    rel: float         # score / baseline: the value compared against the thresholds
+    on_ratio: float
+    off_ratio: float
+    moving: bool
+    state: str         # RELAXED / CLENCH 1 of 2 / CLENCH 2 of 2 / GOT 1 of 2 ... / TOGGLE SENT / HELD (ignored)
+    in_double: int     # 0, 1 or 2
+    clenching: bool
+    n_toggles: int
+    last_reject: str   # "" or why the last sequence did not fire
+
+    def gripper_expected(self) -> str:
+        """The app toggles the gripper OPEN<->CLOSED on every message and never reports back, so the laptop can only
+        show the EXPECTED state: starts OPEN, the first toggle closes it."""
+        return "CLOSED" if self.n_toggles % 2 == 1 else "OPEN"
+
+
+# --- live console display ------------------------------------------------------------------------------------------
+class _C:
+    """ANSI colours, blanked when colour is off (plain Windows cmd.exe or a redirected log)."""
+    def __init__(self, on: bool):
+        self.on = on
+
+    def __call__(self, code: str, s: str) -> str:
+        return f"\033[{code}m{s}\033[0m" if self.on else s
+
+
+def enable_ansi(no_color: bool = False) -> bool:
+    """Decide whether to emit ANSI, and on Windows 10+ switch the console into VT mode so the codes render. Degrades
+    to plain text when stdout is not a tty, --no-color is set, or VT cannot be enabled."""
+    if no_color or not sys.stdout.isatty():
+        return False
+    if os.name == "nt":
+        try:
+            import ctypes
+            k = ctypes.windll.kernel32
+            k.SetConsoleMode(k.GetStdHandle(-11), 7)  # ENABLE_VIRTUAL_TERMINAL_PROCESSING | existing flags
+        except Exception:  # noqa: BLE001  (old Windows: no VT -> plain text)
+            return False
+    return True
+
+
+def status_line(st: ClenchStatus, *, width: int = 16, color: bool = False) -> str:
+    """One glanceable line: a JAW bar with the threshold drawn as a | marker, the live ratio, the state word, and the
+    expected gripper state. In moving mode it also shows the current baseline. No trailing newline."""
+    c = _C(color)
+    on = max(st.on_ratio, 1e-6)
+    full = 2.0 * on  # the bar spans 0 .. 2x threshold, so the threshold marker sits in the middle
+    filled = int(round(width * min(st.rel, full) / full))
+    mark = max(0, min(width - 1, int(round(width * on / full))))  # column of the threshold |
+    cells = []
+    for i in range(width):
+        if i == mark:
+            cells.append(c("1;37", "|"))
+        elif i < filled:
+            cells.append(c("31" if st.clenching else "32", "#"))
+        else:
+            cells.append(".")
+    bar = "".join(cells)
+    base = f" base {st.baseline:4.1f}x" if st.moving else ""
+    state = c("1;33" if st.clenching else "0", f"{st.state:<20}")
+    grip = st.gripper_expected()
+    grip_s = c("1;31" if grip == "CLOSED" else "1;32", grip)
+    line = (f"JAW [{bar}] {st.rel:5.1f}x (need {st.on_ratio:.1f}x){base}  {state}  gripper: {grip_s}")
+    if st.last_reject and not st.clenching:
+        line += c("90", f"   [{st.last_reject}]")
+    return line
+
+
+def toggle_banner(st: ClenchStatus, *, dry: bool = False, color: bool = False) -> str:
+    """The big, unmissable line printed on its OWN line for every toggle (never overwritten)."""
+    c = _C(color)
+    grip = st.gripper_expected()  # state AFTER this toggle
+    tag = "(dry run)" if dry else "sent"
+    stamp = time.strftime("%H:%M:%S")
+    msg = f">>> GRIPPER {grip} {tag}  (toggle #{st.n_toggles} -> {grip} expected, {stamp})"
+    return c("1;31" if grip == "CLOSED" else "1;32", msg)
+
+
+class ScoreLogger:
+    """Optional ~5 Hz CSV log so a live teleop run can be compared against rest afterwards. Columns:
+    t, raw_score, baseline, rel_score, state, n_toggles. Best-effort: never raises into the read loop."""
+    def __init__(self, path, period: float = 0.2):
+        self.period = period
+        self._last = -1e18
+        self._fh = None
+        try:
+            p = Path(path)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            self._fh = open(p, "w", buffering=1)
+            self._fh.write("t,raw_score,baseline,rel_score,state,n_toggles\n")
+            self._t0 = time.time()
+        except OSError:
+            self._fh = None
+
+    def maybe_log(self, st: ClenchStatus, now: float | None = None) -> None:
+        if self._fh is None:
+            return
+        now = time.time() if now is None else now
+        if now - self._last < self.period:
+            return
+        self._last = now
+        try:
+            self._fh.write(f"{now - self._t0:.3f},{st.score:.3f},{st.baseline:.3f},"
+                           f"{st.rel:.3f},{st.state.replace(',', ' ')},{st.n_toggles}\n")
+        except OSError:
+            pass
+
+    def close(self) -> None:
+        if self._fh is not None:
+            try:
+                self._fh.close()
+            except OSError:
+                pass
+            self._fh = None
 
 
 # --- calibration ----------------------------------------------------------------------------------------------------
@@ -193,10 +392,14 @@ def calibrate(rest: np.ndarray, clench: np.ndarray, other: np.ndarray | None, fs
     """rest/clench/other: (n_ch, n) raw recordings. Returns a profile dict (json-able) with a quality verdict."""
     cfg = cfg or ClenchConfig()
     n_ch = rest.shape[0]
-    settle = int(1.0 * fs)  # skip the filter start-up transient
 
     def env(x):
-        return EmgFrontEnd(fs, n_ch, cfg).push(x)[:, settle:]
+        # Skip the ~1 s filter start-up transient, but never trim away the whole capture: a short or stuttering
+        # capture (e.g. the synthetic board delivering <= 1 s of samples under test timing) must still leave samples
+        # to score, or np.percentile/np.median would hit an empty array (IndexError). Keep at least half.
+        y = EmgFrontEnd(fs, n_ch, cfg).push(x)
+        settle = min(int(1.0 * fs), y.shape[1] // 2)
+        return y[:, settle:]
 
     rest_env = env(rest)
     rest_level = np.median(rest_env, axis=1)
@@ -325,42 +528,55 @@ def toggle_packet(t: float) -> bytes:
     return json.dumps({"kind": "grip_toggle", "t": t, "source": "clench"}).encode()
 
 
+def apply_baseline(profile: dict, baseline: str | None) -> dict:
+    """Override a profile's baseline_mode from a CLI flag ("fixed"/"moving"/None = leave as stored). Returns the same
+    dict (mutated) so the caller can build a detector from it."""
+    if baseline:
+        profile.setdefault("config", {})["baseline_mode"] = baseline
+    return profile
+
+
 def cmd_run(args) -> int:
     import socket
 
-    profile = json.loads(Path(args.profile).read_text())
+    profile = apply_baseline(json.loads(Path(args.profile).read_text()), getattr(args, "baseline", None))
     board, fs, chans = open_board(args.board, args.serial, args.mac, args.name)
     if abs(fs - profile["fs"]) > 1:
         print(f"warning: board runs at {fs} Hz but the profile was made at {profile['fs']} Hz", file=sys.stderr)
     det = ClenchDetector.from_profile(profile, t0=time.time())
+    color = enable_ansi(getattr(args, "no_color", False))
     tx = None if args.dry else socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    print(f"double-clench to toggle the gripper. threshold {det.cfg.on_ratio}x relaxed. Ctrl+C to stop.")
-    n_toggles, last_print = 0, 0.0
+    logger = ScoreLogger(args.score_log) if getattr(args, "score_log", None) else None
+    mode = det.cfg.baseline_mode
+    print(f"double-clench to toggle the gripper. threshold {det.cfg.on_ratio}x relaxed, baseline={mode}. "
+          f"Ctrl+C to stop.", flush=True)
+    last_print = 0.0
     try:
         while True:
             x = _read(board, chans)
             if x.shape[1]:
                 for t in det.push(x):
-                    n_toggles += 1
                     if tx:
                         tx.sendto(toggle_packet(time.time()), (args.host, args.port))
-                    print(f"\nTOGGLE #{n_toggles}" + (" (sent)" if tx else " (dry run)"), flush=True)
+                    print("\n" + toggle_banner(det.status(), dry=tx is None, color=color), flush=True)
+            if logger is not None:
+                logger.maybe_log(det.status())
             if time.time() - last_print > 0.1:
-                bar = "#" * min(40, int(40 * det.score / (2 * det.cfg.on_ratio)))
-                state = "CLENCH" if det._on_start is not None else ""
-                print(f"\r{det.score:6.1f}x |{bar:<40}| {state:<6}", end="", flush=True)
+                print("\r" + status_line(det.status(), color=color) + "   ", end="", flush=True)
                 last_print = time.time()
             time.sleep(0.02)
     except KeyboardInterrupt:
         pass
     finally:
+        if logger is not None:
+            logger.close()
         board.stop_stream()
         board.release_session()
     return 0
 
 
 def cmd_replay(args) -> int:
-    profile = json.loads(Path(args.profile).read_text())
+    profile = apply_baseline(json.loads(Path(args.profile).read_text()), getattr(args, "baseline", None))
     rec = np.load(args.file)
     for key in [k for k in ("rest", "clench", "other", "data") if k in rec.files]:
         det = ClenchDetector.from_profile(profile)
@@ -392,9 +608,15 @@ def main(argv=None) -> int:
     r.add_argument("--host", default="127.0.0.1")
     r.add_argument("--port", type=int, default=47100)
     r.add_argument("--dry", action="store_true", help="print toggles only, don't send")
+    r.add_argument("--baseline", choices=["fixed", "moving"], default=None,
+                   help="override the profile's baseline mode (moving tracks the current level for body teleop)")
+    r.add_argument("--score-log", default=None, help="write a ~5 Hz CSV of score/baseline/rel/state for later review")
+    r.add_argument("--no-color", action="store_true", help="plain text, no ANSI colours")
     p = sub.add_parser("replay")
     p.add_argument("--profile", required=True)
     p.add_argument("--file", required=True)
+    p.add_argument("--baseline", choices=["fixed", "moving"], default=None,
+                   help="override the profile's baseline mode for the replay")
     args = ap.parse_args(argv)
     return {"calibrate": cmd_calibrate, "run": cmd_run, "replay": cmd_replay}[args.cmd](args)
 
