@@ -27,7 +27,14 @@ from collections import deque
 from pathlib import Path
 
 from rover_intent.eeg.clench import ClenchDetector, _read, open_board, toggle_packet
-from rover_intent.eeg.clench import MUSE_CHANNELS
+from rover_intent.eeg.clench import (
+    MUSE_CHANNELS,
+    ScoreLogger,
+    apply_baseline,
+    enable_ansi,
+    status_line,
+    toggle_banner,
+)
 from rover_intent.eeg.stream_hub import LISTEN_PORT, encode_line, make_frame, make_header
 
 
@@ -105,7 +112,7 @@ class HubSender:
 
 def stream_loop(board, fs, chans, sender: HubSender, *, detector: ClenchDetector | None = None,
                 udp=None, app_addr=None, period=0.05, quiet=False, stop: threading.Event | None = None,
-                reopen=None, stall_s: float = 3.0):
+                reopen=None, stall_s: float = 3.0, color: bool = False, logger: "ScoreLogger | None" = None):
     """Read the board ~every `period` s: frame -> hub, and (if detector) clench -> UDP toggle. Returns on stop/Ctrl+C.
     No-data watchdog: if the board delivers no samples for `stall_s` (BrainFlow can freeze silently when the Muse
     sleeps or drops BLE, 2026-10-25), and `reopen` is given, call reopen() -> (board, chans) and keep going; a failed
@@ -114,7 +121,6 @@ def stream_loop(board, fs, chans, sender: HubSender, *, detector: ClenchDetector
     seq = 0
     n_toggles = 0
     last_print = 0.0
-    score = 0.0
     last_data = time.time()
     reconnects = 0
     try:
@@ -142,15 +148,20 @@ def stream_loop(board, fs, chans, sender: HubSender, *, detector: ClenchDetector
                         n_toggles += 1
                         if udp is not None:
                             udp.sendto(toggle_packet(time.time()), app_addr)
-                        print(f"\nTOGGLE #{n_toggles} (sent)", flush=True)
-                    score = detector.score
-            if not quiet and time.time() - last_print > 1.0:
-                bar = ""
-                if detector is not None:
-                    width = min(20, int(20 * score / (2 * detector.cfg.on_ratio)))
-                    bar = f" clench {score:5.1f}x |{'#' * width:<20}|"
-                print(f"\rfs={fs:g} sent={sender.sent} hub={'yes' if sender.connected else 'no '} "
-                      f"dropped={sender.dropped} seq={seq} reconnects={reconnects}{bar}", end="", flush=True)
+                        # big, unmissable, on its OWN line (never overwritten)
+                        print("\n" + toggle_banner(detector.status(), dry=udp is None, color=color), flush=True)
+                    if logger is not None:
+                        logger.maybe_log(detector.status())
+            # refresh fast when a detector is live (clench feedback), slowly otherwise
+            refresh = 0.1 if detector is not None else 1.0
+            if not quiet and time.time() - last_print > refresh:
+                net = (f"net hub={'yes' if sender.connected else 'no '} drop={sender.dropped} "
+                       f"seq={seq} rec={reconnects}")
+                if detector is not None:  # clench feedback FIRST, health compact on the tail
+                    print("\r" + status_line(detector.status(), color=color) + f"   | {net}   ",
+                          end="", flush=True)
+                else:
+                    print(f"\rfs={fs:g} sent={sender.sent} {net}   ", end="", flush=True)
                 last_print = time.time()
             time.sleep(period)
     except KeyboardInterrupt:
@@ -161,7 +172,8 @@ def stream_loop(board, fs, chans, sender: HubSender, *, detector: ClenchDetector
 def stream_session(board, fs, chans, *, board_kind, hub_host, hub_port=LISTEN_PORT,
                    clench_profile=None, app_host="rover-vm", app_port=47100,
                    serial="", mac="", name="", period=0.05, stall_s=3.0,
-                   quiet=False, stop=None, announce=True, close_board=True):
+                   quiet=False, stop=None, announce=True, close_board=True,
+                   baseline=None, score_log=None, no_color=False):
     """Stream an ALREADY-OPEN board to the hub (and, with clench_profile, clench -> GripToggle UDP) until stop/Ctrl+C.
 
     This is the body of main() without the board open, so a caller that already holds the Muse (e.g. eeg.muse_ready,
@@ -174,16 +186,22 @@ def stream_session(board, fs, chans, *, board_kind, hub_host, hub_port=LISTEN_PO
     sender = HubSender(hub_host, hub_port, header)
     sender.start()
 
+    color = enable_ansi(no_color)
+    logger = None
     detector = udp = app_addr = None
     if clench_profile is not None:
         profile = clench_profile if isinstance(clench_profile, dict) else json.loads(Path(clench_profile).read_text())
+        profile = apply_baseline(profile, baseline)
         if abs(fs - profile["fs"]) > 1:
             print(f"warning: board runs at {fs} Hz but the profile was made at {profile['fs']} Hz", file=sys.stderr)
         detector = ClenchDetector.from_profile(profile, t0=time.time())
         udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         app_addr = (app_host, app_port)
+        if score_log:
+            logger = ScoreLogger(score_log)
         if announce:
-            print(f"clench enabled: double-clench to toggle, threshold {detector.cfg.on_ratio}x relaxed.", flush=True)
+            print(f"clench enabled: double-clench to toggle, threshold {detector.cfg.on_ratio}x relaxed, "
+                  f"baseline={detector.cfg.baseline_mode}.", flush=True)
 
     held = {"board": board}
 
@@ -202,8 +220,11 @@ def stream_session(board, fs, chans, *, board_kind, hub_host, hub_port=LISTEN_PO
         print(f"streaming raw EEG to hub {hub_host}:{hub_port}. Ctrl+C to stop.", flush=True)
     try:
         return stream_loop(board, fs, chans, sender, detector=detector, udp=udp, app_addr=app_addr, period=period,
-                           quiet=quiet, stop=stop, reopen=None if stall_s <= 0 else reopen, stall_s=stall_s)
+                           quiet=quiet, stop=stop, reopen=None if stall_s <= 0 else reopen, stall_s=stall_s,
+                           color=color, logger=logger)
     finally:
+        if logger is not None:
+            logger.close()
         sender.stop()
         if close_board:
             try:
@@ -227,12 +248,19 @@ def main(argv=None) -> int:
     ap.add_argument("--period", type=float, default=0.05, help="board read period in seconds (~chunk cadence)")
     ap.add_argument("--stall-s", type=float, default=3.0,
                     help="no-data watchdog: reconnect the board after this many seconds without samples (0 = off)")
+    ap.add_argument("--baseline", choices=["fixed", "moving"], default=None,
+                    help="clench baseline mode: moving tracks the current level (body teleop), fixed uses the "
+                         "calibrated relaxed level (sitting still). Default = the profile's own setting.")
+    ap.add_argument("--score-log", default=None,
+                    help="write a ~5 Hz CSV (t, raw score, baseline, rel score, state, toggles) for later review")
+    ap.add_argument("--no-color", action="store_true", help="plain text, no ANSI colours (safe everywhere)")
     args = ap.parse_args(argv)
 
     board, fs, chans = open_board(args.board, args.serial, args.mac, args.name)
     stream_session(board, fs, chans, board_kind=args.board, hub_host=args.hub_host, hub_port=args.hub_port,
                    clench_profile=args.clench_profile, app_host=args.app_host, app_port=args.app_port,
-                   serial=args.serial, mac=args.mac, name=args.name, period=args.period, stall_s=args.stall_s)
+                   serial=args.serial, mac=args.mac, name=args.name, period=args.period, stall_s=args.stall_s,
+                   baseline=args.baseline, score_log=args.score_log, no_color=args.no_color)
     return 0
 
 

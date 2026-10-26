@@ -5,7 +5,14 @@ import numpy as np
 import pytest
 from scipy.signal import butter, sosfilt
 
-from rover_intent.eeg.clench import ClenchDetector, calibrate, main as clench_main
+from rover_intent.eeg.clench import (
+    ClenchDetector,
+    ClenchStatus,
+    calibrate,
+    main as clench_main,
+    status_line,
+    toggle_banner,
+)
 
 FS = 256.0
 TP, FRONT = [0, 3], [1, 2]  # TP9, AF7, AF8, TP10
@@ -231,3 +238,178 @@ def test_standalone_packet_is_a_valid_grip_toggle():
     from rover_intent.transport.udp import _MSG
     from rover_intent.types import GripToggle
     assert isinstance(_MSG.validate_python(json.loads(toggle_packet(12.5))), GripToggle)
+
+
+# --- moving baseline: body teleop (arms raised, head moving) --------------------------------------------------------
+def _mode(profile, mode):
+    """Copy of a profile with the baseline mode forced to fixed/moving."""
+    p = dict(profile)
+    p["config"] = dict(profile["config"])
+    p["config"]["baseline_mode"] = mode
+    return p
+
+
+def sustained(duration, amp, extra=(), seed=0):
+    """A continuous band EMG floor (simulated raised-arm / neck muscle) for the whole window, plus optional extra
+    clench bursts on top. amp ~45 uV gives ~7-8x the calibrated relaxed level, like the live teleop report."""
+    return simulate(duration, clenches=[(0.0, duration, amp)] + list(extra), seed=seed)
+
+
+def _toggles(profile, x, mode, chunk=32):
+    p = _mode(profile, mode)
+    d = ClenchDetector.from_profile(p)
+    tog = [t for i in range(0, x.shape[1], chunk) for t in d.push(x[:, i:i + chunk])]
+    return tog, d
+
+
+def test_baseline_mode_round_trips_in_the_profile(profile):
+    assert profile["config"]["baseline_mode"] in ("fixed", "moving")
+    assert "baseline_s" in profile["config"]
+    d = ClenchDetector.from_profile(_mode(profile, "moving"))
+    assert d.cfg.baseline_mode == "moving"
+    json.dumps(profile)  # still saveable with the new fields
+
+
+def test_moving_detects_double_on_sustained_elevation_where_fixed_gets_stuck(profile):
+    """Case (b): ~7.5x sustained elevation for 30 s with two firm double clenches on top. Moving tracks the raised
+    floor and fires both toggles; fixed sits above its off threshold the whole time, marks the clench 'long' and
+    never completes a double."""
+    bites = [(6.0, 0.3, 230), (6.65, 0.3, 230), (20.0, 0.3, 230), (20.65, 0.3, 230)]
+    x = sustained(30, 45, extra=bites, seed=40)
+    mov, _ = _toggles(profile, x, "moving")
+    fix, dfix = _toggles(profile, x, "fixed")
+    assert len(mov) == 2, mov
+    assert fix == []
+    assert any(k == "long" for k, _ in dfix.log)  # fixed got stuck on the raised floor
+
+
+def test_relaxed_double_still_detected_in_both_modes(profile):
+    """Case (a): a clean double at true rest must still toggle exactly once in fixed AND moving (moving must not lose
+    detections at rest, where the baseline sits at ~1.0)."""
+    x = simulate(5, clenches=double(1.0), seed=10)
+    assert len(_toggles(profile, x, "moving")[0]) == 1
+    assert len(_toggles(profile, x, "fixed")[0]) == 1
+
+
+def test_sustained_elevation_and_slow_ramp_do_not_toggle(profile):
+    """Case (c): raised muscle tone alone, and a slow ramp up to teleop level, must never toggle in either mode."""
+    assert _toggles(profile, sustained(30, 50, seed=50)[:], "moving")[0] == []
+    # slow ramp from rest to ~8x over 18 s
+    n = int(30 * FS)
+    t = np.arange(n) / FS
+    ramp = np.clip((t - 2) / 18, 0, 1) * 55
+    rng = np.random.default_rng(99)
+    emg = sosfilt(butter(4, [20, 120], btype="band", fs=FS, output="sos"), rng.normal(0, 1, (4, n)), axis=1)
+    emg /= emg.std(axis=1, keepdims=True)
+    xr = simulate(30, seed=51) + emg * (np.array([1.0, 0.6, 0.6, 1.0])[:, None] * ramp[None, :])
+    assert _toggles(profile, xr, "moving")[0] == []
+    assert _toggles(profile, xr, "fixed")[0] == []
+
+
+def test_chewing_does_not_toggle_in_moving_mode(profile):
+    """Case (d): chewing (rhythmic 3+ bites) and chewing ON TOP of a raised floor must not toggle in moving mode -
+    the running median keeps every bite visible so the 3+ rhythm rejection still fires."""
+    chew = [(1.0 + 0.7 * i, 0.3, 70) for i in range(14)]
+    tog, d = _toggles(profile, simulate(12, clenches=chew, seed=60), "moving")
+    assert tog == [] and any(k == "chew" for k, _ in d.log)
+    chew_on_elev = [(1.0 + 0.7 * i, 0.3, 90) for i in range(16)]
+    assert _toggles(profile, sustained(14, 50, extra=chew_on_elev, seed=62), "moving")[0] == []
+    # two far-apart single clenches: not a double
+    assert _toggles(profile, simulate(6, clenches=[(1.0, 0.3), (3.5, 0.3)], seed=61), "moving")[0] == []
+
+
+def test_fixed_mode_is_byte_for_byte_the_old_behaviour(profile):
+    """Fixed mode must keep baseline == 1.0 and score_rel == score every sample (no behaviour change for sit-still)."""
+    x = simulate(5, clenches=double(1.0), seed=10)
+    d = ClenchDetector.from_profile(_mode(profile, "fixed"))
+    for i in range(0, x.shape[1], 32):
+        d.push(x[:, i:i + 32])
+        assert d.baseline == 1.0
+        assert abs(d.score_rel - d.score) < 1e-12
+
+
+# --- read-only state API + rejection reasons ------------------------------------------------------------------------
+def test_state_words_walk_through_a_double_and_report_the_toggle(profile):
+    x = simulate(5, clenches=double(1.0), seed=10)
+    d = ClenchDetector.from_profile(_mode(profile, "moving"), t0=0.0)
+    seen = []
+    for i in range(0, x.shape[1], 8):
+        d.push(x[:, i:i + 8])
+        seen.append(d.state_word())
+    assert "CLENCH 1 of 2" in seen
+    assert "CLENCH 2 of 2" in seen
+    assert "TOGGLE SENT" in seen
+    assert d.n_toggles == 1
+
+
+def test_status_snapshot_fields_and_expected_gripper(profile):
+    d = ClenchDetector.from_profile(_mode(profile, "moving"), t0=0.0)
+    st = d.status()
+    assert isinstance(st, ClenchStatus)
+    assert st.moving is True and st.on_ratio == d.cfg.on_ratio
+    assert st.gripper_expected() == "OPEN"  # nothing toggled yet
+    x = simulate(5, clenches=double(1.0), seed=10)
+    for i in range(0, x.shape[1], 32):
+        d.push(x[:, i:i + 32])
+    assert d.status().n_toggles == 1
+    assert d.status().gripper_expected() == "CLOSED"  # first toggle closes
+
+
+def test_rejection_reason_single_clench(profile):
+    x = simulate(4, clenches=[(1.0, 0.3)], seed=11)  # one lone clench
+    _, d = _toggles(profile, x, "moving")
+    assert d.last_reject is not None and "single clench" in d.last_reject[0]
+
+
+def test_rejection_reason_chewing(profile):
+    chew = [(1.0 + 0.5 * i, 0.25, 70) for i in range(8)]
+    _, d = _toggles(profile, simulate(8, clenches=chew, seed=70), "moving")
+    assert d.last_reject is not None and "chewing" in d.last_reject[0]
+
+
+def test_rejection_reason_held_too_long(profile):
+    x = simulate(6, clenches=[(1.0, 3.0)], seed=17)  # one long sustained bite
+    _, d = _toggles(profile, x, "moving")
+    assert d.last_reject is not None and "too long" in d.last_reject[0]
+    assert any(k == "long" for k, _ in d.log)
+
+
+# --- live console display -------------------------------------------------------------------------------------------
+def _status(**kw):
+    base = dict(score=1.0, baseline=1.0, rel=1.0, on_ratio=5.0, off_ratio=1.5, moving=True,
+                state="RELAXED", in_double=0, clenching=False, n_toggles=0, last_reject="")
+    base.update(kw)
+    return ClenchStatus(**base)
+
+
+def test_status_line_shows_bar_threshold_marker_ratio_and_gripper():
+    line = status_line(_status(rel=6.8, on_ratio=5.3, baseline=6.1, state="CLENCH 1 of 2", clenching=True),
+                        width=16, color=False)
+    assert "JAW" in line and "|" in line  # the threshold marker is drawn
+    assert "6.8x" in line and "need 5.3x" in line
+    assert "base  6.1x" in line  # moving baseline shown
+    assert "CLENCH 1 of 2" in line and "gripper: OPEN" in line
+    assert "\033[" not in line  # colour off -> plain text (safe for cmd.exe)
+
+
+def test_status_line_fixed_mode_hides_baseline_and_colour_is_opt_in():
+    plain = status_line(_status(moving=False, rel=2.0), color=False)
+    assert "base" not in plain
+    colored = status_line(_status(moving=False, rel=2.0), color=True)
+    assert "\033[" in colored  # ANSI only when colour is on
+
+
+def test_toggle_banner_tracks_expected_open_close_alternation():
+    assert "GRIPPER CLOSED" in toggle_banner(_status(n_toggles=1), color=False)
+    assert "toggle #1 -> CLOSED" in toggle_banner(_status(n_toggles=1), color=False)
+    assert "GRIPPER OPEN" in toggle_banner(_status(n_toggles=2), color=False)
+    assert "(dry run)" in toggle_banner(_status(n_toggles=1), dry=True, color=False)
+
+
+def test_calibrate_survives_a_capture_shorter_than_the_settle_window():
+    """A stuttering / short capture (<= 1 s, e.g. the synthetic board under load) must not crash calibrate() with an
+    IndexError from an empty array after the start-up-transient trim."""
+    short = simulate(0.8, seed=80)  # ~205 samples at 256 Hz, less than the 1 s (256-sample) settle
+    prof = calibrate(short, simulate(0.8, clenches=[(0.2, 0.3)], seed=81), None, FS)
+    assert "rest_level" in prof and len(prof["rest_level"]) == 4
+    assert prof["stats"]["quality"] in ("good", "marginal", "poor")

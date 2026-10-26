@@ -246,10 +246,10 @@ def test_hub_replaces_reconnecting_sender():
                 break
     except (socket.timeout, OSError):
         pass
+    snap = hub.snapshot()  # while B is still connected: closing it first would race the hub noticing the EOF
     cons.close()
     a.close()
     b.close()
-    snap = hub.snapshot()
     hub.stop()
 
     assert 101 in seqs  # B's post-replacement frame arrived
