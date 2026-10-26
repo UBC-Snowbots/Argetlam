@@ -253,6 +253,10 @@ def extract(pose_res, hand_res, side, mirror=False):
     reach_hand = pick_hand(pose_res, hand_res, other_wr)
     reach_hand2d = ([[round(1 - l.x if mirror else l.x, 3), round(l.y, 3)] for l in reach_hand]
                     if reach_hand is not None else None)   # mirror-corrected x, y down (matches skel2d); None = none
+    # The CONTROL hand's 21 landmarks drive the OPTIONAL wrist-roll follow on the VM (body/wrist_roll.py). Same
+    # mirror-corrected image coords; None (hand not found) -> wrist roll holds. Backwards compatible (old field).
+    ctrl_hand2d = ([[round(1 - l.x if mirror else l.x, 3), round(l.y, 3)] for l in hand]
+                   if hand is not None else None)
     if not pose_res.pose_world_landmarks:
         return None, openness, hand
     w = pose_res.pose_world_landmarks[0]
@@ -266,7 +270,8 @@ def extract(pose_res, hand_res, side, mirror=False):
     return {"wrist": pt(wr_i), "shoulder": pt(sh_i), "elbow": pt(ELBOW[track]),
             "shoulder_other": pt(OTHER_SHOULDER[track]), "wrist_other": pt(other_wr) if other_ok else None,
             "hips": hips, "side": side, "hand": hand_mid(w, track, pt),
-            "skel2d": skel, "reach_hand2d": reach_hand2d, "hand_open": openness, "visible": vis}, openness, hand
+            "skel2d": skel, "reach_hand2d": reach_hand2d, "ctrl_hand2d": ctrl_hand2d,
+            "hand_open": openness, "visible": vis}, openness, hand
 
 
 def hand_mid(world, track, pt):
@@ -384,7 +389,11 @@ def reach_status_line(robot: dict) -> str:
     thumb = {"up": "UP", "down": "DOWN", "none": "none"}.get(pt.get("thumb"), "none")
     lat = _strip0("{:.2f}".format(pt["lateral"]))
     vrt = _strip0("{:.2f}".format(pt["vertical"]))
-    return "REACH {} thumb:{} | spd{:.1f} lat{} vrt{}".format(arrow, thumb, pt["max_speed"] * 100, lat, vrt)
+    line = "REACH {} thumb:{} | spd{:.1f} lat{} vrt{}".format(arrow, thumb, pt["max_speed"] * 100, lat, vrt)
+    wr = pt.get("wrist_roll") or {}
+    if wr.get("enabled"):
+        line += " | WRIST ROLL ON {:+.0f}deg".format(wr.get("roll_deg", 0.0))
+    return line
 
 
 class ButtonPanel:
@@ -605,7 +614,7 @@ def main():
         if rl:
             col = (0, 220, 0) if robot.get("plane_tune", {}).get("reach_state") in (">>", "<<") else (200, 200, 200)
             cv2.putText(frame, rl, (10, frame.shape[0] - 62), cv2.FONT_HERSHEY_SIMPLEX, 0.6, col, 2)
-            cv2.putText(frame, "LEFT thumb UP=reach fwd  DOWN=back   +/- reach spd  [/] sens  o save  0 reset",
+            cv2.putText(frame, "LEFT thumb UP=reach fwd  DOWN=back   +/- reach spd  [/] sens  w wrist roll  o save  0 reset",
                         (10, frame.shape[0] - 40), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (180, 180, 180), 1)
         tune = robot.get("tune")   # guided reach-threshold check prompt
         if tune and tune.get("active"):
@@ -621,7 +630,7 @@ def main():
         if robot.get("ghost") == "clamped":
             cv2.putText(frame, "OUT OF REACH - the gripper is clamped at the edge", (10, 120),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 165, 255), 2)
-        cv2.putText(frame, "F clutch | S stop | R reset | M flip | Q quit",
+        cv2.putText(frame, "F clutch | S stop | R reset | M flip | W wrist roll | Q quit",
                     (10, frame.shape[0] - 15),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
         # active preset banner + progress (clear feedback that a move is running; status carries preset/preset_progress)
@@ -666,6 +675,8 @@ def main():
             say("reset")
         elif k == ord("m"):
             mirror = not mirror   # flip left/right for a mirrored webcam (plane / arm_mirror re-anchor on engage)
+        elif k == ord("w"):   # toggle the OPTIONAL wrist-roll follow (plane mode only; the app re-anchors so no jump)
+            link.send(plane_tune_msg("wrist_roll", time.time()))
         elif k in PLANE_TUNE_KEYS:   # plane live-tuning: + - reach spd, [ ] sens, , . sooner, g check, o save, 0 reset
             link.send(plane_tune_msg(PLANE_TUNE_KEYS[k], time.time()))
     cap.release()

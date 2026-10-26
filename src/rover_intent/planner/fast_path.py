@@ -417,6 +417,8 @@ _TUNE_SAY = {
     "flip_lateral": "Flipped left and right.", "flip_vertical": "Flipped up and down.",
     "flip_reach": "Flipped reach direction.",
     "save": "Tuning saved.", "reset": "Tuning reset.", "tune_check": "Starting the tune check.",
+    "wrist_roll_on": "Wrist roll on; turn your control hand to rotate the gripper.",
+    "wrist_roll_off": "Wrist roll off; the gripper roll is locked.",
 }
 _TUNE_PHRASES = {
     "reach_faster": {"reach faster", "faster reach", "speed up reach", "reach quicker", "reach speed up"},
@@ -438,6 +440,12 @@ _TUNE_PHRASES = {
     "save": {"save tuning", "save tune", "save settings", "save reach tuning"},
     "reset": {"reset tuning", "reset tune", "reset settings", "reset tuning default", "reset reach tuning"},
     "tune_check": {"tune check", "tuning check", "check tuning", "calibrate reach", "reach check", "run tune check"},
+    # OPTIONAL wrist-roll follow (gripper rotates with the control hand). Exact phrases only, so a jog like "rotate
+    # the base" or "turn the wrist up 10 degrees" is never stolen (those carry a joint/direction/magnitude).
+    "wrist_roll_on": {"wrist roll on", "wrist rotation on", "turn on wrist roll", "turn on wrist rotation",
+                      "follow wrist", "follow wrist roll", "rotate gripper with wrist", "wrist roll follow"},
+    "wrist_roll_off": {"wrist roll off", "wrist rotation off", "turn off wrist roll", "turn off wrist rotation",
+                       "lock wrist", "lock wrist roll", "stop wrist roll", "no wrist roll"},
 }
 _TUNE_DROP = {"the", "please", "a", "my", "now", "to", "and", "it", "that", "your", "lets", "let"}
 

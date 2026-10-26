@@ -93,6 +93,14 @@ Frame: robot BASE frame as the operator faces the arm. **+x = forward, +y = left
   - e.g. "move left 5 cm then up 5 cm then go to ready", "stow then home".
 - **Speed:** "slower" / "faster" / "normal speed" scales the SafetyLayer velocity cap for voice moves between 0.25x
   and 1.0x of the profile (never above the profile's own limits). slower halves, faster doubles, normal resets.
+- **Wrist roll (plane mode, optional):** turn the gripper's own roll follow on/off (the control hand's palm rotates
+  joint 6; see docs/PLANE_TELEOP.md). Exact phrases, so a jog ("turn the base left 30 degrees", "turn the wrist up
+  10 degrees") is never stolen:
+  - ON: "follow my wrist", "wrist roll on", "wrist rotation on", "turn on wrist roll", "rotate the gripper with my wrist".
+  - OFF: "lock the wrist", "wrist roll off", "turn off wrist roll", "stop wrist roll".
+  - Free phrasing like "let me rotate the gripper with my wrist" reaches Nemotron, which maps it to the `wrist_roll`
+    action. Each toggle speaks a confirmation and shows "WRIST ROLL ON/OFF" on the HUD / client. Handled only in
+    plane mode (any other mode replies that tuning is plane-only). The body-client key is `w`.
 
 ## Not the fast path
 

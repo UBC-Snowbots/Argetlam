@@ -63,6 +63,15 @@ body:
   mode: plane        # image-plane TCP teleop, depth ignored (body/plane.py). Switch to arm_mirror for the full-arm
                      # joint-mirroring fallback. (plane and arm_mirror are the only body teleop modes.)
   clutch: {calib_s: 2.0, still_m: 0.03, palm_s: 1.0, raise_m: 0.05}
+  # OPTIONAL wrist roll on the REAL arm = axis 6 (joint 6). Default OFF. Limits/vel come from this profile's joint 6
+  # (travel [-9.9127, -0.0873] rad, 5 deg inside the firmware/URDF bounds; the follower already drives axis 6). The
+  # roll DIRECTION (sign) and gain are UNVERIFIED on hardware (no real-camera run yet): flip wrist_roll_sign if the
+  # gripper rolls the wrong way. The frozen-wrist IK (teleop_orient: frozen) holds joints 4-6, so joint 6 is free
+  # for the roll and the TCP position is unchanged.
+  wrist_roll: false
+  wrist_roll_gain: 1.0
+  wrist_roll_deadband_deg: 10.0
+  wrist_roll_sign: 1.0
 
 # Plane teleop (body.mode = plane). Every control is PARALLEL to the camera image plane; MediaPipe depth (z) is
 # never read, because on the first real run depth was the noisy axis (~28 mm std still vs ~3 mm in-plane). RIGHT hand

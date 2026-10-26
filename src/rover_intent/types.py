@@ -18,6 +18,7 @@ class Action(str, Enum):
     jog = "jog"            # Cartesian nudge: move the TCP a small distance in a base-frame direction
     joint_jog = "joint_jog"  # move one named joint by a small angle
     speed = "speed"        # scale the velocity cap for voice moves (slower/faster/normal)
+    wrist_roll = "wrist_roll"  # turn the optional wrist-roll follow (gripper rotates with the control hand) on/off
     stop = "stop"
     follow = "follow"      # hand control back to body mirroring
     reset = "reset"        # arm home, gripper open, objects back to their start poses (sim)
@@ -39,6 +40,9 @@ class Intent(BaseModel):
     joint: Optional[str] = Field(None, description="joint for 'joint_jog': base/shoulder/elbow/forearm/wrist/tool")
     angle_deg: Optional[float] = Field(None, description="angle in degrees for 'joint_jog' (clamped to <= 45)")
     speed: Optional[Literal["slower", "faster", "normal"]] = Field(None, description="speed change for action 'speed'")
+    wrist_roll: Optional[Literal["on", "off"]] = Field(
+        None, description="for action 'wrist_roll': 'on' lets the gripper rotate with the control hand's roll, "
+                          "'off' locks it")
     say: str = Field("", description="short spoken confirmation for the user")
 
 
@@ -59,6 +63,11 @@ class BodyPose(BaseModel):
                                                                   # hand, normalized image coords (mirror-corrected x,
                                                                   # y down); drives the LEFT-thumb reach. None (old
                                                                   # clients, or hand not found) = reach holds.
+    ctrl_hand2d: Optional[list[tuple[float, float]]] = None        # 21 MediaPipe Hands landmarks of the CONTROL hand
+                                                                  # (the lateral/vertical hand), same normalized image
+                                                                  # coords; drives the OPTIONAL wrist-roll follow
+                                                                  # (body/wrist_roll.py). None (old clients, or hand
+                                                                  # not found) = wrist roll holds.
     seq: int = 0                                                  # for loss / latency measurement
     rtt_ms: Optional[float] = None                                # client-measured round trip, echoed to the HUD
     in_position: Optional[bool] = None                            # client's stand-here guide is green
@@ -174,5 +183,6 @@ class PlaneTune(BaseModel):
     t: float = 0.0
     op: Literal["reach_faster", "reach_slower", "more_sensitive", "less_sensitive",
                 "reach_fwd_sooner", "reach_back_sooner", "bigger_deadzone", "smaller_deadzone",
-                "flip_lateral", "flip_vertical", "flip_reach", "save", "reset", "tune_check"]
+                "flip_lateral", "flip_vertical", "flip_reach", "save", "reset", "tune_check",
+                "wrist_roll", "wrist_roll_on", "wrist_roll_off", "flip_wrist_roll"]
     value: Optional[float] = None

@@ -15,6 +15,8 @@ Mapping (relative / clutched; the hand positions and the current TCP are capture
                           (body/thumb.py) stops flicker from jogging the arm. reach_mode "position" keeps the old
                           height->x position map (raise -> forward, lower -> back; legacy, not thumb-driven).
     lateral/vertical:  target = tcp0 + ramp * gain * (hand_now - hand0)      (gain in metres per shoulder-width)
+    wrist roll (OPT):  joint 6 (gripper roll) <- RIGHT (control) hand palm roll, when body.wrist_roll is on. Default
+                       OFF; joint 6's axis runs through the TCP so this rolls the tool without moving it (wrist_roll.py).
 then a One-Euro filter on the normalized hand coordinates, a small deadband, a 2 s engage ramp, and the SafetyLayer
 workspace box (targets outside the box are clamped and `.clipped` is flagged, so the ghost shows amber). The clamped
 target still runs through the normal IK path in the app (orient from the profile's teleop_orient).
@@ -37,6 +39,7 @@ import numpy as np
 from ..types import BodyPose
 from .retarget import OneEuro
 from .thumb import ThumbReach, classify_thumb
+from .wrist_roll import WristRoll
 
 # skel2d (body client SKEL) indices
 L_SH, R_SH, L_EL, R_EL, L_WR, R_WR, L_HIP, R_HIP, NOSE = range(9)
@@ -144,7 +147,8 @@ class PlaneMapper:
     """BodyPose -> a 3-vector TCP target in the arm base frame, for the app's IK path. Drop-in for `retarget`:
     `engage(tcp_now)` on clutch-engage, `pose -> p` each frame, `reset()`, and `.clipped` for the amber ghost."""
 
-    def __init__(self, arm, home, cfg: dict | None = None, ws_min=None, ws_max=None):
+    def __init__(self, arm, home, cfg: dict | None = None, ws_min=None, ws_max=None,
+                 wrist_roll_cfg: dict | None = None):
         self.arm = arm
         self.home = np.asarray(home, float).copy()
         self.ws_min = None if ws_min is None else np.asarray(ws_min, float)
@@ -173,6 +177,15 @@ class PlaneMapper:
         self.reach_rate = 0.0        # last signed reach speed, m/s (status: HUD shows >>/<< from the sign)
         self.reach_state = "hold"    # ">>" forward, "<<" back, "hold"
         self._last_p = None          # last emitted target (so a sign flip can re-anchor without a jump)
+        # OPTIONAL wrist-roll follow: turning the CONTROL hand rolls the gripper about its own axis = joint 6 (the
+        # last joint). Default OFF. Limits come from the arm's joint-6 (last) travel, clamped with a margin inside.
+        wr = wrist_roll_cfg or {}
+        self.wrist_roll = WristRoll(
+            enabled=bool(wr.get("enabled", False)), gain=float(wr.get("gain", 1.0)),
+            deadband_deg=float(wr.get("deadband_deg", 10.0)), lo=float(arm.lower[-1]), hi=float(arm.upper[-1]),
+            margin_deg=float(wr.get("margin_deg", 5.0)), sign=float(wr.get("sign", 1.0)),
+            min_cutoff=oe.get("min_cutoff", 1.0), beta=oe.get("beta", 0.05))
+        self.roll_target = None      # last joint-6 target (rad) while wrist roll is enabled, else None
         self._defaults = self._persist_dict()   # the config baseline, for reset_tuning()
         self.reset()
 
@@ -192,6 +205,8 @@ class PlaneMapper:
         self._last_p = None
         self.filter.reset()
         self.clipped = False
+        self.roll_target = None
+        self.wrist_roll.reset()
 
     def engage(self, tcp_now, neutral=None, *args, **kwargs):
         """Anchor at the current TCP. `neutral` / extra args are accepted and ignored (the app passes the clutch
@@ -212,6 +227,18 @@ class PlaneMapper:
         self._last_p = None
         self.filter.reset()
         self.clipped = False
+        # anchor the optional wrist-roll follow at the current joint-6 value (so turning it on never jumps); the
+        # control hand's roll zero is captured on the first frame after this. `joint6` is passed by the app on engage.
+        self.roll_target = None
+        j6 = kwargs.get("joint6")
+        if j6 is not None:
+            self.wrist_roll.engage(float(j6))
+
+    def set_wrist_roll(self, on: bool, joint6_rad=None):
+        """Toggle the optional wrist-roll follow. Turning it ON re-anchors at `joint6_rad` so it never jumps."""
+        self.wrist_roll.set_enabled(on, None if joint6_rad is None else float(joint6_rad))
+        if not on:
+            self.roll_target = None
 
     def __call__(self, pose: BodyPose):
         if self._tcp0 is None:
@@ -282,6 +309,13 @@ class PlaneMapper:
                 self.clipped = bool(np.max(np.abs(cl - p)) > 0.005)   # > 5 mm outside the box: really out of reach
                 p = cl
         self._last_p = np.asarray(p, float).copy()
+        # OPTIONAL wrist roll: joint-6 target (rad) from the CONTROL hand's palm roll. The app overrides joint 6 with
+        # this after the frozen IK; joint 6's axis runs through the TCP, so this never moves the position `p`. A
+        # missing / low-confidence control hand holds the last roll (WristRoll.update). Disabled -> None (no override).
+        if self.wrist_roll.enabled:
+            self.roll_target = self.wrist_roll.update(getattr(pose, "ctrl_hand2d", None), pose.t)
+        else:
+            self.roll_target = None
         return p
 
     # ---- live tuning (adjust / snapshot / save / load / reset) -------------------------------------------------
@@ -302,7 +336,8 @@ class PlaneMapper:
                 "deadband": round(float(self.deadband), 4),
                 "forward_frac": round(float(self.rr_fwd_frac), 3), "back_frac": round(float(self.rr_back_frac), 3),
                 "sign_lateral": _sgn(self.gain[1]), "sign_vertical": _sgn(self.gain[2]),
-                "sign_reach": _sgn(self.reach_sign)}
+                "sign_reach": _sgn(self.reach_sign),
+                "wrist_roll": self.wrist_roll.snapshot()}
 
     def _set_mag(self, idx, mag, lo, hi):
         """Set gain[idx] to a clamped MAGNITUDE, keeping its current sign (so a sensitivity change never flips)."""
