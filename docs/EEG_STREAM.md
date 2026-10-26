@@ -1,5 +1,9 @@
 # Live raw-EEG streaming: laptop -> VM
 
+> For the everyday "put the headband on and go" routine (fit check -> calibrate -> confirm -> stream, one command),
+> see **docs/MUSE_READY.md** (`python -m rover_intent.eeg.muse_ready --name <person>`). It wraps the streamer below so
+> a new wearer never has to run the steps by hand.
+
 Streams the Muse 2's raw EEG from the Windows laptop (where the headband is paired over Bluetooth) to the VM over
 Tailscale, so VM-side tools can run models on live Muse data. Only ONE process can hold the Muse at a time, so the
 laptop streamer (`stream_tx`) also does the live double-clench -> GripToggle job that `clench run` used to do. It

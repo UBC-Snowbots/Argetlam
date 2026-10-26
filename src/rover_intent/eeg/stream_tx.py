@@ -158,6 +158,61 @@ def stream_loop(board, fs, chans, sender: HubSender, *, detector: ClenchDetector
     return seq, n_toggles
 
 
+def stream_session(board, fs, chans, *, board_kind, hub_host, hub_port=LISTEN_PORT,
+                   clench_profile=None, app_host="rover-vm", app_port=47100,
+                   serial="", mac="", name="", period=0.05, stall_s=3.0,
+                   quiet=False, stop=None, announce=True, close_board=True):
+    """Stream an ALREADY-OPEN board to the hub (and, with clench_profile, clench -> GripToggle UDP) until stop/Ctrl+C.
+
+    This is the body of main() without the board open, so a caller that already holds the Muse (e.g. eeg.muse_ready,
+    which must NOT release the Muse between calibration and streaming because BLE re-acquire on Windows is slow/flaky)
+    can hand it straight here. Owns the HubSender and the no-data watchdog reopen; closes the board on exit unless
+    close_board=False. clench_profile is a profile dict, a path string, or None.
+    """
+    channels = MUSE_CHANNELS[:len(chans)] if len(chans) <= 4 else list(chans)
+    header = make_header(fs, channels, board_kind, time.time())
+    sender = HubSender(hub_host, hub_port, header)
+    sender.start()
+
+    detector = udp = app_addr = None
+    if clench_profile is not None:
+        profile = clench_profile if isinstance(clench_profile, dict) else json.loads(Path(clench_profile).read_text())
+        if abs(fs - profile["fs"]) > 1:
+            print(f"warning: board runs at {fs} Hz but the profile was made at {profile['fs']} Hz", file=sys.stderr)
+        detector = ClenchDetector.from_profile(profile, t0=time.time())
+        udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        app_addr = (app_host, app_port)
+        if announce:
+            print(f"clench enabled: double-clench to toggle, threshold {detector.cfg.on_ratio}x relaxed.", flush=True)
+
+    held = {"board": board}
+
+    def reopen():
+        try:
+            held["board"].stop_stream()
+            held["board"].release_session()
+        except Exception:  # noqa: BLE001  (a frozen session may not close cleanly)
+            pass
+        time.sleep(1.0)
+        nb, _fs, nchans = open_board(board_kind, serial, mac, name)
+        held["board"] = nb
+        return nb, nchans
+
+    if announce:
+        print(f"streaming raw EEG to hub {hub_host}:{hub_port}. Ctrl+C to stop.", flush=True)
+    try:
+        return stream_loop(board, fs, chans, sender, detector=detector, udp=udp, app_addr=app_addr, period=period,
+                           quiet=quiet, stop=stop, reopen=None if stall_s <= 0 else reopen, stall_s=stall_s)
+    finally:
+        sender.stop()
+        if close_board:
+            try:
+                held["board"].stop_stream()
+                held["board"].release_session()
+            except Exception:  # noqa: BLE001
+                pass
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--board", choices=["muse2", "muse2-bled", "synthetic", "hub"], default="muse2")
@@ -175,45 +230,9 @@ def main(argv=None) -> int:
     args = ap.parse_args(argv)
 
     board, fs, chans = open_board(args.board, args.serial, args.mac, args.name)
-    channels = MUSE_CHANNELS[:len(chans)] if len(chans) <= 4 else list(chans)
-    header = make_header(fs, channels, args.board, time.time())
-    sender = HubSender(args.hub_host, args.hub_port, header)
-    sender.start()
-
-    detector = udp = app_addr = None
-    if args.clench_profile:
-        profile = json.loads(Path(args.clench_profile).read_text())
-        if abs(fs - profile["fs"]) > 1:
-            print(f"warning: board runs at {fs} Hz but the profile was made at {profile['fs']} Hz", file=sys.stderr)
-        detector = ClenchDetector.from_profile(profile, t0=time.time())
-        udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        app_addr = (args.app_host, args.app_port)
-        print(f"clench enabled: double-clench to toggle, threshold {detector.cfg.on_ratio}x relaxed.", flush=True)
-
-    held = {"board": board}
-
-    def reopen():
-        try:
-            held["board"].stop_stream()
-            held["board"].release_session()
-        except Exception:  # noqa: BLE001  (a frozen session may not close cleanly)
-            pass
-        time.sleep(1.0)
-        nb, _fs, nchans = open_board(args.board, args.serial, args.mac, args.name)
-        held["board"] = nb
-        return nb, nchans
-
-    print(f"streaming raw EEG to hub {args.hub_host}:{args.hub_port}. Ctrl+C to stop.", flush=True)
-    try:
-        stream_loop(board, fs, chans, sender, detector=detector, udp=udp, app_addr=app_addr, period=args.period,
-                    reopen=None if args.stall_s <= 0 else reopen, stall_s=args.stall_s)
-    finally:
-        sender.stop()
-        try:
-            held["board"].stop_stream()
-            held["board"].release_session()
-        except Exception:  # noqa: BLE001
-            pass
+    stream_session(board, fs, chans, board_kind=args.board, hub_host=args.hub_host, hub_port=args.hub_port,
+                   clench_profile=args.clench_profile, app_host=args.app_host, app_port=args.app_port,
+                   serial=args.serial, mac=args.mac, name=args.name, period=args.period, stall_s=args.stall_s)
     return 0
 
 
