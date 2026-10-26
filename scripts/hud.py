@@ -27,6 +27,8 @@ except Exception:  # Pillow missing: the HUD still runs, the video panel shows a
     Image = ImageTk = None
 
 W, HUD_H = 560, 600                     # HUD_H = the skeleton/sync/latency panel height (unchanged)
+COMPACT_H = 90                          # strip shown when body teleop is not running (no pose / no video)
+BODY_IDLE_S, VIDEO_IDLE_S = 5.0, 3.0    # body panels hide after this long without a pose / a camera frame
 VBOX = (20, HUD_H + 14, W - 20, HUD_H + 14 + 300)   # live-video panel box, directly below the HUD panel
 H = VBOX[3] + 24
 C = {"following": "#1f9d4c", "calibrating": "#2f6fd6", "idle": "#555555",
@@ -162,6 +164,32 @@ def main():
             draw_video()
             root.after(100, draw)
             return
+        # Body teleop not running (no pose for 5 s and no camera frame for 3 s): hide the skeleton, sync, link and video
+        # panels and shrink to a compact strip; they come back as soon as body data arrives again.
+        with vlock:
+            vt = vstate["t"]
+        ba = m.get("body_age")
+        body_on = (ba is not None and ba < BODY_IDLE_S) or bool(vt and time.time() - vt < VIDEO_IDLE_S)
+        if not body_on:
+            if not state.get("compact"):
+                root.geometry(f"{W}x{COMPACT_H}+{args.x}+{args.y}")
+                cv.config(height=COMPACT_H)
+                state["compact"] = True
+            grip = m.get("grip") or 0
+            cv.create_rectangle(0, 0, W, 44, fill="#333a44", width=0)
+            cv.create_text(12, 22, text="BODY TELEOP OFF  (no body client)", anchor="w", fill="white",
+                           font=("Helvetica", 15, "bold"))
+            cv.create_text(20, 66, anchor="w", text="gripper CLOSED" if grip >= 0.5 else "gripper open",
+                           fill="#ffd166" if grip >= 0.5 else "#8892a0", font=("Helvetica", 13))
+            if m.get("say"):
+                cv.create_text(W - 20, 66, anchor="e", fill="#8892a0", font=("Helvetica", 11),
+                               text=f"robot: {m['say']}"[:60])
+            root.after(100, draw)
+            return
+        if state.get("compact"):
+            root.geometry(f"{W}x{H}+{args.x}+{args.y}")
+            cv.config(height=H)
+            state["compact"] = False
         cl = m.get("clutch") or "idle"
         why = f" ({m['release_reason']})" if m.get("release_reason") else ""
         banner = {"idle": f"FROZEN{why}  -  F / open palm up 1 s / raise LEFT hand",
