@@ -849,7 +849,7 @@ def cmd_collect(args) -> int:
 
 # --- cli ------------------------------------------------------------------------------------------------------------
 def _add_protocol_args(p):
-    p.add_argument("--board", choices=["muse2", "muse2-bled", "synthetic"], default="synthetic")
+    p.add_argument("--board", choices=["muse2", "muse2-bled", "synthetic", "hub"], default="synthetic")
     p.add_argument("--trials", type=int, default=20)
     p.add_argument("--runs", type=int, default=1, help="split the trials into this many randomized runs")
     p.add_argument("--executed", type=int, default=0, help="add this many REAL right-hand-clench trials per run")
