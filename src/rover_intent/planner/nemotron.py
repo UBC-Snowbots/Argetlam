@@ -25,6 +25,9 @@ jog (nudge the tool a short distance WITHOUT a camera: set "direction" to one of
 joint_jog (turn ONE joint: set "joint" to base/shoulder/elbow/forearm/wrist/tool, "direction" to a word like
   left/right/up/down/in/out/clockwise, and "angle_deg" to the degrees - omit it for a small default),
 speed (set "speed" to slower/faster/normal to change how fast voice moves run),
+wrist_roll (turn the OPTIONAL wrist-roll follow on or off: set "wrist_roll" to "on" so the gripper rotates about its
+  own axis when the user turns their control hand, or "off" to lock it. Use for "let me rotate the gripper with my
+  wrist", "follow my wrist", "lock the wrist roll". This is NOT a joint_jog: it does not move a set number of degrees),
 stop, follow (mirror the user's arm), reset,
 clarify (you are not sure what the user means: ask them in "say", and nothing moves), unknown (not a robot command).
 Only use jog/joint_jog for a direct nudge with no object; to move an OBJECT use pick/place/move.

@@ -26,6 +26,14 @@ body:
                         # (The legacy position / calibrated / gesture modes were removed.)
   clutch: {calib_s: 2.0, still_m: 0.03, palm_s: 1.0, raise_m: 0.05}  # F / open palm held up 1 s / left hand up
   grip_from_hand: true  # fist closes the gripper; stand-in until EEG is live
+  # OPTIONAL wrist-roll follow (plane mode): turning the CONTROL hand about the forearm (pronation/supination)
+  # rotates the gripper about its own axis = joint 6 (the wrist roll). Default OFF. Toggle live with the body-client
+  # 'w' key, the voice phrase "follow my wrist" / "lock the wrist", or ask the planner "let me rotate the gripper
+  # with my wrist". joint 6's axis runs through the TCP, so this never moves the TCP position. See body/wrist_roll.py.
+  wrist_roll: false
+  wrist_roll_gain: 1.0            # joint degrees per degree of hand roll (1.0 = one-to-one)
+  wrist_roll_deadband_deg: 10.0   # ignore hand roll smaller than this (anti-jitter)
+  wrist_roll_sign: 1.0            # flip to -1.0 if the gripper rolls the wrong way
 
 # Full-arm joint mirroring (body.mode = arm_mirror). Defaults here; dev_arm_real.yaml tunes neutral/gain/sign.
 # q_joint = clip(home + sign * gain * (raw_arm_angle - neutral), joint_limits). neutral is the raw arm angle (rad)

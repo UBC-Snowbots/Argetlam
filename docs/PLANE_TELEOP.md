@@ -45,6 +45,33 @@ Why compute the thumb on the VM, not the laptop: the body client sends the reach
 one, unit-tested classifier + dwell, instead of duplicating the logic inside the standalone client. Old body clients
 that do not send `reach_hand2d` simply leave the reach holding (safe, backwards compatible).
 
+## Wrist roll (optional, default OFF, new 2026-10-25)
+Turning your CONTROL hand (the right hand, the one that steers lateral/vertical) about the forearm -
+pronation/supination, the palm turning - can rotate the gripper about its own axis. That axis is **joint 6** (the last
+joint, the wrist roll) on the dev_arm / dev_arm_real profiles. It is an **option, default OFF**; nothing rolls until
+you turn it on.
+
+- **Signal**: the roll angle is read from the control hand's 21 MediaPipe Hands landmarks as the angle of the palm
+  **across-vector (index MCP -> pinky MCP)** in the image plane (x, y only; the hand z is never read). The angle at
+  the moment you turn it on (or at clutch engage) is captured as **0**, so your natural pose maps to the current
+  joint-6 value and turning it on **never jumps**. A One-Euro smoother, a **~10 deg deadband**, a **gain** (hand
+  degrees -> joint degrees, default 1.0) and a clamp to the joint-6 limits (5 deg inside each end) shape it. A
+  missing / low-confidence control hand **holds** the current roll. Pure, unit-tested: `src/rover_intent/body/wrist_roll.py`.
+- **Apply**: joint 6 target = roll-at-engage + gain x (hand roll - hand roll at engage). On dev_arm_real the IK is
+  **frozen-wrist** (it solves the position on joints 1-3 and holds 4-6), and **joint 6's axis runs through the TCP**,
+  so setting joint 6 from the roll spins the gripper **without moving the TCP position** the IK solved (verified by
+  FK: 0.0 mm shift). The SafetyLayer still clamps joint 6 to its limits and its velocity/acceleration cap, and the
+  real-arm follower already drives axis 6, so nothing changes there.
+- **Turn it on/off** three ways, each with a spoken confirmation and a HUD/client status ("WRIST ROLL ON +NN deg"):
+  - body-client key **`w`** (toggle),
+  - voice (instant, local): "follow my wrist" / "wrist roll on" / "turn on wrist roll" = on; "lock the wrist" /
+    "wrist roll off" / "turn off wrist roll" = off. These are exact phrases, so a jog like "turn the base left 30
+    degrees" or "turn the wrist up 10 degrees" is never stolen.
+  - the planner: a free-form request like "let me rotate the gripper with my wrist" maps to the `wrist_roll` action.
+- **Config** (under `body` in the profile): `wrist_roll: false`, `wrist_roll_gain: 1.0`,
+  `wrist_roll_deadband_deg: 10.0`, `wrist_roll_sign: 1.0` (flip to -1.0 if it rolls the wrong way). Joint-6 limits and
+  the velocity cap come from the arm profile.
+
 ## Reachable box + IK
 Box (dev_arm_real, carved from the real reachable shell): `[0.47, -0.22, 0.38] -> [0.70, 0.18, 0.60]` m, home TCP
 `(0.545, -0.027, 0.520)`. The x max was widened **0.64 -> 0.70 on 2026-10-24** for more forward reach under the rate
@@ -94,6 +121,7 @@ speed/box limits.
 Body-client keys (plane mode):
 - `+` / `-`  reach faster / slower (max_speed x/÷1.25, clamped 0.01..0.08 m/s)
 - `]` / `[`  more / less sensitive (lateral gain x/÷1.2 in 0.05..0.35; vertical in 0.05..0.30)
+- `w`  toggle wrist roll on/off (optional gripper roll from the control hand; see "Wrist roll" above)
 - `o`  save tuning    `0`  reset tuning to the profile defaults
 
 Voice (instant, local; never reaches the cloud, never steals a jog like "move left 5 cm"):
@@ -145,4 +173,9 @@ the gripper is heading (amber = clamped at the box edge).
 - The body client change (sending `reach_hand2d`) is **required** for the feature: the laptop must pull this branch.
   An un-updated client still works but the reach just holds.
 - Lateral + vertical were reported "pretty good" live; unchanged here.
+- **Wrist roll** is **unit-tested only** (angle on synthetic landmarks, mapper + the joint-6 override math). It needs a
+  person at a camera to confirm MediaPipe reports the control-hand palm landmarks reliably and that the gain/deadband
+  feel right. The joint-6 **direction (sign) is unverified on hardware**: flip `body.wrist_roll_sign` if the gripper
+  rolls the wrong way. It needs the updated body client (sending `ctrl_hand2d`); an old client leaves wrist roll a
+  no-op (safe, backwards compatible).
 - `scripts/gate.sh` was not run (it needs the live stack on 47100 = master).

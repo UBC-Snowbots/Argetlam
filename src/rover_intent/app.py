@@ -76,8 +76,12 @@ def build(cfg: dict, backend: str):
     if b.get("mode", "plane") == "arm_mirror":   # full-arm joint mirroring, no IK (body/arm_mirror.py)
         retarget = ArmMirror(arm, home, a["max_vel"], cfg.get("arm_mirror"))
     else:                                        # plane: image-plane TCP teleop, depth ignored, IK path (body/plane.py)
+        # OPTIONAL wrist-roll follow knobs live under body.* (default OFF); PlaneMapper owns the joint-6 roll.
+        wrist_roll_cfg = {"enabled": bool(b.get("wrist_roll", False)), "gain": b.get("wrist_roll_gain", 1.0),
+                          "deadband_deg": b.get("wrist_roll_deadband_deg", 10.0),
+                          "margin_deg": b.get("wrist_roll_margin_deg", 5.0), "sign": b.get("wrist_roll_sign", 1.0)}
         retarget = PlaneMapper(arm, home, cfg.get("plane"), cfg["safety"]["workspace_min"],
-                               cfg["safety"]["workspace_max"])
+                               cfg["safety"]["workspace_max"], wrist_roll_cfg=wrist_roll_cfg)
     n = cfg["nemotron"]
     parser = IntentParser(n["model"], n["base_url"], n["api_key_env"], timeout_s=float(n.get("timeout_s", 6.0)))
     return arm, safety, robot, scene, arbiter, retarget, parser
@@ -184,6 +188,13 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
         elif op == "reset":
             retarget.reset_tuning()
             say_txt = "Tuning reset to the profile defaults."
+        elif op in ("wrist_roll", "wrist_roll_on", "wrist_roll_off", "flip_wrist_roll"):
+            # OPTIONAL wrist-roll follow toggle. Re-anchors at the current joint 6 so turning it on never jumps.
+            want = True if op == "wrist_roll_on" else False if op == "wrist_roll_off" \
+                else not retarget.wrist_roll.enabled
+            retarget.set_wrist_roll(want, q_cmd[5])
+            say_txt = ("Wrist roll on; turn your control hand to rotate the gripper." if want
+                       else "Wrist roll off; the gripper roll is locked.")
         else:
             say_txt = retarget.adjust(op)
             if say_txt is None:
@@ -229,7 +240,7 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
             if arm_mirror_on:
                 retarget.engage(q_cmd.copy())   # anchor the 2 s ramp at the current joints (no jump)
             else:
-                retarget.engage(arm.fk(q_cmd)[:3, 3], ev.neutral)
+                retarget.engage(arm.fk(q_cmd)[:3, 3], ev.neutral, joint6=q_cmd[5])  # joint6 anchors wrist roll
             arbiter.on_intent(Intent(action=Action.follow))
             body_target = last_target = body_joint_target = None
 
@@ -455,6 +466,9 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
                 fut.cancel()
                 rx.reply(p_addr, {"kind": "reply", "text": p_text, "say": "Cancelled by stop.", "mode": "hold"})
             pending.clear()
+        if intent.action == Action.wrist_roll:   # "let me rotate the gripper with my wrist" -> toggle the follow
+            apply_plane_tune("wrist_roll_on" if intent.wrist_roll != "off" else "wrist_roll_off", addr, text)
+            return
         # a named pose (voice) or the autonomous skills (when confirm.skills is on): ask first, do not move yet.
         want = RETURN if intent.action == Action.home else intent.preset if intent.action == Action.preset else None
         if want is not None and not confirm_presets:   # "just push it" (dev_arm_real): move now, no spoken yes
@@ -695,6 +709,7 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
                                 "reach_rate": round(float(getattr(retarget, "reach_rate", 0.0)), 4) if plane_on else None,
                                 "reach_state": getattr(retarget, "reach_state", None) if plane_on else None,
                                 "thumb": getattr(retarget, "thumb_state", None) if plane_on else None,
+                                "wrist_roll": (retarget.wrist_roll.snapshot() if plane_on else None),
                                 "hw_busy": round(max(0.0, hw_busy_until - t0), 1) if hw_busy_until else 0.0,
                                 "mirror": mirror_real,
                                 "mirror_age": round(t0 - real_t, 3) if (mirror_real and real_t) else None,
@@ -738,9 +753,9 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
                     body_joint_target = None
                 else:
                     try:
-                        retarget.engage(arm.fk(q_cmd)[:3, 3], None, recentre=False)
+                        retarget.engage(arm.fk(q_cmd)[:3, 3], None, recentre=False, joint6=q_cmd[5])
                     except TypeError:
-                        retarget.engage(arm.fk(q_cmd)[:3, 3], None)
+                        retarget.engage(arm.fk(q_cmd)[:3, 3], None, joint6=q_cmd[5])
                 body_target = last_target = None
         if p is not None:
             T_des[:3, 3] = safety.clip_workspace(p)
@@ -772,6 +787,13 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
             q_des = body_joint_target
         else:
             q_des = arm.ik_step(q_cmd, T_des, orient=orient)
+            # OPTIONAL wrist roll (plane teleop, body.wrist_roll on): override joint 6 with the roll target from the
+            # control hand. joint 6's axis runs through the TCP, so this rolls the gripper without moving the position
+            # the frozen IK just solved. The SafetyLayer below still clamps joint 6 to its limits + vel/acc cap.
+            if (plane_on and arbiter.mode == Mode.FOLLOW and clutch.state == "following"
+                    and getattr(retarget, "roll_target", None) is not None):
+                q_des = np.array(q_des, float).copy()
+                q_des[5] = float(retarget.roll_target)
         q_cmd = safety.step(q_cmd, q_des, dt, 0.0 if mirror_real else input_age)
         q_cmd = np.clip(q_cmd, q - WINDUP, q + WINDUP)  # anti-windup: never run far ahead of the real joints
         if joint_goal is not None and at_goal(q_cmd, q, joint_goal):
