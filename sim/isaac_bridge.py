@@ -185,6 +185,20 @@ reach_box = VisualizationMarkers(VisualizationMarkersCfg(prim_path="/Visuals/rea
     "edge": sim_utils.CylinderCfg(radius=0.0025, height=1.0, axis="Z", visual_material=sim_utils.PreviewSurfaceCfg(
         diffuse_color=(0.35, 0.65, 1.0), emissive_color=(0.1, 0.25, 0.5)))}))
 
+# The rover camera sensor must exist BEFORE sim.reset(): Isaac Lab sensors initialise on the simulation PLAY event.
+# Created after the reset it never initialises (first live run 2026-10-27: every step failed with
+# "'Camera' object has no attribute '_is_outdated'"). The streamer is set up after reset_scene() below.
+_cam_sensor = None
+if getattr(args, "sim_cam", False):
+    try:
+        sys.path.insert(0, str(ROOT / "sim"))
+        import rover_camera  # noqa: E402  (sim/rover_camera.py)
+        _cam_sensor = rover_camera.build_camera(cfg, sim_utils, prim_path="/World/RoverCam")
+    except Exception as e:
+        print(f"[bridge] --sim-cam requested but the camera could not be created ({e}); running without it",
+              flush=True)
+        _cam_sensor = None
+
 sim.reset()
 
 
@@ -212,11 +226,8 @@ reset_scene()
 # CameraFrame (with sim ground-truth objects + GT 2D boxes) to the app. Guarded + wrapped so a bad API
 # call or no --enable_cameras never crashes the physics loop; the bridge just runs without the camera.
 cam_streamer = None
-if getattr(args, "sim_cam", False):
+if _cam_sensor is not None:
     try:
-        sys.path.insert(0, str(ROOT / "sim"))
-        import rover_camera  # noqa: E402  (sim/rover_camera.py)
-        _cam_sensor = rover_camera.build_camera(cfg, sim_utils, prim_path="/World/RoverCam")
         try:
             rover_camera.label_object_semantics({n: f"/World/Objects/{n}" for n in objects})
         except Exception as _e:
