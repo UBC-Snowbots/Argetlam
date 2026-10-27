@@ -179,16 +179,24 @@ def _both_trial(p: Player, offset, opposite):
         p.muse()                        # Muse CLOSE -> gripper 1, well before the trial edge (not coalesced)
         p.stream(1.0, hand_open="keep")
     c0 = p.oracle.grip_clashes
+    # fire the Muse `offset` before the hand edge confirms. An offset longer than the hand debounce means the Muse
+    # goes BEFORE the fist starts (live run 2026-10-27: clamping it to the fist start made "1.0 s" really ~0.68 s)
+    pre = max(0.0, offset - G_HAND_HOLD)
+    if pre > 0:
+        p.muse()
+        p.stream(pre, hand_open="keep")
     trigger = time.time()
-    fire_at = max(0.0, G_HAND_HOLD - offset)   # fire the Muse `offset` before the hand edge confirms
+    fire_at = None if pre > 0 else G_HAND_HOLD - offset
 
     def on_tick(now, el):
-        if el >= fire_at:
+        if fire_at is not None and el >= fire_at:
             p.muse()
             return True
         return False
 
-    p.stream(G_HAND_HOLD + 0.4, hand_open=0.03, on_tick=on_tick)   # open->fist CLOSE edge + the Muse at offset
+    # open->fist CLOSE edge + the Muse at offset. Stream the full settle time before snapshotting the oracle: a brief
+    # simulated tracking loss can delay the hand edge past G_HAND_HOLD + 0.4, and the app is judged at SETTLE_S
+    p.stream(SETTLE_S, hand_open=0.03, on_tick=on_tick)
     # at offset 0 (truly simultaneous) and at the window boundary (== coalesce_s) the event ORDER, hence the winner,
     # is inherently undefined; mark those opposite trials "boundary" so the check requires a clash + a valid state
     # but does not insist on one specific winner
@@ -262,6 +270,9 @@ def evaluate(commands, parsed, monitor, backend):
                         break
         elif observed == 1 - c["expected"]:
             f["wrong"] += 1
+            print(f"WRONG {c['family']} seed={c.get('seed')} expected={c['expected']} observed={observed} "
+                  f"cmd={ {k: v for k, v in c.items() if k != 'trigger_t'} } "
+                  f"changes={[(round(tr['t'] - t0, 3), tr['dir']) for tr in changes]}", flush=True)
         else:
             f["missed"] += 1
         f["clashes"] += n_clash
@@ -295,12 +306,13 @@ def _stat(xs, q):
 def print_table(agg, backend, followed, tcp_path, errors):
     print()
     print(f"backend={backend}  clutch_followed={followed}  tcp_path_following={tcp_path:.3f} m  app_errors={errors}")
-    hdr = ["family", "seeds", "cmds", "matched", "missed", "wrong", "clashes", "app_ms(med/p90)", "finger_ms(med/p90)"]
+    hdr = ["family", "seeds", "cmds", "matched", "missed", "wrong", "clashes", "app_ms(med/p90)", "fingers_ok ms(med/p90)"]
     print("  ".join(h.ljust(w) for h, w in zip(hdr, [11, 5, 5, 7, 6, 5, 7, 16, 18])))
     for family in sorted(agg):
         a = agg[family]
         app_ms = f"{_fmt(_stat(a['app_lat'], 0.5))}/{_fmt(_stat(a['app_lat'], 0.9))}"
-        fing = "n/a" if backend != "isaac" else f"{_fmt(_stat(a['finger_lat'], 0.5))}/{_fmt(_stat(a['finger_lat'], 0.9))}"
+        fing = "n/a" if backend != "isaac" else (f"{len(a['finger_lat'])}/{a['commands']} "
+                                                f"{_fmt(_stat(a['finger_lat'], 0.5))}/{_fmt(_stat(a['finger_lat'], 0.9))}")
         row = [family, str(a["seeds"]), str(a["commands"]), str(a["matched"]), str(a["missed"]), str(a["wrong"]),
                str(a["clashes"]), app_ms, fing]
         print("  ".join(c.ljust(w) for c, w in zip(row, [11, 5, 5, 7, 6, 5, 7, 16, 18])))
@@ -326,6 +338,8 @@ def main():
     ap.add_argument("--no-spawn", action="store_true", help="drive an already-running app (e.g. the live Isaac stack)")
     ap.add_argument("--config", default=str(G.ROOT / "configs/default.yaml"))
     ap.add_argument("--poll-hz", type=float, default=4.0)
+    ap.add_argument("--app-log", default=None, help="with --no-spawn: the running app's log file, read from the run "
+                    "start, for exact transitions/clashes/errors instead of the coarse Query poll")
     a = ap.parse_args()
     families = [f.strip() for f in a.families.split(",") if f.strip()]
 
@@ -351,6 +365,7 @@ def main():
     mon.start()
     all_cmds: list[dict] = []
     log_start = time.time()
+    log_offset = Path(a.app_log).stat().st_size if (a.no_spawn and a.app_log) else 0
     try:
         for seed in range(a.seeds):
             for name, runner in build_commands(seed, families):
@@ -376,6 +391,10 @@ def main():
     log_text = ""
     if app is not None:
         log_text = Path(app.log_path).read_text()
+    elif a.app_log:
+        with open(a.app_log, "rb") as fh:
+            fh.seek(log_offset)
+            log_text = fh.read().decode(errors="ignore")
     parsed = G.parse_app_log(log_text) if log_text else {"transitions": [], "toggles": [], "clashes": [],
                                                           "errors": ["(no app log: --no-spawn, cannot read errors)"]}
     agg = evaluate(all_cmds, parsed, mon, a.backend)
