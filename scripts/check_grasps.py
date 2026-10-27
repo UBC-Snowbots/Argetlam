@@ -62,12 +62,18 @@ def settle(app):
     return app.state()
 
 
+def truth(state):
+    """Object states to JUDGE with: the sim's ground truth when the app reports it (camera perception mode pins the
+    perceived objects to the table plane, so a lifted object would read 0 cm), else the app's scene objects."""
+    return state.get("sim_truth") or state["objects"]
+
+
 def moved(before, after, skip):
     bad = []
-    for n, o in before["objects"].items():
+    for n, o in truth(before).items():
         if n in skip:
             continue
-        a = after["objects"][n]
+        a = truth(after)[n]
         d = np.linalg.norm(np.array(a["pos"][:2]) - np.array(o["pos"][:2]))
         if d > 0.02 or abs(a["bottom_z"] - before["table_top"]) > 0.01:
             bad.append(f"{n} disturbed (moved {d * 100:.1f} cm, bottom z {a['bottom_z']:.3f})")
@@ -86,7 +92,7 @@ def main():
     for n in names:
         before = settle(app)
         reply, after = app.run(f"pick up the {n}")
-        lift = after["objects"][n]["bottom_z"] - before["table_top"]
+        lift = truth(after)[n]["bottom_z"] - before["table_top"]
         problems = moved(before, after, {n})
         ok = after["held"] == n and lift >= 0.05 and not problems
         results.append(ok)
@@ -95,11 +101,11 @@ def main():
     if args.moves:
         for a, b in itertools.permutations(names, 2):
             before = settle(app)
-            goal = np.array(before["objects"][b]["pos"]) + BESIDE
+            goal = np.array(truth(before)[b]["pos"]) + BESIDE
             reply, after = app.run(f"move the {a} beside the {b}", timeout=60)
             time.sleep(1.5)
             after = app.state()
-            pa = after["objects"][a]
+            pa = truth(after)[a]
             err = np.linalg.norm(np.array(pa["pos"][:2]) - goal[:2])
             upright = abs(pa["bottom_z"] - before["table_top"]) < 0.01
             problems = moved(before, after, {a})

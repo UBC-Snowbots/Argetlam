@@ -165,6 +165,15 @@ def resolve_mount(cfg: dict, mount: str | None = None):
     return pos, rot
 
 
+UDP_MAX_FRAME = 60000   # bytes; UDP datagrams are capped at ~65507, keep a margin for headers
+
+
+def wxyz_to_xyzw(q):
+    """(w, x, y, z) -> (x, y, z, w): our pose math returns wxyz; Isaac Lab 3 wants xyzw."""
+    w, x, y, z = (float(v) for v in q)
+    return (x, y, z, w)
+
+
 def build_camera(cfg: dict, sim_utils, prim_path: str = "/World/RoverCam"):
     """Create and return an isaaclab.sensors.Camera from the arm profile `camera:` block. Isaac-only."""
     from isaaclab.sensors import Camera, CameraCfg
@@ -181,7 +190,10 @@ def build_camera(cfg: dict, sim_utils, prim_path: str = "/World/RoverCam"):
         spawn=sim_utils.PinholeCameraCfg.from_intrinsic_matrix(
             intrinsic_matrix=K.flatten().tolist(), width=W, height=H, focus_distance=0.6,
             clipping_range=(0.05, 10.0)),
-        offset=CameraCfg.OffsetCfg(pos=tuple(pos), rot=tuple(rot), convention="opencv")))
+        # Isaac Lab 3: OffsetCfg.rot is (x, y, z, w) and convention must be opengl|ros|world. "ros" = the
+        # optical frame +Z forward, -Y up = the OpenCV frame our K/pose math uses. (First live run 2026-10-27:
+        # wxyz + "opencv" pointed the camera into empty space: flat grey RGB, 100 % no-return depth.)
+        offset=CameraCfg.OffsetCfg(pos=tuple(pos), rot=tuple(wxyz_to_xyzw(rot)), convention="ros")))
     return cam
 
 
@@ -223,6 +235,7 @@ class RoverCameraStreamer:
             self.addrs.append((net.get("view_host", "127.0.0.1"), int(net["sim_cam_view_port"])))
         self.tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.seq, self._last_t = 0, -1e9
+        self._fit_logged = False
 
     def set_mount(self, mount: str) -> None:
         """Runtime mount switch: move the camera prim to the new mount's pose (Isaac-only). The prim is
@@ -232,8 +245,8 @@ class RoverCameraStreamer:
         try:  # Isaac Lab: set the sensor prim's world pose (fall back to a note if the API differs)
             import torch
             p = torch.tensor([pos], dtype=torch.float32)
-            q = torch.tensor([rot], dtype=torch.float32)   # (w, x, y, z)
-            self.cam.set_world_poses(p, q, convention="opencv")
+            q = torch.tensor([wxyz_to_xyzw(rot)], dtype=torch.float32)   # Isaac Lab 3: (x, y, z, w)
+            self.cam.set_world_poses(p, q, convention="ros")
         except Exception as e:  # pragma: no cover - Isaac-only
             print(f"[rover_camera] set_mount({mount}) could not move the prim ({e}); "
                   f"restart the bridge with camera.mount: {mount}", flush=True)
@@ -261,6 +274,25 @@ class RoverCameraStreamer:
         frame = build_frame(rgb, objects_gt, t_sim, self.seq, self.width, self.height,
                             depth_m=depth, boxes=boxes, quality=self.quality, source=f"sim:{self.mount}")
         data = json.dumps(frame).encode()
+        # UDP caps a datagram at ~64 KB and sendto() fails SILENTLY for bigger ones (first live run 2026-10-27: a
+        # real 640x480 image + depth PNG never arrived). Fit the frame: drop depth first, then lower JPEG quality.
+        q = self.quality
+        while len(data) > UDP_MAX_FRAME and (depth is not None or q > 25):
+            if depth is not None:
+                depth = None
+            else:
+                q = max(25, q - 15)
+            frame = build_frame(rgb, objects_gt, t_sim, self.seq, self.width, self.height,
+                                depth_m=depth, boxes=boxes, quality=q, source=f"sim:{self.mount}")
+            data = json.dumps(frame).encode()
+        if (q != self.quality or depth is None and self.depth_on) and not self._fit_logged:
+            print(f"[rover_camera] frame fitted to UDP: depth {'dropped' if depth is None else 'kept'}, "
+                  f"jpeg quality {q}, {len(data)} bytes (limit {UDP_MAX_FRAME})", flush=True)
+            self._fit_logged = True
+        if len(data) > UDP_MAX_FRAME:
+            print(f"[rover_camera] frame still too big for UDP ({len(data)} bytes): lower camera width/height",
+                  flush=True)
+            return False
         for addr in self.addrs:   # app (perception + HUD forward) and optionally the standalone viewer
             try:
                 self.tx.sendto(data, addr)

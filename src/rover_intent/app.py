@@ -774,6 +774,12 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
                                 # where each object position came from: sim ground truth, or the camera
                                 # (source + age + whether it is currently seen) so the HUD can show it.
                                 "perception_source": perc_source,
+                                # sim ground truth (bottom xyz from the bridge), for evaluation only: in camera mode
+                                # `objects` is camera-derived and table-pinned, so lift/upright checks need this.
+                                "sim_truth": ({n: {"pos": np.round(np.asarray(b, float), 4).tolist(),
+                                                   "bottom_z": round(float(b[2]), 4)}
+                                               for n, b in robot.objects.items()}
+                                              if hasattr(robot, "objects") else None),
                                 "objects": {n: {"pos": np.round(o.pos, 4).tolist(),
                                                 "bottom_z": round(float(o.pos[2] - o.grasp_z), 4),
                                                 **({"src": (prov := perception.tracker.provenance(t0).get(n, {})).get("source", "unseen"),
