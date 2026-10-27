@@ -126,3 +126,16 @@ Qwen3-30B-A3B-Instruct is ~12x faster at the median with equal-or-better accurac
 rule: switch only when accuracy is equal or better). Both other models' single miss and Qwen's single miss were the
 same kind (answering "what's the weather" with clarify rather than unknown, and - for Nano only - reading "move it
 up a little bit" as a whole-object move instead of a jog). All three returned valid structured JSON (0 schema errors).
+
+**Update 2026-10-26: Nemotron stays the default (Pranav's call for the NVIDIA track), with reasoning OFF.**
+Nemotron-3-Nano is a reasoning model: by default it writes ~200-850 hidden reasoning tokens before the JSON. The planner
+now sends `chat_template_kwargs: {enable_thinking: false}` (config `nemotron.thinking: false`). Same model, same
+prompt/schema, 20 labelled cloud-style utterances (objects, free phrasing, context, off-topic, "drop it"):
+
+| Nemotron-3-Nano-30B-A3B | median | p90 | max | accuracy |
+|---|---|---|---|---|
+| thinking ON (old behavior) | 1.50 s | 2.28 s | 4.27 s | 18/20 |
+| **thinking OFF (new default)** | **0.44 s** | **0.54 s** | **0.61 s** | **19/20** |
+
+The only OFF miss ("turn the base left 20 degrees" -> jog instead of joint_jog) never reaches the cloud in practice:
+the local fast path parses joint jogs first. Set `nemotron.thinking: true` to restore the old behavior.

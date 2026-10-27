@@ -84,6 +84,7 @@ nemotron:
   # hackathon: Pranav keeps Nemotron as the default (2026-10-24). Most commands never reach the cloud anyway
   # (instant local fast path). For a faster practice run: model: Qwen/Qwen3-30B-A3B-Instruct-2507
   model: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B
+  thinking: false  # Nemotron reasoning off: 4x faster, 19/20 vs 18/20 (2026-10-26 bench, docs/VOICE.md)
   timeout_s: 12.0  # client timeout for the cloud call (Nemotron p90 was ~10 s on 2026-10-23); on timeout the app
                    # says "Sorry, I didn't catch that in time"
 

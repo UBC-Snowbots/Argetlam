@@ -45,7 +45,8 @@ _POSE_ALIASES = {"stow": "base", "rest": "base", "base": "base", "ready": "ready
 
 
 class IntentParser:
-    def __init__(self, model: str, base_url: str, api_key_env: str = "NEBIUS_API_KEY", timeout_s: float = 6.0):
+    def __init__(self, model: str, base_url: str, api_key_env: str = "NEBIUS_API_KEY", timeout_s: float = 6.0,
+                 thinking: bool = False):
         self.model = model
         self.timeout_s = timeout_s
         key = os.environ.get(api_key_env)
@@ -53,6 +54,9 @@ class IntentParser:
         if key:
             from openai import OpenAI
             self.client = OpenAI(base_url=base_url, api_key=key, timeout=timeout_s)
+        # Nemotron-3-Nano is a reasoning model: with thinking on it writes ~200-850 hidden tokens before the JSON.
+        # Off (2026-10-26 bench, 20 cloud utterances): median 1.50 -> 0.44 s, p90 2.28 -> 0.54 s, 18/20 -> 19/20.
+        self.extra_body = {} if thinking else {"chat_template_kwargs": {"enable_thinking": False}}
 
     @property
     def online(self) -> bool:
@@ -78,6 +82,7 @@ class IntentParser:
                           {"role": "user", "content": text}],
                 response_format={"type": "json_schema",
                                  "json_schema": {"name": "intent", "schema": Intent.model_json_schema()}},
+                extra_body=self.extra_body,
             )
         except Exception as e:  # a timeout (the client's timeout_s) must not hang the loop or sound like an error
             if "timeout" in type(e).__name__.lower():

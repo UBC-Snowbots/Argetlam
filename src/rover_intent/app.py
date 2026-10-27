@@ -83,7 +83,8 @@ def build(cfg: dict, backend: str):
         retarget = PlaneMapper(arm, home, cfg.get("plane"), cfg["safety"]["workspace_min"],
                                cfg["safety"]["workspace_max"], wrist_roll_cfg=wrist_roll_cfg)
     n = cfg["nemotron"]
-    parser = IntentParser(n["model"], n["base_url"], n["api_key_env"], timeout_s=float(n.get("timeout_s", 6.0)))
+    parser = IntentParser(n["model"], n["base_url"], n["api_key_env"], timeout_s=float(n.get("timeout_s", 6.0)),
+                          thinking=bool(n.get("thinking", False)))
     return arm, safety, robot, scene, arbiter, retarget, parser
 
 
