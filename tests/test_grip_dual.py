@@ -190,3 +190,19 @@ def test_config_resolution_default_and_alias():
     assert build(c2, "mock")[4].grip_sources == {"eeg"}            # alias false -> Muse/eeg only
     c3 = {**cfg, "gripper": {"sources": ["hand"]}}
     assert build(c3, "mock")[4].grip_sources == {"hand"}           # explicit sources win
+
+
+def test_default_config_clench_works_in_hold():
+    """Since 2026-10-27 the shipped config lets a Muse clench open/close the gripper while the clutch is released
+    (tracking blinks in body + Muse sessions dropped 9/10 clenches); the arm stays in HOLD."""
+    from rover_intent.app import build
+    from rover_intent.config import load_config
+    from rover_intent.control.arbiter import Mode
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[1]
+    a = build(load_config(str(root / "configs/default.yaml")), "mock")[4]
+    assert a.grip_toggle_in_hold is True and a.mode == Mode.HOLD
+    a.on_grip_toggle(None)
+    assert a.gripper == 1.0 and a.mode == Mode.HOLD
+    a.on_grip_toggle(None)
+    assert a.gripper == 0.0

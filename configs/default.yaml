@@ -107,7 +107,10 @@ eeg:
   p_on: 0.7      # p_grasp above this -> close (after hold_s)
   p_off: 0.3     # below this -> open
   hold_s: 0.5
-  grip_toggle_in_hold: false   # true = a Muse double clench also opens/closes the gripper in HOLD (Muse-only tests)
+  grip_toggle_in_hold: true    # a Muse double clench also opens/closes the gripper in HOLD (arm still, clutch released).
+                               # ON by default since 2026-10-27: in body + Muse sessions the clutch drops whenever
+                               # tracking blinks, and with this off every clench in those gaps was ignored (replay of
+                               # the 25 Oct session: 9/10 lost; on: 6/6). The arm still freezes; only the gripper moves.
   grip_auto_open_s: 0.0        # > 0 = (with grip_toggle_in_hold) a clench closes the gripper, it reopens after this
 
 assist:
