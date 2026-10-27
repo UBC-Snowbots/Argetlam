@@ -49,3 +49,16 @@ scene:  # pos = grasp point (TCP target); objects stand on the arm's surface (z 
   cup:    {pos: [0.45, 0.20, 0.055], height: 0.09, radius: 0.035, mass: 0.15, shape: cylinder, desc: "short red cup"}
   bottle: {pos: [0.45, -0.20, 0.185], height: 0.22, radius: 0.035, mass: 0.50, shape: cylinder, desc: "tall blue bottle"}
   block:  {pos: [0.56, 0.00, 0.035], height: 0.05, radius: 0.025, mass: 0.10, shape: box, desc: "small yellow cube"}
+
+# Rover camera DIGITAL TWIN mounts (dev_arm, table top z = 0). Pose + intrinsics live here so the SIM
+# camera matches the real one by editing config; shared defaults/models/real-ingest are in default.yaml.
+# Pick a mount with camera.mount (default rover_front, set in default.yaml). Isaac renders a
+# PinholeCameraCfg at the resolved pose (sim/isaac_bridge.py --sim-cam) and the perception path builds the
+# same PinholeCamera. Only used when perception.source: camera. All poses are in the arm base frame (m).
+camera:
+  z_table: 0.0                # table plane for the monocular table-plane lift (defaults to table.top)
+  mounts:
+    rover_front: {eye: [-0.35, -0.35, 0.80], look_at: [0.50, 0.00, 0.00]}  # high behind-left, over the table
+    rover_mast:  {eye: [-0.20,  0.00, 1.10], look_at: [0.52, 0.00, 0.00]}  # on a mast behind the base, steeper
+    overhead:    {eye: [ 0.50,  0.00, 1.35], look_at: [0.50, 0.00, 0.00]}  # near top-down over the reach box
+    side:        {eye: [ 0.50, -0.85, 0.55], look_at: [0.50, 0.00, 0.05]}  # off to the right, low oblique

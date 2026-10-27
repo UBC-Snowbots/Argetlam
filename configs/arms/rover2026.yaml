@@ -41,3 +41,13 @@ scene:  # pos = grasp point (TCP target) in the arm base frame; objects stand on
   cup:    {pos: [0.50, 0.18, 0.175], height: 0.09, radius: 0.035, mass: 0.15, shape: cylinder, desc: "short red cup"}
   bottle: {pos: [0.50, -0.18, 0.305], height: 0.22, radius: 0.035, mass: 0.50, shape: cylinder, desc: "tall blue bottle"}
   block:  {pos: [0.64, 0.00, 0.155], height: 0.05, radius: 0.025, mass: 0.10, shape: box, desc: "small yellow cube"}
+
+# Rover camera DIGITAL TWIN mounts (rover2026: on the floor, raised table top z = 0.12), see dev_arm.yaml.
+# Only used when perception.source: camera.
+camera:
+  z_table: 0.12
+  mounts:
+    rover_front: {eye: [-0.30, -0.35, 0.95], look_at: [0.55, 0.00, 0.12]}
+    rover_mast:  {eye: [-0.15,  0.00, 1.25], look_at: [0.58, 0.00, 0.12]}
+    overhead:    {eye: [ 0.58,  0.00, 1.55], look_at: [0.58, 0.00, 0.12]}
+    side:        {eye: [ 0.58, -0.95, 0.70], look_at: [0.58, 0.00, 0.15]}

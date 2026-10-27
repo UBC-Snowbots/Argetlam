@@ -103,3 +103,41 @@ def render_scene_view(cam: PinholeCamera, lib: dict, layout: dict, z_table: floa
             cv2.fillConvexPoly(img, quad, shade)
         cv2.fillConvexPoly(img, tpx, col)  # top cap
     return img
+
+
+def render_aruco_scene(cam, layout: dict, marker_map: dict, z_table: float, marker_len: float = 0.04,
+                       dictionary: str = "DICT_4X4_50", bg=255):
+    """Render ArUco markers lying FLAT on the table at each object's footprint, as the camera sees them.
+
+    `layout` = {object_name: (x, y)}; `marker_map` = {marker_id: object_name} (inverted to place the
+    right id at each object).  Each marker is a `marker_len`-side square centred on (x, y) at z_table,
+    warped into the image by the camera's own projection (a planar homography).  Used by the ArUco
+    detector eval / tests so the full detect -> table-plane path runs with no physical camera or Isaac.
+    Returns an HxWx3 uint8 RGB image.  OpenCV, lazy-imported.
+    """
+    import cv2
+    name_to_id = {v: k for k, v in marker_map.items()}
+    img = np.full((cam.height, cam.width, 3), bg, np.uint8)
+    aru = cv2.aruco
+    d = aru.getPredefinedDictionary(getattr(aru, dictionary))
+    gen = 200
+    src = np.array([[0, 0], [gen - 1, 0], [gen - 1, gen - 1], [0, gen - 1]], np.float32)
+    # paint far-to-near so a nearer marker overwrites a farther one (crude occlusion)
+    order = sorted(layout, key=lambda n: -float(np.linalg.norm(cam.center()[:2] - np.asarray(layout[n]))))
+    for name in order:
+        mid = name_to_id.get(name)
+        if mid is None:
+            continue
+        x, y = layout[name]
+        h = marker_len / 2.0
+        corners3d = np.array([[x - h, y + h, z_table], [x + h, y + h, z_table],
+                              [x + h, y - h, z_table], [x - h, y - h, z_table]])
+        px = cam.project(corners3d).astype(np.float32)
+        marker = cv2.cvtColor(aru.generateImageMarker(d, int(mid), gen), cv2.COLOR_GRAY2BGR)
+        H, _ = cv2.findHomography(src, px)
+        if H is None:
+            continue
+        warp = cv2.warpPerspective(marker, H, (cam.width, cam.height), borderValue=(bg, bg, bg))
+        mask = cv2.warpPerspective(np.full((gen, gen), 255, np.uint8), H, (cam.width, cam.height))
+        img[mask > 127] = warp[mask > 127]
+    return img

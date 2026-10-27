@@ -16,6 +16,7 @@ error if a non-zero distortion is set and cv2 is missing.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import numpy as np
 
@@ -177,3 +178,83 @@ def look_at(eye, target, up=(0, 0, 1)) -> tuple[np.ndarray, np.ndarray]:
     R_cw = R_wc.T
     t_cw = -R_cw @ eye
     return R_cw, t_cw
+
+
+def quat_to_R(quat) -> np.ndarray:
+    """Unit quaternion (x, y, z, w) -> 3x3 rotation matrix (camera->base, i.e. R_wc)."""
+    x, y, z, w = np.asarray(quat, float).reshape(4)
+    n = np.linalg.norm([x, y, z, w])
+    if n < 1e-12:
+        return np.eye(3)
+    x, y, z, w = x / n, y / n, z / n, w / n
+    return np.array([
+        [1 - 2 * (y * y + z * z), 2 * (x * y - z * w),     2 * (x * z + y * w)],
+        [2 * (x * y + z * w),     1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+        [2 * (x * z - y * w),     2 * (y * z + x * w),     1 - 2 * (x * x + y * y)],
+    ])
+
+
+def camera_from_config(cam_cfg: dict, z_table_default: float = 0.0) -> tuple["PinholeCamera", float]:
+    """Build a PinholeCamera from an arm-profile `camera:` block, so the SIM camera is a 1:1 DIGITAL
+    TWIN of the real one: choose WHERE it sits (a named mount) and WHICH camera it is (a model's
+    intrinsics, or a real calibration), by editing one config.  Returns (camera, z_table).
+
+    POSE (camera optical centre + orientation in the arm base / rover frame).  Resolved in order:
+      * an explicit eye + look_at (+ up, default +z), or pos + quat (x, y, z, w) in the block; else
+      * a named mount: `mount: <name>` picks `mounts[<name>]` (its own eye/look_at or pos/quat).
+    OpenCV optical frame throughout: +z forward into the scene, +x right, +y down.
+
+    INTRINSICS.  Resolved in order:
+      * `calib: <file>` - a ChArUco calibration YAML (calibration.py output): real K + distortion (the
+        truest digital twin once the real camera exists); or
+      * explicit fx + fy (+ cx, cy); or
+      * `model: <name>` from a `models:` table (width/height/hfov_deg of a known camera); or
+      * the block's own width/height/hfov_deg (default 640x480, 60 deg).
+    width/height in the block OVERRIDE a model's (to render/undistort at a different resolution).
+    Omniverse's pinhole assumes square pixels + a centred principal point; a real K that differs is
+    captured in `calib` and the real frames are undistorted/rectified to it (docs/PERCEPTION.md).
+    """
+    c = dict(cam_cfg)
+    # --- pose: explicit wins, else the named mount --------------------------------------------------
+    pose = {k: c[k] for k in ("eye", "look_at", "up", "pos", "quat") if c.get(k) is not None}
+    if "look_at" not in pose and "quat" not in pose and c.get("mount"):
+        m = (c.get("mounts") or {}).get(c["mount"])
+        if m is None:
+            raise ValueError(f"camera.mount {c['mount']!r} not in camera.mounts {list(c.get('mounts', {}))}")
+        for k in ("eye", "look_at", "up", "pos", "quat"):
+            if m.get(k) is not None:
+                pose.setdefault(k, m[k])
+    # --- intrinsics: calib > explicit fx/fy > model > block defaults --------------------------------
+    W, H = int(c.get("width") or 0), int(c.get("height") or 0)  # null/0 -> fall back to model / default
+    dist = np.zeros(5)
+    if c.get("calib"):
+        from .calibration import load_calibration
+        root = Path(__file__).resolve().parents[3]
+        cp = Path(c["calib"])
+        cam_cal, _ = load_calibration(cp if cp.is_absolute() else root / cp)
+        K, dist = cam_cal.K, cam_cal.dist
+        W, H = W or cam_cal.width, H or cam_cal.height
+    elif "fx" in c and "fy" in c:
+        W, H = W or 640, H or 480
+        K = np.array([[float(c["fx"]), 0, float(c.get("cx", W / 2))],
+                      [0, float(c["fy"]), float(c.get("cy", H / 2))], [0, 0, 1.0]])
+    else:
+        model = (c.get("models") or {}).get(c.get("model")) if c.get("model") else None
+        hfov = float((model or {}).get("hfov_deg", c.get("hfov_deg", 60.0)))
+        W = W or int((model or {}).get("width", 640))
+        H = H or int((model or {}).get("height", 480))
+        K = intrinsics_from_fov(W, H, hfov)
+    # --- extrinsics ---------------------------------------------------------------------------------
+    if pose.get("look_at") is not None:
+        eye = pose.get("eye", pose.get("pos"))
+        if eye is None:
+            raise ValueError("camera look_at needs an eye/pos (directly or from the mount)")
+        R_cw, t_cw = look_at(eye, pose["look_at"], pose.get("up", (0, 0, 1)))
+    elif pose.get("quat") is not None:
+        R_cw = quat_to_R(pose["quat"]).T
+        eye = np.asarray(pose.get("pos", pose.get("eye", (0, 0, 0))), float)
+        t_cw = -R_cw @ eye
+    else:
+        raise ValueError("camera config needs look_at(+eye) or quat(+pos), directly or via camera.mount")
+    cam = PinholeCamera(K=K, dist=dist, R_cw=R_cw, t_cw=t_cw, width=int(W), height=int(H))
+    return cam, float(c.get("z_table", z_table_default))

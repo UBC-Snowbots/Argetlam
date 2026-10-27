@@ -145,3 +145,14 @@ real_arm:
   # limits file exists (configs/arms/dev_arm_real_ee.yaml, from scripts/bench/ee_limits.py) AND this is true or the
   # follower is launched with --ee. Default false: end_effector stays 0 everywhere until the gripper is marked.
   ee: false
+
+# Rover camera DIGITAL TWIN mounts for the real dev_arm. SAME mounts as dev_arm.yaml; measure the REAL
+# mount pose and replace the chosen one, and set camera.calib (a ChArUco calibration, docs/PERCEPTION.md)
+# or camera.model to the real camera's intrinsics. Only used when perception.source: camera.
+camera:
+  z_table: 0.0
+  mounts:
+    rover_front: {eye: [-0.35, -0.35, 0.80], look_at: [0.50, 0.00, 0.00]}
+    rover_mast:  {eye: [-0.20,  0.00, 1.10], look_at: [0.52, 0.00, 0.00]}
+    overhead:    {eye: [ 0.50,  0.00, 1.35], look_at: [0.50, 0.00, 0.00]}
+    side:        {eye: [ 0.50, -0.85, 0.55], look_at: [0.50, 0.00, 0.05]}

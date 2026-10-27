@@ -40,6 +40,8 @@ class Detection:
     px_err_cm: float     # estimated spatial error from ~loc_noise_px detector localisation noise (cm)
     bbox: tuple[float, float, float, float]  # u0, v0, u1, v1
     in_workspace: bool
+    source: str = ""     # which detector produced this ("ground_truth", "aruco", "owlv2", "gdino")
+    centroid_px: tuple[float, float] | None = None  # pixel centroid (u, v); set by the detector that found it
 
 
 def _bottom_center(bbox) -> np.ndarray:
