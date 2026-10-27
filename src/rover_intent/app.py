@@ -66,7 +66,16 @@ def build(cfg: dict, backend: str):
         robot = RealArm()
     scene = Scene(cfg["scene"], support_z=cfg.get("table", {}).get("top", 0.0))
     e, s = cfg["eeg"], cfg["assist"]
-    arbiter = Arbiter(scene, e["p_on"], e["p_off"], e["hold_s"], s["radius"], s["gain"])
+    # Gripper sources. gripper.sources wins when present; otherwise fall back to the backward-compatible alias
+    # body.grip_from_hand (true -> hand + Muse/eeg, false -> Muse/eeg only). The Muse toggle path ("eeg") is an
+    # event, so it stays available unless sources explicitly drops it.
+    g = cfg.get("gripper", {}) or {}
+    if g.get("sources") is not None:
+        grip_sources = list(g["sources"])
+    else:
+        grip_sources = ["hand", "eeg"] if cfg["body"].get("grip_from_hand", False) else ["eeg"]
+    arbiter = Arbiter(scene, e["p_on"], e["p_off"], e["hold_s"], s["radius"], s["gain"],
+                      grip_sources=grip_sources, coalesce_s=float(g.get("coalesce_s", 0.6)))
     arbiter.grip_toggle_in_hold = bool(e.get("grip_toggle_in_hold", False))   # Muse-only tests (no body teleop)
     arbiter.grip_auto_open_s = float(e.get("grip_auto_open_s", 0.0))          # >0: clench-close reopens after this
     arbiter.z_max = cfg["safety"]["workspace_max"][2] - 0.005
@@ -123,7 +132,7 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
         need = [n for n in (intent.object, intent.reference) if n and n in scene.objects]
         return [n for n in need if not perception.tracker.seen(n, now)]
     home = np.array(cfg["arm"]["home"], float)
-    grip_from_hand = cfg["body"].get("grip_from_hand", False)
+    grip_from_hand = "hand" in arbiter.grip_sources   # resolved from gripper.sources / body.grip_from_hand in build()
     teleop_orient = cfg["arm"].get("teleop_orient", "full")  # "axis" frees the wrist roll while teleoperating (issue 2)
     arm_mirror_on = isinstance(retarget, ArmMirror)   # full-arm joint mirroring: joints straight in, no IK
     plane_on = isinstance(retarget, PlaneMapper)      # image-plane TCP teleop (IK path); left-hand clutch disabled
@@ -707,8 +716,9 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
                     rep["busy"] = True
                 rx.reply(addr, rep)
             elif isinstance(msg, GripToggle):
-                arbiter.on_grip_toggle(None if plain_gripper else arm.fk(robot.read_joints())[:3, 3])
-                log.info("grip toggle (%s) in %s: gripper=%.0f", msg.source, arbiter.mode.value, arbiter.gripper)
+                arbiter.on_grip_toggle(None if plain_gripper else arm.fk(robot.read_joints())[:3, 3], now=t0)
+                log.info("grip toggle (%s) in %s: gripper=%.0f src=%s clashes=%d", msg.source, arbiter.mode.value,
+                         arbiter.gripper, arbiter.grip_source, arbiter.grip_clashes)
             elif isinstance(msg, RealJoints):
                 # one sample of the PHYSICAL arm (real_to_sim). Stamp it with the VM receive time (the shared clock),
                 # not the payload's t. Recorded above like every other inbound message.
@@ -758,7 +768,10 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
                 last_query_t, follower_ever = t0, True  # the follower polls here: drives the real_following light
                 rx.reply(addr, {"kind": "state", "mode": arbiter.mode.value, "held": arbiter.held,
                                 "clutch": clutch.state, "assist": arbiter.assist, "mapping": type(retarget).__name__,
-                                "gripper": arbiter.gripper, "tcp": np.round(arm.fk(q_cmd)[:3, 3], 4).tolist(),
+                                "gripper": arbiter.gripper, "grip_source": arbiter.grip_source,
+                                "grip_clashes": arbiter.grip_clashes,
+                                "gripper_meas": getattr(robot, "gripper_meas", None),
+                                "tcp": np.round(arm.fk(q_cmd)[:3, 3], 4).tolist(),
                                 "tcp_meas": np.round(arm.fk(robot.read_joints())[:3, 3], 4).tolist(),
                                 "q_meas": np.round(robot.read_joints(), 4).tolist(),
                                 "plan_left": len(arbiter._plan), "table_top": scene.support_z,
@@ -824,8 +837,9 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
             log.info("arbiter: %s", s)
         arbiter.say_log.clear()
         if grip != last_grip:
-            log.info("gripper %s (%.0f -> %.0f) in %s%s", "CLOSE" if grip > last_grip else "OPEN",
-                     last_grip, grip, arbiter.mode.value, f", holding {arbiter.held}" if arbiter.held else "")
+            log.info("gripper %s (%.0f -> %.0f) in %s via %s%s", "CLOSE" if grip > last_grip else "OPEN",
+                     last_grip, grip, arbiter.mode.value, arbiter.grip_source or "?",
+                     f", holding {arbiter.held}" if arbiter.held else "")
             last_grip = grip
         while arbiter.events:
             if arbiter.events.pop(0) == "assist_done" and clutch.state == "following":
@@ -930,7 +944,9 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
                 preset_progress = round(min(1.0, max(0.0, done / span_q)), 2) if span_q > 1e-6 else 1.0
             st = {"kind": "status", "mode": arbiter.mode.value, "tcp": np.round(tcp, 3).tolist(),
                   "target": None if ghost is None else np.round(ghost, 3).tolist(), "ghost": ghost_state,
-                  "clipped": ghost_bad, "grip": grip, "clutch": clutch.state, "trigger": clutch.trigger, "release_reason": clutch.release_reason,
+                  "clipped": ghost_bad, "grip": grip, "grip_source": arbiter.grip_source,
+                  "grip_clashes": arbiter.grip_clashes, "gripper_meas": getattr(robot, "gripper_meas", None),
+                  "clutch": clutch.state, "trigger": clutch.trigger, "release_reason": clutch.release_reason,
                   "clutch_progress": round(clutch.progress, 2), "ws_min": safety.ws_min.tolist(), "ws_max": safety.ws_max.tolist(),
                   "echo_seq": last_body.seq if last_body else None, "echo_t": last_body.t if last_body else None,
                   "echo_age": round(t0 - last_body_arrival, 4) if last_body else None,

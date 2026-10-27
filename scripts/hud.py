@@ -186,7 +186,8 @@ def main():
             cv.create_rectangle(0, 0, W, 44, fill="#333a44", width=0)
             cv.create_text(12, 22, text="BODY TELEOP OFF  (no body client)", anchor="w", fill="white",
                            font=("Helvetica", 15, "bold"))
-            cv.create_text(20, 66, anchor="w", text="gripper CLOSED" if grip >= 0.5 else "gripper open",
+            gsrc = f" ({m['grip_source']})" if m.get("grip_source") else ""
+            cv.create_text(20, 66, anchor="w", text=("gripper CLOSED" if grip >= 0.5 else "gripper open") + gsrc,
                            fill="#ffd166" if grip >= 0.5 else "#8892a0", font=("Helvetica", 13))
             if m.get("say"):
                 cv.create_text(W - 20, 66, anchor="e", fill="#8892a0", font=("Helvetica", 11),
@@ -237,8 +238,10 @@ def main():
         cv.create_oval(24, 346, 44, 366, fill=C.get(g, "#777777"), width=0)
         cv.create_text(54, 356, text=f"ghost: {gtxt}", anchor="w", fill="white", font=("Helvetica", 13))
         grip = m.get("grip") or 0
-        cv.create_text(W - 20, 356, text="gripper CLOSED" if grip >= 0.5 else "gripper open", anchor="e",
-                       fill="#ffd166" if grip >= 0.5 else "#8892a0", font=("Helvetica", 13))
+        gsrc = f" ({m['grip_source']})" if m.get("grip_source") else ""
+        clash = f"  clashes {m['grip_clashes']}" if m.get("grip_clashes") else ""
+        cv.create_text(W - 20, 356, text=("gripper CLOSED" if grip >= 0.5 else "gripper open") + gsrc + clash,
+                       anchor="e", fill="#ffd166" if grip >= 0.5 else "#8892a0", font=("Helvetica", 13))
         # plane live-tuning: compact knob line (reach state + gains/thresholds)
         rl = reach_status_line(m)
         if rl:

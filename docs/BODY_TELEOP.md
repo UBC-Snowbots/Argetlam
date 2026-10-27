@@ -11,8 +11,34 @@ two modes, set by `body.mode` in the config:
 
 Both modes are *relative / clutched*: on engage the app anchors at the current pose so there is no jump, then follows
 your motion. Engage with **F**, an open palm held up ~1 s, or a raised left hand (plane uses the left hand for reach,
-so there it is F / palm only). Both use a plain open/close gripper driven by your hand (`grip_from_hand`), with no
-AUTO grab-assist.
+so there it is F / palm only). Both use a plain open/close gripper (no AUTO grab-assist) driven by two sources at
+once - see the gripper section below.
+
+## Gripper: two sources at once (hand + Muse)
+
+The gripper receiver takes BOTH a hand source and a Muse source and merges them into one state, **last event wins**:
+
+- **Hand** (`gripper.sources` includes `hand`; `body.grip_from_hand` is the backward-compatible alias): the hand
+  feeds **edge** events. A debounced **open -> fist** transition is a **CLOSE**; **fist -> open** is an **OPEN**. The
+  openness is EMA-smoothed, sits in a 0.30 / 0.65 dead band, and the new posture must be held `HAND_HOLD_S` (0.6 s)
+  before the edge fires (so flicker never spams). Because it is an edge and not a level, **a held fist no longer
+  re-closes the gripper after the Muse (or a voice command) has opened it** - it stays open until you actually open
+  your hand and make a fist again.
+- **Muse** (`gripper.sources` includes `eeg`): a double jaw clench sends a one-shot `GripToggle` that **flips** the
+  current state. (The EEG motor-imagery `p_grasp` decoder is the same source.)
+
+Restrict with `gripper.sources: [hand]` or `[eeg]`. The app records which source made the last change and shows it
+everywhere: the HUD reads "gripper CLOSED (muse)" / "(hand)", and the Query state / status carry `grip_source`.
+
+**Clash policy** (`gripper.coalesce_s`, default 0.6 s) stops the two sources fighting when they land together: a Muse
+toggle within the window **after** a hand edge is read relative to the state **before** that edge, so a fist plus a
+near-simultaneous clench is one CLOSE, never a CLOSE then a flip back to open; a hand edge after a Muse toggle that
+already reached the same state is a no-op; two **opposite** intents inside the window are a logged **clash** (both
+sources named) where the later event wins; outside the window everything is normal. The clash count is in the status,
+the Query state, and the logs.
+
+Assisted grab/release (fist near an object -> AUTO pick) still applies only in the non-plain modes where it is
+reachable; it is unchanged by the dual-source merge.
 
 ## Removed (2026-10-24)
 

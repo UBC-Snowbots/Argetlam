@@ -362,7 +362,11 @@ while app.is_running():
     for n, o in objects.items():
         p = o.data.root_pos_w.torch[0].tolist()
         objs[n] = [p[0], p[1], p[2] - heights[n] / 2]  # bottom (on the table: table_top)
-    tx.sendto(json.dumps({"q": q, "objects": objs, "cam": current_cam}).encode(), state_addr)
+    # measured gripper 0 open .. 1 closed: mean finger position / stroke, so the control side can check the sim
+    # fingers actually reached the commanded open/close (scripts/replay_session.py, scripts/grip_scenarios.py)
+    g_meas = float(np.clip(np.mean(robot.data.joint_pos.torch[0, finger_ids].tolist()) / STROKE, 0.0, 1.0)) \
+        if STROKE else None
+    tx.sendto(json.dumps({"q": q, "objects": objs, "cam": current_cam, "g": g_meas}).encode(), state_addr)
     if cam_streamer is not None:   # stream the perception camera at its own rate (CameraFrame -> app)
         try:
             cam_streamer.step(t_sim, objs)

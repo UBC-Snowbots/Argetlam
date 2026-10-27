@@ -34,6 +34,7 @@ class MockArm(ArmBackend):
     def __init__(self, q0):
         self.q = np.array(q0, float)
         self.gripper = 0.0
+        self.gripper_meas = 0.0   # measured gripper 0 open .. 1 closed; mock tracks the command perfectly
 
     def read_joints(self):
         return self.q.copy()
@@ -41,6 +42,7 @@ class MockArm(ArmBackend):
     def command(self, q, gripper, ghost=None, ghost_bad=False, ghost_state=None, vtarget=None):
         self.q = np.array(q, float)
         self.gripper = float(gripper)
+        self.gripper_meas = float(gripper)
 
     def reset(self, q_home):
         self.q, self.gripper = np.array(q_home, float), 0.0
@@ -62,7 +64,8 @@ class IsaacArm(ArmBackend):
         self.objects: dict[str, list[float]] = {}
         self.camera: dict | None = None      # Isaac viewport camera {"eye", "target"} (for the calibration frame)
         self.connected = False
-        self._ignore_until = 0.0
+        self.gripper_meas: float | None = None   # measured gripper 0 open .. 1 closed from the bridge ("g"); None
+        self._ignore_until = 0.0                 # until the bridge reports it (older bridges do not -> stays None)
 
     def read_joints(self):
         while True:
@@ -74,6 +77,8 @@ class IsaacArm(ArmBackend):
                 continue  # pre-reset states still in flight: drop them
             self.q = np.array(msg["q"], float)
             self.objects = msg.get("objects", self.objects)
+            if msg.get("g") is not None:
+                self.gripper_meas = float(msg["g"])
             if msg.get("cam", {}).get("eye"):
                 self.camera = msg["cam"]
             self.connected = True
