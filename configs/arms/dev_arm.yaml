@@ -62,3 +62,7 @@ camera:
     rover_mast:  {eye: [-0.20,  0.00, 1.10], look_at: [0.52, 0.00, 0.00]}  # on a mast behind the base, steeper
     overhead:    {eye: [ 0.50,  0.00, 1.35], look_at: [0.50, 0.00, 0.00]}  # near top-down over the reach box
     side:        {eye: [ 0.50, -0.85, 0.55], look_at: [0.50, 0.00, 0.05]}  # off to the right, low oblique
+    top_down:    {eye: [ 0.52,  0.00, 1.60], look_at: [0.50, 0.00, 0.00]}  # straight down over the reach box
+    side_left:   {eye: [ 0.50,  0.85, 0.55], look_at: [0.50, 0.00, 0.05]}  # off to the left, low oblique
+    side_level:  {eye: [ 0.50, -0.95, 0.22], look_at: [0.50, 0.00, 0.08]}  # right side, near table level
+    facing_arm:  {eye: [ 1.25,  0.00, 0.60], look_at: [0.40, 0.00, 0.05]}  # beyond the table, looking back at the arm

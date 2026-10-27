@@ -236,27 +236,50 @@ class RoverCameraStreamer:
         self.tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.seq, self._last_t = 0, -1e9
         self._fit_logged = False
+        self._moved = False   # set by set_mount: force one re-render + log the pose the sensor now reports
 
     def set_mount(self, mount: str) -> None:
         """Runtime mount switch: move the camera prim to the new mount's pose (Isaac-only). The prim is
-        reused, so no Isaac restart - the next frame renders from the new pose. UNTESTED in Isaac."""
+        reused, so no Isaac restart - the next frame renders from the new pose.
+        KNOWN BROKEN (live test 2026-10-27): the call raises nothing, but the sensor's pos_w and the render stay on the
+        start-up mount. Choosing camera.mount at start-up works; restart the bridge to change mounts."""
         pos, rot = resolve_mount(self.cfg, mount)
         self.mount = mount
-        try:  # Isaac Lab: set the sensor prim's world pose (fall back to a note if the API differs)
+        # Rebuild OUR pinhole model for the new mount too, so the ground-truth boxes in each frame follow the view
+        # (first live test 2026-10-27: the label changed but boxes and image stayed on the old mount).
+        c = dict(self.cfg["camera"])
+        c["mount"] = mount
+        for k in ("eye", "look_at", "pos", "quat"):
+            c.pop(k, None)
+        self._cam, self.z_table = camera_from_config(c, z_table_default=self.cfg.get("table", {}).get("top", 0.0))
+        m = (self.cfg["camera"].get("mounts") or {}).get(mount, {})
+        try:  # Isaac Lab: move the sensor prim (eye/look_at mounts use the look-at API directly)
             import torch
-            p = torch.tensor([pos], dtype=torch.float32)
-            q = torch.tensor([wxyz_to_xyzw(rot)], dtype=torch.float32)   # Isaac Lab 3: (x, y, z, w)
-            self.cam.set_world_poses(p, q, convention="ros")
+            dev = getattr(self.cam, "device", "cpu")
+            if "eye" in m and "look_at" in m:
+                self.cam.set_world_poses_from_view(torch.tensor([m["eye"]], dtype=torch.float32, device=dev),
+                                                   torch.tensor([m["look_at"]], dtype=torch.float32, device=dev))
+            else:
+                p = torch.tensor([pos], dtype=torch.float32, device=dev)
+                q = torch.tensor([wxyz_to_xyzw(rot)], dtype=torch.float32, device=dev)   # Isaac Lab 3: (x,y,z,w)
+                self.cam.set_world_poses(p, q, convention="ros")
         except Exception as e:  # pragma: no cover - Isaac-only
             print(f"[rover_camera] set_mount({mount}) could not move the prim ({e}); "
                   f"restart the bridge with camera.mount: {mount}", flush=True)
+        self._moved = True
 
     def step(self, t_sim: float, objects_gt: dict) -> bool:
         """If the camera period has elapsed, render + send one frame. Returns True if a frame was sent."""
         if t_sim - self._last_t < self.period:
             return False
         self._last_t = t_sim
-        self.cam.update(dt=0.0)
+        self.cam.update(dt=0.0, force_recompute=self._moved)
+        if self._moved:
+            self._moved = False
+            try:
+                print(f"[rover_camera] mount {self.mount}: sensor pos_w={self.cam.data.pos_w[0].tolist()}", flush=True)
+            except Exception:
+                pass
         out = self.cam.data.output
         rgb = out["rgb"][0].cpu().numpy() if hasattr(out["rgb"], "cpu") else np.asarray(out["rgb"])[0]
         depth = None
