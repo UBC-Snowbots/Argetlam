@@ -38,10 +38,24 @@ class Mode(str, Enum):
 class Arbiter:
     def __init__(self, scene: Scene, eeg_on: float = 0.7, eeg_off: float = 0.3, eeg_hold_s: float = 0.5,
                  assist_radius: float = 0.08, assist_gain: float = 0.6, waypoint_tol: float = 0.01,
-                 waypoint_timeout: float = 8.0):
+                 waypoint_timeout: float = 8.0, grip_sources=("hand", "eeg"), coalesce_s: float = 0.6):
         self.scene = scene
         self.mode = Mode.HOLD
         self.gripper = 0.0
+        # Dual-source gripper: both the hand (EDGE events: open->fist = CLOSE, fist->open = OPEN) and the Muse
+        # (one-shot GripToggle = FLIP) feed one gripper state, LAST EVENT WINS. grip_source records who made the
+        # last change ("hand" / "muse" / "eeg" / "voice" / "skill"); grip_sources restricts which inputs are live
+        # (gripper.sources config; body.grip_from_hand is a backward-compatible alias for including "hand").
+        self.grip_sources = set(grip_sources)
+        self.grip_source: str | None = None
+        self.coalesce_s = float(coalesce_s)        # gripper.coalesce_s: window in which hand + Muse are reconciled
+        self.grip_clashes = 0                      # count of opposite-intent cross-source events inside the window
+        self.grip_clash_log: list[tuple] = []      # (t, earlier_source, winner_source, direction)
+        self._grip_event_t: float | None = None    # time of the last hand/Muse gripper event
+        self._grip_event_dir: str | None = None     # "close" / "open" of that event
+        self._grip_event_src: str | None = None     # "hand" / "muse" of that event
+        self._grip_before = 0.0                     # gripper state just BEFORE the last event (for the coalescing rule)
+        self._hand_state: str | None = None         # debounced hand posture: "fist" / "open" / None (unknown)
         self.grip_toggle_in_hold = False   # eeg.grip_toggle_in_hold: a clench also opens/closes the gripper in HOLD
         self.grip_auto_open_s = 0.0        # eeg.grip_auto_open_s: > 0 = a clench-closed gripper (HOLD) reopens after this
         self._auto_open_at: float | None = None
@@ -85,12 +99,13 @@ class Arbiter:
         elif a == Action.reset:
             self.mode, self._plan, self._wp_since, self._wp_started, self.assist = Mode.HOLD, [], None, None, False
             self.gripper, self.held, self._eeg_since, self._carrot = 0.0, None, None, None
+            self.grip_source, self._grip_event_t, self._grip_event_dir, self._grip_event_src = None, None, None, None
         elif a == Action.follow:
             self.mode, self._plan, self.assist = Mode.FOLLOW, [], False
         elif a == Action.grasp:
-            self.gripper = 1.0
+            self.gripper, self.grip_source = 1.0, "voice"
         elif a == Action.release:
-            self.gripper, self.held = 0.0, None
+            self.gripper, self.held, self.grip_source = 0.0, None, "voice"
         elif a in (Action.pick, Action.place, Action.move):
             try:
                 self._plan = plan(intent, self.scene, held=self.held)
@@ -101,7 +116,7 @@ class Arbiter:
 
     def on_eeg(self, p_grasp: float, now: float | None = None) -> None:
         """Hysteresis + dwell time so one noisy window can't drop a cup."""
-        if self.mode != Mode.FOLLOW:
+        if "eeg" not in self.grip_sources or self.mode != Mode.FOLLOW:
             return
         now = time.time() if now is None else now
         if self.eeg_off < p_grasp < self.eeg_on:
@@ -112,55 +127,81 @@ class Arbiter:
         elif self._eeg_since is None:
             self._eeg_since = now
         elif now - self._eeg_since >= self.eeg_hold_s:
-            self.gripper, self._eeg_since = want, None
+            self.gripper, self._eeg_since, self.grip_source = want, None, "eeg"
 
     def on_hand(self, hand_open: float, now: float | None = None, tcp=None, close_below: float = 0.30,
                 open_above: float = 0.65, ema_alpha: float = 0.5) -> None:
-        """Stand-in for EEG (config body.grip_from_hand). A fist / open hand must be HELD for HAND_HOLD_S (hysteresis
-        + dwell: openness flickers). The openness is EMA-smoothed first (issue 5), and the band is widened to
-        0.30/0.65 so a half-open hand stays in the dead band. Fist near an object = assisted grab; open hand while
-        holding = assisted release. The EMA resets whenever we are not FOLLOWing, so a stale value can't carry over."""
+        """Hand gripper source (config gripper.sources includes "hand"; body.grip_from_hand is the alias). The hand
+        feeds EDGE events: a debounced open->fist transition is a CLOSE event, fist->open is an OPEN event. A held
+        posture no longer re-sends its level every frame, so a sustained fist cannot fight a Muse toggle that opened
+        the gripper (it stays open until the hand opens and closes again). The debounce is unchanged: openness is
+        EMA-smoothed (issue 5), the band is 0.30/0.65 so a half-open hand sits in the dead zone, and the new posture
+        must be held HAND_HOLD_S before the edge fires. Fist near an object = assisted grab; open hand while holding =
+        assisted release. The smoothed openness and the debounced posture reset whenever we are not FOLLOWing."""
+        if "hand" not in self.grip_sources:
+            return
         if self.mode != Mode.FOLLOW:
-            self._hand_want = self._hand_since = self._hand_ema = None
+            self._hand_want = self._hand_since = self._hand_ema = self._hand_state = None
             return
         now = time.time() if now is None else now
         self._hand_ema = hand_open if self._hand_ema is None else ema_alpha * hand_open + (1 - ema_alpha) * self._hand_ema
         h = self._hand_ema
-        want = 1.0 if h < close_below else 0.0 if h > open_above else None
-        if want is None:
+        posture = "fist" if h < close_below else "open" if h > open_above else None
+        if posture is None:
             return                                   # dead band: keep any pending change
-        if want == self.gripper:
+        if posture == self._hand_state:
             self._hand_want = self._hand_since = None
             return
-        if want != self._hand_want:
-            self._hand_want, self._hand_since = want, now
+        if posture != self._hand_want:              # a new candidate posture: start the dwell
+            self._hand_want, self._hand_since = posture, now
             return
         if now - self._hand_since < HAND_HOLD_S:
             return
         self._hand_want = self._hand_since = None
-        self._commit_grip(want, tcp)
+        self._hand_state = posture                  # debounced edge confirmed
+        self._emit_hand_edge(posture, tcp, now)
 
-    def on_grip_toggle(self, tcp=None) -> None:
-        """One-shot close/open (Muse 2 double jaw clench, eeg/clench.py). The detector already debounced it, so no dwell
-        here. Same behaviour as a held fist / open hand: near an object = assisted grab; holding = assisted release."""
+    def _emit_hand_edge(self, posture: str, tcp=None, now: float | None = None) -> None:
+        """open->fist = CLOSE event, fist->open = OPEN event. The first stable posture after engaging is a baseline
+        edge too: it sets the gripper to match the hand (a fist held at engage closes, as before)."""
+        self._commit_grip(1.0 if posture == "fist" else 0.0, tcp, source="hand", now=now)
+
+    def on_grip_toggle(self, tcp=None, now: float | None = None) -> None:
+        """Muse one-shot toggle (double jaw clench, eeg/clench.py): FLIP the gripper. The detector already debounced
+        it, so no dwell here. Near an object = assisted grab; holding = assisted release. CLASH POLICY: a toggle that
+        lands within coalesce_s AFTER a hand edge is read relative to the gripper state BEFORE that hand edge, so a
+        fist (CLOSE) plus a near-simultaneous clench is one CLOSE, not a CLOSE then a flip back to open."""
+        if "eeg" not in self.grip_sources:
+            return
+        now = time.time() if now is None else now
         if self.mode == Mode.HOLD and self.grip_toggle_in_hold:
             # Muse-only test (eeg.grip_toggle_in_hold): plain open/close in place, no assisted grab, no arm motion
             self.gripper = 0.0 if self.gripper > 0.5 else 1.0
+            self.grip_source = "muse"
             self.last_say = "Gripper closed." if self.gripper > 0.5 else "Gripper open."
             self._auto_open_at = (time.time() + self.grip_auto_open_s
                                   if self.gripper > 0.5 and self.grip_auto_open_s > 0 else None)
             return
         if self.mode != Mode.FOLLOW:
             return
-        closed = self.gripper > 0.5 or self.held is not None
-        self._commit_grip(0.0 if closed else 1.0, tcp)
+        tcp_arr = None if tcp is None else np.asarray(tcp, float)
+        if tcp_arr is not None and (self.held is not None or self.grab_candidate(tcp_arr) is not None):
+            # an object in reach (or something held): assisted grab / release, unchanged (no coalescing, no clash)
+            closed = self.gripper > 0.5 or self.held is not None
+            self._commit_grip(0.0 if closed else 1.0, tcp, source="muse", now=now)
+            return
+        within_hand = (self._grip_event_t is not None and now - self._grip_event_t < self.coalesce_s
+                       and self._grip_event_src == "hand")
+        base = self._grip_before if within_hand else self.gripper
+        self._commit_grip(0.0 if base > 0.5 else 1.0, tcp, source="muse", now=now)
 
-    def _commit_grip(self, want: float, tcp=None) -> None:
+    def _commit_grip(self, want: float, tcp=None, source: str = "hand", now: float | None = None) -> None:
         tcp = None if tcp is None else np.asarray(tcp, float)
         if want == 1.0:
             o = self.grab_candidate(tcp) if tcp is not None else None
             if o is None:
-                self.gripper, self.last_say = 1.0, "Gripper closed (nothing in reach to grab)."
+                self._grip_event(1.0, source, "close", now)
+                self.last_say = "Gripper closed (nothing in reach to grab)."
                 return
             pick = plan(Intent(action=Action.pick, object=o.name), self.scene, None)
             rise = np.array([tcp[0], tcp[1], max(tcp[2], o.pos[2] + APPROACH)])   # up first: never sweep sideways low
@@ -171,7 +212,27 @@ class Arbiter:
             self._start_assist([Waypoint(tcp, 0, "open", self.held, GRIP_DWELL), Waypoint(up, 0, "retreat")],
                                f"Letting go{' of the ' + self.held if self.held else ''}.")
         else:
-            self.gripper, self.held = 0.0, None
+            self.held = None
+            self._grip_event(0.0, source, "open", now)
+
+    def _grip_event(self, target: float, source: str, direction: str, now: float | None = None) -> None:
+        """Apply one gripper event (hand edge or Muse toggle) with the coalescing clash policy. LAST EVENT WINS,
+        except inside coalesce_s: same-direction events coalesce to one (idempotent, no double action), and
+        opposite-direction cross-source events are a logged CLASH where the later event wins."""
+        now = time.time() if now is None else now
+        within = self._grip_event_t is not None and self._grip_event_dir is not None \
+            and now - self._grip_event_t < self.coalesce_s
+        if within and direction == self._grip_event_dir:
+            self.gripper, self._grip_event_t = target, now   # same intent inside the window: no-op action, keep source
+            return
+        if within and direction != self._grip_event_dir:
+            if source != self._grip_event_src:               # opposite intents, two different sources: a clash
+                self.grip_clashes += 1
+                self.grip_clash_log.append((round(now, 3), self._grip_event_src, source, direction))
+                self.last_say = f"Grip clash: {self._grip_event_src} vs {source}; {source} wins ({direction})."
+        self._grip_before = self.gripper
+        self.gripper, self.grip_source = target, source
+        self._grip_event_t, self._grip_event_dir, self._grip_event_src = now, direction, source
 
     def grab_candidate(self, tcp):
         """The object a fist would grab right now (gripper open, close enough sideways, in the height window)."""
@@ -188,11 +249,14 @@ class Arbiter:
     def _start_assist(self, wps, say):
         self._plan, self._wp_since, self._wp_started, self._carrot = wps, None, None, None
         self.mode, self.assist, self.last_say = Mode.AUTO, True, say
+        # an assist leaves FOLLOW: drop the debounced hand posture so, on hand-back, the first posture is a fresh
+        # baseline edge (a held fist/open after the assist re-arms the grab/release instead of being swallowed)
+        self._hand_want = self._hand_since = self._hand_state = None
 
     def abort(self, say: str = "") -> None:
         """Clutch released / tracking lost: stop wherever we are (an assist must not keep running)."""
         self.mode, self._plan, self._wp_since, self._wp_started, self.assist = Mode.HOLD, [], None, None, False
-        self._hand_want = self._hand_since = self._hand_ema = None   # leaving FOLLOW: drop the smoothed openness
+        self._hand_want = self._hand_since = self._hand_ema = self._hand_state = None  # leaving FOLLOW: drop hand state
         if say:
             self.last_say = say
 
@@ -203,7 +267,7 @@ class Arbiter:
         if self._auto_open_at is not None and (time.time() if now is None else now) >= self._auto_open_at:
             self._auto_open_at = None   # clench-closed gripper: open again after eeg.grip_auto_open_s
             if self.mode == Mode.HOLD and self.gripper > 0.5:
-                self.gripper, self.last_say = 0.0, "Gripper open."
+                self.gripper, self.grip_source, self.last_say = 0.0, "muse", "Gripper open."
         if self.mode == Mode.AUTO:
             if not self._plan:
                 if self.assist:   # assisted grab/release finished: hand control back to the body mapping
@@ -240,6 +304,8 @@ class Arbiter:
             reached = (np.linalg.norm(d) < self.waypoint_tol if wp.tol_xy is None
                        else np.linalg.norm(d[:2]) < wp.tol_xy and abs(d[2]) < self.waypoint_tol)
             if reached:
+                if wp.gripper != self.gripper:
+                    self.grip_source = "skill"
                 self.gripper = wp.gripper
                 if self._wp_since is None:
                     self._wp_since = now

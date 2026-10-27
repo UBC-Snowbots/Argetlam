@@ -21,6 +21,22 @@ mirroring, see docs/ARM_MIRROR.md and docs/BODY_TELEOP.md).
   the box: lateral +/-1.0 sw -> +/-0.20 m; vertical +/-0.9 sw -> +/-0.135 m. (The reach gain 0.15 only applies in
   the old `reach_mode: position`.)
 
+## Gripper: your right-hand fist/open AND the Muse, merged (2026-10-27)
+The gripper is a plain open/close here (no grab-assist) driven by two sources at once, **last event wins**:
+- your CONTROL (right) hand openness (`BodyPose.hand_open`) as an **edge**: a debounced **open -> fist closes** the
+  gripper, **fist -> open opens** it (0.30 / 0.65 band, held `HAND_HOLD_S` 0.6 s). Because it is an edge, holding a
+  fist does NOT keep re-closing: once the Muse (or a voice command) opens the gripper it stays open until you open
+  your hand and make a fist again;
+- a Muse double jaw clench (`GripToggle`) that **flips** the gripper.
+
+`gripper.sources` picks the live sources (`[hand, eeg]` default; `[hand]` or `[eeg]` to restrict; `body.grip_from_hand`
+is the old alias). `gripper.coalesce_s` (0.6 s) reconciles the two when they land together (a fist plus a clench is one
+CLOSE, not a flip back; opposite intents in the window are a logged clash, the later event wins). The HUD shows the
+source and the clash count: "gripper CLOSED (muse)" / "(hand)". Full detail in [BODY_TELEOP.md](BODY_TELEOP.md).
+
+Note the control (right) hand does double duty: its position drives lateral/vertical, its fist/open drives the
+gripper. Reach is the LEFT hand thumb (below), a separate gesture, so it never touches the gripper.
+
 ## Reach is the left thumb (joystick rate), not the hand height (2026-10-25)
 Reach used to be a rate from the left-hand HEIGHT (hand above shoulder = forward, below chest = back, a dead zone in
 between). That is replaced by a simple thumb gesture on the LEFT (reach) hand:

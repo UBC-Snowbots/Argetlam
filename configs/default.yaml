@@ -113,3 +113,12 @@ eeg:
 assist:
   radius: 0.08
   gain: 0.6
+
+gripper:                 # dual-source gripper (src/rover_intent/control/arbiter.py)
+  # Which inputs may change the gripper. Both by default: the hand (fist/open EDGE events) and the Muse / EEG (the
+  # one-shot GripToggle flip and the p_grasp decoder). Restrict with [hand] or [eeg]. If this key is omitted the
+  # arbiter falls back to the body.grip_from_hand alias (true -> [hand, eeg], false -> [eeg]).
+  sources: [hand, eeg]
+  coalesce_s: 0.6        # clash window: a hand edge and a Muse toggle landing within this of each other are
+                         # reconciled (same intent coalesces to one action; opposite intents = later wins, logged
+                         # as a clash) so a fist plus a near-simultaneous clench is one CLOSE, not a flip back to open.
