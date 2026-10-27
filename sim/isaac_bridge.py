@@ -35,10 +35,15 @@ parser.add_argument("--dt", type=float, default=1 / 120, help="physics step (s)"
 parser.add_argument("--view", default=None,
                     help="camera: behind | operator | high | top | shoulder | side | front. Live: UDP {\"view\": \"top\"}")
 parser.add_argument("--render_every", type=int, default=4, help="render once per N physics steps (4 -> 30 fps)")
+parser.add_argument("--sim-cam", dest="sim_cam", action="store_true",
+                    help="stream the rover perception camera (CameraFrame to the app) from camera.mount; "
+                         "UNTESTED in Isaac - needs --enable_cameras (set automatically here)")
 AppLauncher.add_app_launcher_args(parser)
 # One arm: CPU PhysX is far cheaper per step than the GPU pipeline (measured: GUI 1.19x vs 0.22x real time).
 parser.set_defaults(device="cpu")
 args = parser.parse_args()
+if args.sim_cam:
+    args.enable_cameras = True   # the perception camera needs the rendering pipeline (AppLauncher flag)
 app = AppLauncher(args).app
 
 import numpy as np  # noqa: E402
@@ -201,6 +206,28 @@ def reset_scene():
 
 
 reset_scene()
+
+# Rover perception camera (--sim-cam). UNTESTED in Isaac (no launch per the brief); written against the
+# Isaac Lab Camera API. Renders RGB (+depth +instance seg) at camera.mount and streams the existing
+# CameraFrame (with sim ground-truth objects + GT 2D boxes) to the app. Guarded + wrapped so a bad API
+# call or no --enable_cameras never crashes the physics loop; the bridge just runs without the camera.
+cam_streamer = None
+if getattr(args, "sim_cam", False):
+    try:
+        sys.path.insert(0, str(ROOT / "sim"))
+        import rover_camera  # noqa: E402  (sim/rover_camera.py)
+        _cam_sensor = rover_camera.build_camera(cfg, sim_utils, prim_path="/World/RoverCam")
+        try:
+            rover_camera.label_object_semantics({n: f"/World/Objects/{n}" for n in objects})
+        except Exception as _e:
+            print(f"[bridge] semantics labelling skipped ({_e}); GT boxes come from geometry", flush=True)
+        cam_streamer = rover_camera.RoverCameraStreamer(_cam_sensor, cfg)
+        print(f"[bridge] rover camera ON: mount={cfg['camera'].get('mount')} "
+              f"{cam_streamer.width}x{cam_streamer.height} -> app :{net['listen_port']}", flush=True)
+    except Exception as e:
+        print(f"[bridge] --sim-cam requested but the camera could not start ({e}); running without it", flush=True)
+        cam_streamer = None
+
 # Box-centre marker: a static white 3-axis cross at the workspace-box centre (a fixed reference in the sim view).
 neutral_mk = VisualizationMarkers(VisualizationMarkersCfg(prim_path="/Visuals/neutral", markers={
     "bar": sim_utils.CylinderCfg(radius=0.004, height=0.08, axis="Z", visual_material=sim_utils.PreviewSurfaceCfg(
@@ -256,6 +283,11 @@ while app.is_running():
                 print(f"[bridge] view -> {msg['view']}", flush=True)
             except (KeyError, TypeError):
                 print(f"[bridge] unknown view {msg['view']!r}; known: {list(VIEWS)}", flush=True)
+            continue
+        if "camera_mount" in msg:   # runtime mount switch (no Isaac restart): e.g. {"camera_mount": "overhead"}
+            if cam_streamer is not None:
+                cam_streamer.set_mount(msg["camera_mount"])
+                print(f"[bridge] camera mount -> {msg['camera_mount']}", flush=True)
             continue
         if msg.get("reset"):
             reset_scene()
@@ -320,6 +352,11 @@ while app.is_running():
         p = o.data.root_pos_w.torch[0].tolist()
         objs[n] = [p[0], p[1], p[2] - heights[n] / 2]  # bottom (on the table: table_top)
     tx.sendto(json.dumps({"q": q, "objects": objs, "cam": current_cam}).encode(), state_addr)
+    if cam_streamer is not None:   # stream the perception camera at its own rate (CameraFrame -> app)
+        try:
+            cam_streamer.step(t_sim, objs)
+        except Exception as e:
+            print(f"[bridge] camera step failed: {e}", flush=True)
     prof["io"][0] += time.time() - ts; prof["io"][1] += 1
 
     if t_sim - last_log >= 2.0:

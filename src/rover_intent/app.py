@@ -96,6 +96,32 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
     log.info("backend=%s nemotron=%s objects=%s", backend, "online" if parser.online else "OFFLINE fallback",
              scene.names())
     descriptions = {n: o.get("desc", "") for n, o in cfg["scene"].items()}
+    # Perception source: "sim" (alias "ground_truth") = Isaac ground truth / config, the existing
+    # behaviour. "camera" fills object positions from the rover camera through the perception detector
+    # (perception/): ground_truth (sim oracle) / aruco need no GPU; owlv2/gdino need a torch python. The
+    # detector runs off the control loop. A skill refuses an object the camera does not currently see.
+    perc_source = cfg.get("perception", {}).get("source", "sim")
+    perception, vpool, cam_future, cam_seq, cam_gt = None, None, None, -1, None
+    if perc_source == "camera":
+        try:
+            from .perception.source import build_from_config
+            perception = build_from_config(cfg, with_detector=True)
+            vpool = ThreadPoolExecutor(max_workers=1)
+            log.info("perception: CAMERA (detector=%s, objects from the camera); camera=%s calib=%s",
+                     cfg.get("perception", {}).get("detector", {}).get("backend", "aruco"),
+                     "profile block" if cfg.get("camera") else None, cfg["perception"].get("calib"))
+        except Exception as e:  # missing calib / torch: do not crash the control loop, fall back to sim
+            log.warning("perception: camera source requested but unavailable (%s); falling back to sim", e)
+            perc_source = "camera_unavailable"
+
+    def unseen_objects(intent):
+        """Camera mode: required objects the perception tracker does NOT currently see (fresh). Empty
+        in sim mode or when everything needed is seen."""
+        if perception is None or intent.action not in (Action.pick, Action.place, Action.move):
+            return []
+        now = time.time()
+        need = [n for n in (intent.object, intent.reference) if n and n in scene.objects]
+        return [n for n in need if not perception.tracker.seen(n, now)]
     home = np.array(cfg["arm"]["home"], float)
     grip_from_hand = cfg["body"].get("grip_from_hand", False)
     teleop_orient = cfg["arm"].get("teleop_orient", "full")  # "axis" frees the wrist roll while teleoperating (issue 2)
@@ -276,6 +302,13 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
         elif pend["kind"] == "fast":   # a voice motion / sequence the operator confirmed
             start_sequence(pend["steps"], "confirm", addr, 0.0)
         else:  # an autonomous skill the operator confirmed
+            miss = unseen_objects(pend["intent"])   # camera mode: object may have gone stale while confirming
+            if miss:
+                say = "I don't see the " + " or the ".join(miss) + " right now."
+                log.info("confirmed skill refused: not currently seen %s", miss)
+                rx.reply(addr, {"kind": "reply", "text": "confirm", "ok": False, "say": say,
+                                "mode": arbiter.mode.value})
+                return
             arbiter.on_intent(pend["intent"])
             log.info("voice skill confirmed: %s -> %s", pend["intent"].action.value, arbiter.mode.value)
             rx.reply(addr, {"kind": "reply", "text": "confirm",
@@ -498,6 +531,14 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
         if msteps is not None:
             execute_or_confirm(msteps, text, addr, latency)
             return
+        miss = unseen_objects(intent)   # camera mode: refuse an object the camera does not currently see
+        if miss:
+            say = "I don't see the " + " or the ".join(miss) + " right now."
+            log.info("skill %s refused: not currently seen %s", intent.action.value, miss)
+            rx.reply(addr, {"kind": "reply", "text": text, "latency_s": round(latency, 2), "ok": False,
+                            "intent": intent.model_dump(mode="json", exclude_none=True),
+                            "say": say, "mode": arbiter.mode.value})
+            return
         if confirm_skills and intent.action in (Action.pick, Action.place, Action.move):
             say = f"{intent.say or 'Ready'} Say yes to confirm."
             confirm_pending = {"kind": "intent", "intent": intent, "deadline": time.time() + confirm_window_s,
@@ -691,12 +732,28 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
             elif isinstance(msg, PlaneTune):   # live tuning of plane teleop (body client keys); plane mode only
                 apply_plane_tune(msg.op, addr, "plane_tune")
             elif isinstance(msg, CameraFrame):
-                # live webcam stream for the panel under the HUD. Forward the frame straight to the HUD's video
-                # channel; keep it off the pose path entirely (separate message, not recorded, latest-wins at the HUD).
+                # ONE CameraFrame type, two jobs (both off the pose path; never recorded; latest-wins):
+                #   1) HUD video: forward the frame straight to the HUD's video channel for the live panel.
+                #   2) perception (source: camera): decode (PIL, no cv2 needed) and detect off the control loop.
+                # A HUD webcam frame (source body_cam) still forwards; a perception frame (sim rover cam / table
+                # cam) is also forwarded, so the same stream can be watched on the HUD while it feeds perception.
                 try:
                     rx.reply(hud_video, msg.model_dump(mode="json"))
                 except OSError:
                     pass  # nothing listening on the video port yet: drop it, never block the loop
+                if perception is not None and (cam_future is None or cam_future.done()) and msg.seq != cam_seq:
+                    cam_seq = msg.seq
+                    try:
+                        import base64
+                        import io
+                        from PIL import Image
+                        rgb = np.asarray(Image.open(io.BytesIO(base64.b64decode(msg.jpeg_b64))).convert("RGB"))
+                        # The bridge packs sim GROUND TRUTH in the same packet (CameraFrame.objects); the
+                        # ground_truth oracle detector uses it, the image detectors ignore it.
+                        cam_gt = msg.objects
+                        cam_future = vpool.submit(perception.detect, rgb, msg.objects)
+                    except Exception as e:
+                        log.warning("camera frame decode failed: %s", e)
             elif isinstance(msg, Query):
                 last_query_t, follower_ever = t0, True  # the follower polls here: drives the real_following light
                 rx.reply(addr, {"kind": "state", "mode": arbiter.mode.value, "held": arbiter.held,
@@ -714,8 +771,14 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
                                 "hw_busy": round(max(0.0, hw_busy_until - t0), 1) if hw_busy_until else 0.0,
                                 "mirror": mirror_real,
                                 "mirror_age": round(t0 - real_t, 3) if (mirror_real and real_t) else None,
+                                # where each object position came from: sim ground truth, or the camera
+                                # (source + age + whether it is currently seen) so the HUD can show it.
+                                "perception_source": perc_source,
                                 "objects": {n: {"pos": np.round(o.pos, 4).tolist(),
-                                                "bottom_z": round(float(o.pos[2] - o.grasp_z), 4)}
+                                                "bottom_z": round(float(o.pos[2] - o.grasp_z), 4),
+                                                **({"src": (prov := perception.tracker.provenance(t0).get(n, {})).get("source", "unseen"),
+                                                    "seen": prov.get("fresh", False), "age_s": prov.get("age_s")}
+                                                   if perception is not None else {"src": "sim", "seen": True})}
                                             for n, o in scene.objects.items()}})
         if confirm_pending is not None and t0 > confirm_pending["deadline"]:   # no yes in time: cancel the move
             log.info("pending confirm (%s) timed out", confirm_pending.get("name") or "skill")
@@ -733,7 +796,20 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
                 intent = Intent(action=Action.unknown, say="Language service error.")
             finish(text, addr, intent, time.time() - t_sub)
         q = robot.read_joints()
-        if hasattr(robot, "objects"):
+        if perception is not None:
+            # camera perception: when a detection completes, feed the tracker (confidence gate +
+            # staleness + smoothing) and move the scene objects to the tracked positions. The planner's
+            # object positions now come from the camera, not sim; an object that goes stale stays at its
+            # last position but a skill refuses it (unseen_objects / the tracker's seen()).
+            if cam_future is not None and cam_future.done():
+                try:
+                    perception.tracker.update(cam_future.result(), t0)
+                    for name, xyz in perception.tracker.updates(t0).items():
+                        scene.update_from_bottom(name, xyz)
+                except Exception as e:
+                    log.warning("perception detect failed: %s", e)
+                cam_future = None
+        elif hasattr(robot, "objects"):
             for name, bottom in robot.objects.items():
                 scene.update_from_bottom(name, bottom)
         tcp = arm.fk(q)[:3, 3]

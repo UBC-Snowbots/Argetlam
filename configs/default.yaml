@@ -113,3 +113,60 @@ eeg:
 assist:
   radius: 0.08
   gain: 0.6
+
+perception:                 # where the pick/place/move skills get object positions from.
+  source: sim               # sim | camera. sim (alias: ground_truth) = Isaac ground truth / config,
+                            # today's behaviour (DEFAULT, unchanged). camera = positions come from the
+                            # rover camera through the detector below (sim-rendered or real frames).
+  calib: configs/calib/table_cam.yaml   # saved ChArUco calibration (K + base-frame extrinsics + table z),
+                            # used ONLY if the arm profile has no `camera:` block (prefer the profile block).
+  min_conf: 0.25            # reject detections below this score (confidence gate)
+  stale_s: 1.0              # an object is "seen" only while its last detection is newer than this; a skill
+                            # refuses an object it cannot currently see
+  smoothing: 0.5            # EMA weight of the newest frame for the tracked position (1.0 = no smoothing)
+  method: refine            # open-vocab box lift: refine (silhouette-fit, default) | pushback (oblique only)
+  loc_noise_px: 2.0         # assumed detector box localisation noise, for the per-object error estimate
+  detector:
+    backend: aruco          # ground_truth | aruco | owlv2 | gdino | null
+                            #   ground_truth = sim oracle (project known objects through the camera; no
+                            #                  model, no Isaac; the scorer baseline)
+                            #   aruco        = OpenCV ArUco markers -> table-plane (reliable, no GPU) [default]
+                            #   owlv2|gdino  = open-vocab model (needs the `vision` extra / a torch python)
+                            #   null         = plugin slot (no-op; drop in NanoOWL etc. later)
+    model: null             # owlv2/gdino: null -> backend default (owlv2: google/owlv2-base-patch16-ensemble)
+    device: cuda
+    dtype: float32
+    aruco:                  # marker id -> object name (the tag sits at the object's footprint centre)
+      dictionary: DICT_4X4_50
+      marker_length: 0.03   # m (printed marker side)
+      markers: {0: cup, 1: bottle, 2: block}
+    ground_truth:           # sim oracle knobs (model a detector without one)
+      pos_noise_cm: 0.0     # isotropic (x, y) localisation noise added to the true position
+      drop_out_of_frame: true   # skip an object whose box leaves the image (FOV misses -> detection rate < 1)
+      occlusion: false      # also drop a farther object whose centroid is hidden behind a nearer one
+
+camera:                     # rover camera DIGITAL TWIN (sim) / real camera. Shared bits here; the PER-ARM
+                            # mounts (where it sits, geometry-dependent) are in configs/arms/<arm>.yaml.
+                            # Only used when perception.source: camera. See docs/PERCEPTION.md.
+  enabled: true             # the sim bridge creates/streams the camera only with --sim-cam (default off), so
+                            # rover-stack is unaffected; this flag lets a profile disable the twin entirely.
+  mount: rover_front        # which named mount (camera.mounts in the arm profile) to place the camera at.
+                            # Switch at runtime: UDP {"camera_mount": "overhead"} to the bridge cmd port, or
+                            # the voice/key path (docs/PERCEPTION.md). Or set eye/look_at here to override.
+  model: vga_default        # which intrinsics model (camera.models below). Or set calib / fx,fy / hfov_deg.
+  calib: null               # a ChArUco calibration YAML (real K + distortion); OVERRIDES model when set.
+  width: null               # render/ingest resolution; null -> use the model's. Set to downscale.
+  height: null
+  rate_hz: 10               # sim render + stream rate, and the real sender's target fps (5-10 Hz is plenty)
+  jpeg_quality: 70
+  depth: true               # sim: render distance_to_image_plane (cheap; for future depth detectors)
+  segmentation: true        # sim: render instance segmentation (ground-truth 2D boxes in the packet)
+  models:                   # known cameras (intrinsics). FILL with the real camera once measured/calibrated.
+    vga_default: {width: 640, height: 480, hfov_deg: 60}    # safe default until the real camera is known
+    usb_1080p:   {width: 1920, height: 1080, hfov_deg: 70}  # generic 1080p USB webcam
+  real:                     # real camera on a SEPARATE DEVICE (Pi/Jetson/onboard rover computer).
+                            # src/rover_intent/perception/camera_tx.py runs ON the device and sends the SAME
+                            # CameraFrame to the VM (net.listen_port) over Tailscale; sim <-> real is this flip.
+    source: 0               # device camera index / /dev/videoN, OR an mjpeg/rtsp URL the device exposes
+    reconnect_s: 2.0        # retry period if the camera/stream drops
+    watchdog_s: 5.0         # warn + reopen if no frame arrives for this long

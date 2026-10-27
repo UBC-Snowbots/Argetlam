@@ -88,7 +88,7 @@ def main():
 
     # Live video: its own socket + latest-frame holder (keep ONLY the newest frame; older ones are dropped).
     vlock = threading.Lock()
-    vstate = {"jpeg": None, "w": 0, "h": 0, "t": 0.0, "seq": -1}
+    vstate = {"jpeg": None, "w": 0, "h": 0, "t": 0.0, "seq": -1, "source": None}
     vfps = []
 
     def vrx():
@@ -108,7 +108,8 @@ def main():
                 continue
             now = time.time()
             with vlock:
-                vstate.update(jpeg=raw, w=mm.get("width", 0), h=mm.get("height", 0), t=now, seq=mm.get("seq", -1))
+                vstate.update(jpeg=raw, w=mm.get("width", 0), h=mm.get("height", 0), t=now,
+                              seq=mm.get("seq", -1), source=mm.get("source"))
                 vfps[:] = [x for x in vfps if now - x <= 1.0] + [now]
     threading.Thread(target=vrx, daemon=True).start()
 
@@ -125,9 +126,15 @@ def main():
         """Live webcam panel directly below the HUD. Decodes the latest frame only; shows age when stale (> 1 s)."""
         x0, y0, x1, y1 = VBOX
         cv.create_rectangle(x0, y0, x1, y1, outline="#333a44")
-        cv.create_text(x0 + 6, y0 + 10, text="camera (laptop)", anchor="w", fill="#8892a0", font=("Helvetica", 10))
         with vlock:
-            jpeg, vt, vseq, fps = vstate["jpeg"], vstate["t"], vstate["seq"], len(vfps)
+            jpeg, vt, vseq, fps, src = vstate["jpeg"], vstate["t"], vstate["seq"], len(vfps), vstate["source"]
+        # panel title shows WHERE the frame is from: SIM CAMERA (mount) / REAL CAMERA / laptop webcam
+        _s = (src or "").lower()
+        title = (f"SIM CAMERA ({src.split(':', 1)[1]})" if _s.startswith("sim") and ":" in src
+                 else "SIM CAMERA" if _s.startswith("sim")
+                 else "REAL CAMERA" if ("real" in _s or _s in ("rover_cam", "pi_cam", "jetson"))
+                 else "camera (laptop)")
+        cv.create_text(x0 + 6, y0 + 10, text=title, anchor="w", fill="#8892a0", font=("Helvetica", 10))
         age = time.time() - vt if vt else None
         cx, cy = (x0 + x1) / 2, (y0 + y1) / 2 + 8
         if Image is None:

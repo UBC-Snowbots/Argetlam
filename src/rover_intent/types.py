@@ -137,13 +137,28 @@ class RealJoints(BaseModel):
 
 
 class CameraFrame(BaseModel):
-    """Laptop -> VM: one JPEG webcam frame for the live video panel under the Isaac HUD.
+    """One JPEG camera frame on the shared JSON transport. ONE type, two producers:
 
-    The JPEG is base64-encoded so the frame rides the same JSON transport as every other message
-    (UDP, or newline-JSON over the SSH tunnel). It is a SEPARATE message from BodyPose: sent at its own
-    (lower) rate and dropped rather than queued, so pose latency is never affected. The app forwards the
-    frame straight to the HUD's video channel (net.hud_video_port); the HUD decodes and shows it.
-    `seq`/`t` are for drop/latency accounting like BodyPose."""
+      * laptop webcam -> VM (`source: body_cam`): shown in the live video panel under the Isaac HUD;
+        the app forwards it straight to the HUD's video channel (net.hud_video_port).
+      * a PERCEPTION camera (the sim rover camera rendered in the Isaac bridge -> `source: rover_cam`,
+        or the laptop table cam -> `source: table_cam`): the app decodes it and runs the perception
+        detector + table-plane projection off the control loop, filling object positions in camera mode.
+        Such a frame is ALSO forwarded to the HUD, so the same stream can be watched while it feeds
+        perception.
+
+    The JPEG is base64-encoded so the frame rides the same transport as every other message (UDP, or
+    newline-JSON over the SSH tunnel). It is a SEPARATE message from BodyPose: sent at its own (lower)
+    rate and dropped rather than queued, so pose latency is never affected. `seq`/`t` are for
+    drop/latency accounting like BodyPose.
+
+    Optional perception extras (all None for a plain HUD webcam frame):
+      * depth_b64: base64 PNG of the depth image (uint16 millimetres) when the camera renders depth.
+      * objects: sim GROUND-TRUTH bottom-centre {name: [x, y, z_bottom]} the bridge knows, carried in
+        the SAME packet so the scorer can compare camera-derived positions to truth per frame. None on a
+        real camera.
+      * boxes: ground-truth 2D pixel boxes {name: [u0, v0, u1, v1]} the bridge reads from the instance
+        segmentation (an oracle-detector input / debugging aid). None on a real camera."""
     kind: Literal["camera_frame"] = "camera_frame"
     t: float
     jpeg_b64: str
@@ -151,6 +166,9 @@ class CameraFrame(BaseModel):
     height: int = 0
     seq: int = 0
     source: str = "body_cam"
+    depth_b64: Optional[str] = None
+    objects: Optional[dict[str, list[float]]] = None
+    boxes: Optional[dict[str, list[float]]] = None
 
 
 class MirrorMsg(BaseModel):
