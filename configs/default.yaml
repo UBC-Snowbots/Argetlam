@@ -117,6 +117,9 @@ assist:
   radius: 0.08
   gain: 0.6
 
+skills:
+  waypoint_timeout_s: 8.0   # a skill gives up (HOLD, "Couldn't reach ...") if one waypoint takes longer than this
+
 isaac_window:               # the Isaac Sim (Kit) window opened by sim/isaac_bridge.py --viz kit
   fullscreen: true          # fill the screen (F11 in Isaac toggles back); false or --windowed = default window size
 

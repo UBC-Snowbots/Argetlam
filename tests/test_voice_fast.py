@@ -350,7 +350,7 @@ def test_real_speed_and_motion_vs_skills_confirm():
         assert _say(s, 47234, "faster")["say"].lower().startswith("fast")
         # motion moves with no confirm, but a skill (aims at sim object positions) still asks first on the real arm
         assert _say(s, 47234, "move left 3 cm").get("confirm") is not True
-        r = _say(s, 47234, "pick up the cup")
+        r = _say(s, 47234, "pick up the block")
         assert r["confirm"] is True and r["mode"] != "auto"
         # STOP is always instant
         assert _say(s, 47234, "stop")["mode"] == "hold"

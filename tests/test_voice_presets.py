@@ -195,7 +195,7 @@ def test_skills_confirm_flag_off_for_sim_on_for_real():
     # dev_arm_real: skills ask first; a yes then runs them
     app, th, s = _app(load_config(arm="dev_arm_real"), 47214, 6.0)
     try:
-        r = _say(s, 47214, "pick up the cup")
+        r = _say(s, 47214, "pick up the block")
         assert r["confirm"] is True and "confirm" in r["say"].lower() and r["mode"] != "auto"
         r = _say(s, 47214, "yes")
         assert r["mode"] == "auto"

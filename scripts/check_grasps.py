@@ -85,13 +85,15 @@ def main():
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=47100)
     ap.add_argument("--moves", action="store_true")
+    ap.add_argument("--timeout", type=float, default=None,
+                    help="seconds per command (default 40 pick / 60 move; the real-arm profile moves at real speed: ~180)")
     args = ap.parse_args()
     app = App(args.host, args.port)
     results = []
     names = list(settle(app)["objects"])
     for n in names:
         before = settle(app)
-        reply, after = app.run(f"pick up the {n}")
+        reply, after = app.run(f"pick up the {n}", timeout=args.timeout or 40)
         lift = truth(after)[n]["bottom_z"] - before["table_top"]
         problems = moved(before, after, {n})
         ok = after["held"] == n and lift >= 0.05 and not problems
@@ -102,7 +104,7 @@ def main():
         for a, b in itertools.permutations(names, 2):
             before = settle(app)
             goal = np.array(truth(before)[b]["pos"]) + BESIDE
-            reply, after = app.run(f"move the {a} beside the {b}", timeout=60)
+            reply, after = app.run(f"move the {a} beside the {b}", timeout=args.timeout or 60)
             time.sleep(1.5)
             after = app.state()
             pa = truth(after)[a]

@@ -48,9 +48,15 @@ sim:
   tcp_body: tcp
   finger_joints: [finger_left_joint, finger_right_joint]
   stroke: 0.0425
+  gripper_travel_s: 2.0   # sim fingers take as long as the real gripper (follower --ee-speed 75: 2.0 s full open)
   actuators:
     - {joints: [joint_1, joint_2, joint_3], stiffness: 2000.0, damping: 200.0, effort: 150.0, velocity: 1.5}
     - {joints: [joint_4, joint_5, joint_6], stiffness: 400.0, damping: 40.0, effort: 30.0, velocity: 3.0}
+
+skills:
+  # The real arm moves at its measured joint speeds (max_vel above, ~0.06-0.16 rad/s), so one skill waypoint (e.g.
+  # home -> above an object on the table) takes 15-20 s. The default 8 s gave up halfway (sim check 2026-10-28).
+  waypoint_timeout_s: 30.0
 
 confirm:
   skills: true   # the physical arm: require a spoken "yes" before any autonomous pick/place/move too
@@ -127,18 +133,27 @@ safety:
   # IK reaches x to ~0.75 across the whole y,z face (sweep 2026-10-24); 0.70 keeps 5 cm margin and the box stays
   # 95.2% reachable on a 5^3 grid / 96.5% on 7^3 (worst miss 72 mm, unchanged, at a y/z corner, not the x extreme).
   # x min kept at 0.47 (the back edge is already near the reachable limit). Forward room from home: 0.095 -> 0.155 m.
-  workspace_min: [0.47, -0.22, 0.38]
+  # z floor lowered 0.38 -> -0.122 (2026-10-28): the old floor kept the gripper ~53 cm above the real table (the base
+  # is on a 0.152 m pedestal, table.top -0.152). -0.122 = table + 3 cm, just under the tape roll's grasp point (+3.5 cm).
+  # The pedestal height is a tape estimate (+-1 cm). Joint limits reach z ~ -0.57 over x 0.35-0.70.
+  workspace_min: [0.47, -0.22, -0.122]
   workspace_max: [0.70, 0.18, 0.60]
 
 table:
-  top: 0.0
+  # The real arm's base sits on a ~6 in (0.152 m) pedestal on the table (Pranav, 2026-10-28), so the tabletop is
+  # BELOW the arm frame's z = 0 (bottom of the base). The sim puts its ground at this height and draws the pedestal.
+  top: -0.152
   x: [0.30, 0.75]
   y: [-0.50, 0.50]
 
+# The REAL objects on the bench (D415 depth survey by the laptop session, 2026-10-28): an upright pine block and a
+# flat-lying UBC Rover tape roll. pos z = GRASP point (block 6 cm up, roll 3.5 cm up, above table.top). x/y are
+# reachable placeholders until the camera->base calibration / object_poses gives real positions.
 scene:
-  cup:    {pos: [0.45, 0.20, 0.055], height: 0.09, radius: 0.035, mass: 0.15, shape: cylinder, desc: "short red cup"}
-  bottle: {pos: [0.45, -0.20, 0.185], height: 0.22, radius: 0.035, mass: 0.50, shape: cylinder, desc: "tall blue bottle"}
-  block:  {pos: [0.56, 0.00, 0.035], height: 0.05, radius: 0.025, mass: 0.10, shape: box, desc: "small yellow cube"}
+  block: {pos: [0.56, 0.00, -0.092], height: 0.098, radius: 0.0285, mass: 0.14, shape: box,
+          desc: "small upright wooden block, light natural wood, about 10 cm tall"}
+  tape:  {pos: [0.55, 0.15, -0.117], height: 0.05, radius: 0.05, mass: 0.15, shape: cylinder,
+          desc: "white roll of UBC Rover sticker tape with a brown cardboard centre, short and round"}
 
 real_arm:
   # Gripper (EE) control gate (config equivalent of the follower's --ee). EE control is active only when the EE

@@ -104,8 +104,11 @@ def set_view(v):
 
 set_view(args.view or cfg.get("sim", {}).get("default_view", "behind"))
 
+# A table BELOW the arm frame (table.top < 0: the real arm's base stands on a pedestal on the table) puts the ground
+# at the tabletop; the pedestal is drawn further down, after the table block.
+_ground_z = min(0.0, (cfg.get("table") or {}).get("top", 0.0))
 ground = sim_utils.GroundPlaneCfg()
-ground.func("/World/ground", ground)
+ground.func("/World/ground", ground, translation=(0.0, 0.0, _ground_z))
 light = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.8, 0.8, 0.8))
 light.func("/World/Light", light)
 
@@ -137,6 +140,10 @@ if tbl and tbl["top"] > 0:  # top 0 = objects stand on the arm's own surface (th
                                visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.45, 0.33, 0.22)))
     tcfg.func("/World/Table", tcfg, translation=((tbl["x"][0] + tbl["x"][1]) / 2, (tbl["y"][0] + tbl["y"][1]) / 2,
                                                  tbl["top"] / 2))
+elif tbl and tbl["top"] < 0:  # pedestal from the tabletop up to the arm base (collider: nothing passes through it)
+    pcfg = sim_utils.CuboidCfg(size=(0.20, 0.20, -tbl["top"]), collision_props=sim_utils.CollisionPropertiesCfg(),
+                               visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.25, 0.25, 0.27)))
+    pcfg.func("/World/Pedestal", pcfg, translation=(0.0, 0.0, tbl["top"] / 2))
 
 objects = {}
 for name, o in cfg["scene"].items():
@@ -270,6 +277,9 @@ tcp_body = robot.find_bodies(cfg["sim"].get("tcp_body", "tcp"))[0][0]
 dev = sim.device
 q_target = torch.tensor([home], dtype=torch.float32, device=dev)
 g_target = torch.zeros(1, 2, device=dev)
+g_cmd = torch.zeros(1, 2, device=dev)   # commanded finger target; g_target slews to it (sim.gripper_travel_s)
+_travel_s = float(cfg["sim"].get("gripper_travel_s", 0.0))   # 0 = instant (PD snap); dev_arm_real: the real
+G_RATE = STROKE / _travel_s if _travel_s > 0 else None       # gripper's full open<->close time, so the sim matches
 
 rx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 rx.bind(("0.0.0.0", net["isaac_cmd_port"]))
@@ -327,11 +337,12 @@ while app.is_running():
             reset_scene()
             q_target[0] = torch.tensor(home, dtype=torch.float32, device=dev)
             g_target[:] = 0.0
+            g_cmd[:] = 0.0
             n_resets += 1
             print(f"[bridge] RESET #{n_resets} at t={t_sim:.1f}s", flush=True)
             continue
         q_target[0] = torch.tensor(msg["q"], dtype=torch.float32, device=dev)
-        g_target[:] = float(msg.get("g", 0.0)) * STROKE
+        g_cmd[:] = float(msg.get("g", 0.0)) * STROKE
         vt = msg.get("vtarget")
         if (tuple(vt) if vt else None) != vtarget_shown:
             vtarget_shown = tuple(vt) if vt else None
@@ -344,6 +355,10 @@ while app.is_running():
         ghost_state = msg.get("ghost_state") or ("clamped" if msg.get("ghost_bad") else "ok")
         n_cmd += 1
     robot.set_joint_position_target_index(target=q_target, joint_ids=arm_ids)
+    if G_RATE is None:
+        g_target[:] = g_cmd
+    else:   # slew at the real gripper's speed (one physics step per loop)
+        g_target += torch.clamp(g_cmd - g_target, -G_RATE * dt, G_RATE * dt)
     robot.set_joint_position_target_index(target=g_target, joint_ids=finger_ids)
     robot.write_data_to_sim()
     tcp_now = robot.data.body_pos_w.torch[0, tcp_body].cpu().numpy() if ghost_pos else None

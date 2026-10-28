@@ -183,16 +183,23 @@ def test_box_reachability_frozen():
     arm, home, cfg = _arm()
     lo = np.array(cfg["safety"]["workspace_min"], float); hi = np.array(cfg["safety"]["workspace_max"], float)
     R = arm.fk(home)[:3, :3]
-    ok = tot = 0
+    ok = tot = floor_ok = floor_tot = 0
     for x in np.linspace(lo[0], hi[0], 5):
         for y in np.linspace(lo[1], hi[1], 5):
             for z in np.linspace(lo[2], hi[2], 5):
                 tot += 1
                 T = np.eye(4); T[:3, :3] = R; T[:3, 3] = [x, y, z]
                 q = arm.ik(home, T, iters=150, orient="frozen")
-                if np.linalg.norm(arm.fk(q)[:3, 3] - np.array([x, y, z])) < 0.004:
-                    ok += 1
-    assert ok / tot >= 0.9, f"only {100*ok/tot:.0f}% of the box reachable (frozen)"
+                hit = np.linalg.norm(arm.fk(q)[:3, 3] - np.array([x, y, z])) < 0.004
+                ok += hit
+                if z == lo[2]:
+                    floor_tot += 1
+                    floor_ok += hit
+    # Since the floor came down to table + 5 cm (2026-10-28) the box includes a real frozen-wrist pocket at its back
+    # edge (x 0.47, z ~0.08-0.43: the elbow would have to fold; straight-line paths from home miss it too), so the
+    # whole box is ~88%. The floor layer (where the table objects are) must be fully reachable.
+    assert floor_ok == floor_tot, f"only {floor_ok}/{floor_tot} of the floor layer reachable (frozen)"
+    assert ok / tot >= 0.85, f"only {100*ok/tot:.0f}% of the box reachable (frozen)"
 
 
 # --- rate reach (joystick reach from the LEFT-hand THUMB) ------------------------

@@ -27,9 +27,11 @@ class Scene:
 
     @property
     def transit_z(self) -> float:
-        """Travel height between objects: above the tallest object's top + fingertips + margin."""
+        """Travel height between objects: above the tallest object's top + fingertips + margin, and at least 0.30 m
+        above the TABLE (was an absolute 0.30, which assumed the table at z 0: with the real arm on its pedestal,
+        table.top -0.152, that sent the arm 45 cm over the table into the frozen-wrist pocket near the base)."""
         tops = [o.pos[2] - o.grasp_z + o.height for o in self.objects.values()]
-        return max([0.30] + [t + 0.08 for t in tops])
+        return max([self.support_z + 0.30] + [t + 0.08 for t in tops])
 
     def names(self) -> list[str]:
         return list(self.objects)

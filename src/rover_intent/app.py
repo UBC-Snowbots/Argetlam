@@ -75,7 +75,8 @@ def build(cfg: dict, backend: str):
     else:
         grip_sources = ["hand", "eeg"] if cfg["body"].get("grip_from_hand", False) else ["eeg"]
     arbiter = Arbiter(scene, e["p_on"], e["p_off"], e["hold_s"], s["radius"], s["gain"],
-                      grip_sources=grip_sources, coalesce_s=float(g.get("coalesce_s", 0.6)))
+                      grip_sources=grip_sources, coalesce_s=float(g.get("coalesce_s", 0.6)),
+                      waypoint_timeout=float(cfg.get("skills", {}).get("waypoint_timeout_s", 8.0)))
     arbiter.grip_toggle_in_hold = bool(e.get("grip_toggle_in_hold", True))   # clench works in HOLD too (default on)
     arbiter.grip_auto_open_s = float(e.get("grip_auto_open_s", 0.0))          # >0: clench-close reopens after this
     arbiter.z_max = cfg["safety"]["workspace_max"][2] - 0.005
