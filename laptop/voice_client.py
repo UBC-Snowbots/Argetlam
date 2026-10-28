@@ -119,7 +119,7 @@ def main():
     link = Link(args.host, args.port, args.tunnel)
 
     if args.text:
-        print(f"text mode -> {args.host}:{args.port}. Try: move the cup beside the bottle | stop | follow me")
+        print(f"text mode -> {args.host}:{args.port}. Try: pick up the block | move the block beside the tape | stop | follow me")
         while True:
             try:
                 line = input("you> ").strip()
