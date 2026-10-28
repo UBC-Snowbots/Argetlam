@@ -49,3 +49,20 @@ def test_in_travel_respects_firmware_bounds_and_margin():
     # axis 3 max 140; 138 fails with a 5 deg margin, passes with 0
     assert in_travel([90, 90, 138, 90, 90, 90], margin=5.0)[2] is False
     assert in_travel([90, 90, 138, 90, 90, 90], margin=0.0)[2] is True
+
+
+def test_pre_a4_fix_recording_is_rescaled():
+    """A meta.json table with no fw_scale predates the 2026-10-28 axis 4 gear fix (250 -> 345.1): its raw axis-4
+    degrees are 1.38x too large, so from_dict scales them; the current default table leaves them alone."""
+    import math
+    from rover_intent.control.stepper_map import A4_PRE_FIX_SCALE, DEFAULT_TABLE, StepperTable, fw_to_q, q_to_fw
+    old = DEFAULT_TABLE.to_dict()
+    del old["fw_scale"]
+    old["version"] = "rowan-stepper-2026-10-23"
+    t_old = StepperTable.from_dict(old)
+    fw = [61, 30, 20, 125, 94, 180]
+    q_old, q_new = fw_to_q(fw, t_old), fw_to_q(fw, DEFAULT_TABLE)
+    assert q_old[:3] == q_new[:3] and q_old[4:] == q_new[4:]
+    assert math.isclose(q_old[3] - DEFAULT_TABLE.zero_rad[3], math.radians(125 * A4_PRE_FIX_SCALE))
+    assert all(math.isclose(a, b, abs_tol=1e-9) for a, b in zip(q_to_fw(q_old, t_old), fw))   # inverse holds
+    assert StepperTable.from_dict(DEFAULT_TABLE.to_dict()).fw_scale == (1.0,) * 6

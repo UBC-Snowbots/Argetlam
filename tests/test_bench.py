@@ -115,7 +115,7 @@ def test_return_to_start_converges_despite_command_lag(monkeypatch):
 
     class LaggyArm:
         def __init__(self, pos):
-            self.fw = [pos, 30, 20, 125, 94, 180, 0]
+            self.fw = [pos, 30, 20, 95, 94, 180, 0]
             self.q = collections.deque([0.0] * 25)      # 25 ticks x 20 ms = 0.5 s command lag
             self.sent = []
 

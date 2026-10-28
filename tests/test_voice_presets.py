@@ -21,7 +21,7 @@ from rover_intent.planner.nemotron import fallback_parse, is_confirm, normalize_
 from rover_intent.types import Action, Intent
 
 ROOT = Path(__file__).resolve().parents[1]
-BASE = [0.104, -1.415, -0.997, -0.229, -0.482, -3.142]   # dev_arm "base" (stow) preset
+BASE = [0.104, -1.415, -0.997, -0.753, -0.482, -3.142]   # dev_arm "base" (stow) preset
 
 
 # --- parser: pose words -> preset Intent -------------------------------------------------------------------------

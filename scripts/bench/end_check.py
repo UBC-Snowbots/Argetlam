@@ -22,7 +22,7 @@ import rclpy  # noqa: E402
 import benchros  # noqa: E402
 
 # dev_arm_real 'base' preset (= home), in URDF radians. Keep in sync with configs/arms/dev_arm_real.yaml.
-BASE_Q = [0.104, -1.415, -0.997, -0.229, -0.482, -3.142]
+BASE_Q = [0.104, -1.415, -0.997, -0.753, -0.482, -3.142]
 
 
 def drive_all(arm, target_fw, frac, kp=1.0, deadband=0.15, settle_s=1.0, timeout=60.0, hz=50.0):

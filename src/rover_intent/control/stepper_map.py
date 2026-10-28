@@ -25,7 +25,12 @@ import math
 from dataclasses import dataclass
 
 # Bump this when the numbers below change. meta.json records it so a CSV can say which table produced its radians.
-TABLE_VERSION = "rowan-stepper-2026-10-23"
+TABLE_VERSION = "rowan-stepper-2026-10-28"
+
+# Axis 4 gear reduction fixed in the firmware 2026-10-28 (FirmFlake 0a9bf49, flashed): 250 -> 345.1 (99.548:1 motor x
+# 52/15 belt). Firmware degrees reported BEFORE that were 345.1/250 = 1.38x too large on axis 4. A recording whose
+# meta.json table has no fw_scale predates the fix, so from_dict() gives it this scale (raw degrees x fw_scale = true).
+A4_PRE_FIX_SCALE = 250.0 / 345.09973333333335
 
 # Note vs firmware: RoverFlake2 defines OLD axis-5 zero as 2.2060 - PI/3 with its own PI = 3.14 (= 1.15933 rad).
 # We use math.pi (= 1.15880 rad), matching the sim_to_real follower. The 0.0005 rad (~0.03 deg) gap is noise.
@@ -39,11 +44,13 @@ class StepperTable:
     dir: tuple = (1, 1, 1, 1, -1, -1)
     fw_max_deg: tuple = (180.0, 180.0, 140.0, 180.0, 180.0, 9999.0)   # firmware travel [0, max] per axis
     fw_max_vel: tuple = (80.0, 40.0, 60.0, 110.0, 90.0, 90.0)         # firmware max speed, deg/s
+    fw_scale: tuple = (1.0, 1.0, 1.0, 1.0, 1.0, 1.0)  # raw fw deg x this = true joint deg (1.0 since the A4 fix)
     version: str = TABLE_VERSION
 
     def to_dict(self) -> dict:
         return {"zero_rad": list(self.zero_rad), "dir": list(self.dir),
-                "fw_max_deg": list(self.fw_max_deg), "fw_max_vel": list(self.fw_max_vel), "version": self.version}
+                "fw_max_deg": list(self.fw_max_deg), "fw_max_vel": list(self.fw_max_vel),
+                "fw_scale": list(self.fw_scale), "version": self.version}
 
     @classmethod
     def from_dict(cls, d: dict) -> "StepperTable":
@@ -51,6 +58,8 @@ class StepperTable:
         return cls(zero_rad=tuple(d["zero_rad"]), dir=tuple(d["dir"]),
                    fw_max_deg=tuple(d.get("fw_max_deg", cls.fw_max_deg)),
                    fw_max_vel=tuple(d.get("fw_max_vel", cls.fw_max_vel)),
+                   # no fw_scale = recorded before the 2026-10-28 axis 4 gear fix: correct its raw axis-4 degrees
+                   fw_scale=tuple(d["fw_scale"]) if "fw_scale" in d else (1.0, 1.0, 1.0, A4_PRE_FIX_SCALE, 1.0, 1.0),
                    version=d.get("version", "unknown"))
 
 
@@ -59,12 +68,12 @@ DEFAULT_TABLE = StepperTable()
 
 def fw_to_q(fw_deg, table: StepperTable = DEFAULT_TABLE) -> list:
     """RAW firmware degrees -> URDF joint radians, for the 6 arm axes. fw_deg may be length 6 or 7 (EE ignored)."""
-    return [math.radians(fw_deg[i]) * table.dir[i] + table.zero_rad[i] for i in range(6)]
+    return [math.radians(fw_deg[i] * table.fw_scale[i]) * table.dir[i] + table.zero_rad[i] for i in range(6)]
 
 
 def q_to_fw(q_rad, table: StepperTable = DEFAULT_TABLE) -> list:
     """URDF joint radians -> RAW firmware degrees, for the 6 arm axes."""
-    return [math.degrees((q_rad[i] - table.zero_rad[i]) * table.dir[i]) for i in range(6)]
+    return [math.degrees((q_rad[i] - table.zero_rad[i]) * table.dir[i]) / table.fw_scale[i] for i in range(6)]
 
 
 def in_travel(fw_deg, table: StepperTable = DEFAULT_TABLE, margin: float = 0.0) -> list:

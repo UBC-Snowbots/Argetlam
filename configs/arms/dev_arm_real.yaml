@@ -18,11 +18,11 @@ arm:
   tcp_offset: [0.0, 0.0, 0.2]
   palm_above_tcp: 0.045
   joints: [joint_1, joint_2, joint_3, joint_4, joint_5, joint_6]
-  # Rowan's return-to-base pose {61,30,20,125,94,180} fw deg. TCP = (0.545, -0.027, 0.520), tool points ~+x (horizontal).
-  home: [0.104, -1.415, -0.997, -0.229, -0.482, -3.142]
+  # Rowan's return-to-base pose {61,30,20,95,94,180} fw deg (axis 4 was 125 before the 2026-10-28 A4 gear fix, 250 -> 345.1). TCP = (0.545, -0.035, 0.525), tool points ~+x (horizontal).
+  home: [0.104, -1.415, -0.997, -0.753, -0.482, -3.142]
   presets:
     ready: [0.144, -1.131, -1.007, -0.003, 0.679, -2.957]     # sim over-the-table pose (gripper straight down)
-    base: [0.104, -1.415, -0.997, -0.229, -0.482, -3.142]     # the real rest pose (= home here)
+    base: [0.104, -1.415, -0.997, -0.753, -0.482, -3.142]     # the real rest pose (= home here)
   # your arm drops out of view while following -> glide to base (stow) instead of freezing. The stepper arm can't
   # go limp while powered (Rowan, 2026-10-23), so this replaces the moteus arm's limp "d stop".
   on_drop: base

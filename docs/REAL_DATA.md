@@ -13,8 +13,11 @@ Topics (default domain):
   (`cmd_value` 170 = 0xAA = all axes but EE).
 
 Firmware travel (deg): `[0, 180/180/140/180/180/9999]`. Max speed (deg/s): `80/40/60/110/90/90`.
-Axis 4's gear ratio is known WRONG (Rowan recalculating) and the offset table may change, so recordings keep RAW
-firmware degrees and convert only at read time.
+Axis 4's gear ratio was WRONG until 2026-10-28 (firmware reduction 250; Rowan fixed it to 345.1 = 99.548:1 motor x
+52/15 belt, flashed, FirmFlake 0a9bf49). Raw axis-4 degrees recorded before that are 1.38x too large; a session whose
+meta.json table has no `fw_scale` is corrected automatically (`A4_PRE_FIX_SCALE` in `control.stepper_map`). The base
+(stow) pose moved from fw {..,125,..} to {..,95,..} with it. Recordings keep RAW firmware degrees and convert only at
+read time, so the offset table can still change.
 
 ## The one clock
 
@@ -97,7 +100,7 @@ checks the start pose is inside firmware travel, sends all-zero 'V' on exit/Ctrl
 3. `python3 scripts/bench/axis_sweep.py --axis 1 --i-am-at-the-bench` -> per-axis lag, max velocity, acceleration;
    use the printed accel to replace the `max_acc` placeholder in `configs/arms/dev_arm_real.yaml`.
 4. `python3 scripts/bench/axis4_check.py --i-am-at-the-bench` (WITH Rowan) -> moves axis 4 +30 fw deg, you type the
-   real angle, it prints the correction factor and returns to start.
+   real angle, it prints the correction factor and returns to start. After the 2026-10-28 fix the factor should be ~1.0.
 5. short teleop runs (record with `record_real.sh` while driving).
 6. `python3 scripts/bench/end_check.py --i-am-at-the-bench` -> drives to the base preset with a capped P-loop, then
    you compare against the physical base mark and the result is logged.
