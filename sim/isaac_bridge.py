@@ -38,6 +38,8 @@ parser.add_argument("--render_every", type=int, default=4, help="render once per
 parser.add_argument("--sim-cam", dest="sim_cam", action="store_true",
                     help="stream the rover perception camera (CameraFrame to the app) from camera.mount; "
                          "UNTESTED in Isaac - needs --enable_cameras (set automatically here)")
+parser.add_argument("--windowed", action="store_true",
+                    help="keep the Kit window at its default size (default: fullscreen, config isaac_window.fullscreen)")
 AppLauncher.add_app_launcher_args(parser)
 # One arm: CPU PhysX is far cheaper per step than the GPU pipeline (measured: GUI 1.19x vs 0.22x real time).
 parser.set_defaults(device="cpu")
@@ -275,6 +277,17 @@ rx.setblocking(False)
 tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 state_addr = ("127.0.0.1", net["isaac_state_port"])
 print(f"[bridge] ready: cmd :{net['isaac_cmd_port']}  state -> :{net['isaac_state_port']}", flush=True)
+
+# Kit window fullscreen by default (2026-10-28: at the default size it covered only part of the 1920x1200 screen)
+if ("kit" in str(getattr(args, "visualizer", "") or "") and not getattr(args, "headless", False) and not args.windowed
+        and (cfg.get("isaac_window") or {}).get("fullscreen", True)):
+    try:
+        import omni.appwindow
+        app.update()
+        omni.appwindow.get_default_app_window().set_fullscreen(True)
+        print("[bridge] window: fullscreen (isaac_window.fullscreen in the config; --windowed to opt out)", flush=True)
+    except Exception as e:
+        print(f"[bridge] could not make the window fullscreen ({e}); continuing windowed", flush=True)
 
 dt = sim.get_physics_dt()
 t_sim, n_cmd, last_log, n_resets = 0.0, 0, 0.0, 0
