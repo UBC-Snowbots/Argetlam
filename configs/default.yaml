@@ -121,9 +121,13 @@ isaac_window:               # the Isaac Sim (Kit) window opened by sim/isaac_bri
   fullscreen: true          # fill the screen (F11 in Isaac toggles back); false or --windowed = default window size
 
 perception:                 # where the pick/place/move skills get object positions from.
-  source: sim               # sim | camera. sim (alias: ground_truth) = Isaac ground truth / config,
+  source: sim               # sim | camera | external. sim (alias: ground_truth) = Isaac ground truth / config,
                             # today's behaviour (DEFAULT, unchanged). camera = positions come from the
                             # rover camera through the detector below (sim-rendered or real frames).
+                            # external = a remote device detects + locates objects itself and sends
+                            # object_poses (the laptop RealSense D415; docs/PERCEPTION.md "External").
+  mirror_to_sim: true       # external: move the Isaac objects to the seen positions (sim mirrors the table)
+  mirror_hz: 2.0            # at most this often (the held object is never moved)
   calib: configs/calib/table_cam.yaml   # saved ChArUco calibration (K + base-frame extrinsics + table z),
                             # used ONLY if the arm profile has no `camera:` block (prefer the profile block).
   min_conf: 0.25            # reject detections below this score (confidence gate)

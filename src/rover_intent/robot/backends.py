@@ -26,6 +26,11 @@ class ArmBackend(abc.ABC):
         """Put the arm at q_home with the gripper open (sim: also restore the objects)."""
         raise NotImplementedError
 
+    def place_objects(self, objects: dict) -> None:
+        """Move sim objects to {name: [x, y, z_bottom]} (base frame), so the sim mirrors the real table seen by an
+        external perception device. Default: just remember them (mock/tests); IsaacArm teleports them in Isaac."""
+        self.placed = {n: list(map(float, b)) for n, b in objects.items()}
+
     def close(self) -> None:
         pass
 
@@ -90,6 +95,11 @@ class IsaacArm(ArmBackend):
             msg["ghost"], msg["ghost_bad"] = list(map(float, ghost)), bool(ghost_bad)
             msg["ghost_state"] = ghost_state or ("clamped" if ghost_bad else "ok")
         self.tx.sendto(json.dumps(msg).encode(), self.addr)
+
+    def place_objects(self, objects: dict) -> None:
+        """The bridge teleports each named object upright to the given bottom-centre, zero velocity."""
+        super().place_objects(objects)
+        self.tx.sendto(json.dumps({"place_objects": self.placed}).encode(), self.addr)
 
     def reset(self, q_home):
         """The bridge teleports the arm home and restores the objects; then we adopt home as the state."""

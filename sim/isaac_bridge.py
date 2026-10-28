@@ -313,6 +313,16 @@ while app.is_running():
                 cam_streamer.set_mount(msg["camera_mount"])
                 print(f"[bridge] camera mount -> {msg['camera_mount']}", flush=True)
             continue
+        if "place_objects" in msg:   # sim mirrors the real table: {"place_objects": {name: [x, y, z_bottom]}}
+            for n, b in msg["place_objects"].items():
+                o = objects.get(n)
+                if o is None:
+                    continue
+                pose = o.data.default_root_pose.torch.clone()   # keeps the upright start orientation
+                pose[0, 0:3] = torch.tensor([b[0], b[1], b[2] + heights[n] / 2], dtype=pose.dtype, device=pose.device)
+                o.write_root_pose_to_sim_index(root_pose=pose)
+                o.write_root_velocity_to_sim_index(root_velocity=torch.zeros_like(o.data.default_root_vel.torch))
+            continue
         if msg.get("reset"):
             reset_scene()
             q_target[0] = torch.tensor(home, dtype=torch.float32, device=dev)

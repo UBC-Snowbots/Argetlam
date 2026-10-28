@@ -171,6 +171,30 @@ class CameraFrame(BaseModel):
     boxes: Optional[dict[str, list[float]]] = None
 
 
+class ObjectPose(BaseModel):
+    """One object a remote perception device located. `pos` is the object's BOTTOM centre in the ARM BASE frame
+    (metres, the same frame and convention as the sim state's objects), so the device does the camera->base
+    calibration itself."""
+    pos: list[float]                # [x, y, z_bottom], arm base frame, metres
+    conf: float = 1.0               # detector score 0..1 (the tracker's min_conf gate applies)
+    err_cm: float = 0.0             # the device's own position-error estimate, for the status/HUD
+    desc: Optional[str] = None      # optional live description ("red cup, half full"); updates Nemotron's list
+
+
+class ObjectPoses(BaseModel):
+    """Remote perception device -> VM: objects ALREADY detected and located, e.g. the laptop's RealSense D415 doing
+    colour + depth detection locally and sending only results (2-5 Hz, a few hundred bytes) instead of streaming
+    frames. Consumed when perception.source is "external": it feeds the perception tracker (confidence gate,
+    staleness, smoothing), so the voice skills and Nemotron use these positions, and (perception.mirror_to_sim) the
+    Isaac objects are moved to match, so the sim reconstructs the real table. Names must match the configured scene
+    objects; unknown names are ignored (logged once)."""
+    kind: Literal["object_poses"] = "object_poses"
+    t: float
+    seq: int = 0
+    source: str = "realsense"
+    objects: dict[str, ObjectPose]
+
+
 class MirrorMsg(BaseModel):
     """-> VM: enter or leave the "mirror real" state. While on (and real_joints are fresh) the sim arm's joint
     targets are set straight from the real arm; body/voice motion is refused. STOP always leaves mirror."""

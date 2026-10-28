@@ -151,6 +151,25 @@ Calibration for a remote device: capture the ChArUco board frames ON the device 
 to the VM, calibrate there with `scripts/perception_calibrate.py` (docs/TABLE_CAM.md), and point
 `camera.calib` at the result. The mount pose you measure on the rover goes into the chosen mount.
 
+## External perception (the device sends results, not frames)
+
+For a depth camera like the RealSense D415 on the laptop, streaming frames to the VM loses the depth (it does
+not survive video compression) and the SDK is local anyway. So the device does it all and sends only results:
+
+    laptop: RealSense colour+depth -> detect -> 3D bottom-centre per object -> camera->base calibration
+            -> object_poses (UDP, 2-5 Hz, a few hundred bytes) -> VM app :47100
+    VM:     perception.source: external -> tracker (min_conf, stale_s, smoothing) -> scene -> voice skills/Nemotron
+            -> (mirror_to_sim) Isaac objects moved to the seen positions, so the sim reconstructs the table
+
+Message (types.ObjectPoses): `{"kind": "object_poses", "t", "seq", "source": "realsense", "objects": {name:
+{"pos": [x, y, z_bottom], "conf", "err_cm", "desc"}}}`. pos is the object's BOTTOM centre in the ARM BASE frame,
+metres. Names must match the scene (cup, bottle, block); unknown names are logged once and ignored. `desc` updates
+the description Nemotron sees. Send only what is visible now: an object missing for stale_s counts as unseen and a
+skill refuses it. The held object is never moved in the sim (the sim grasp owns it); mirroring is capped at
+perception.mirror_hz (2). Reference sender + link test: `laptop/send_object_poses.py`.
+
+To run it: set `perception.source: external` (a temp config, like the camera mode) and restart the app.
+
 ## Scoring in sim (the gate)
 
 `scripts/perception_eval.py` compares camera-derived positions to the sim ground truth and gates on

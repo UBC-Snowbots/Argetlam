@@ -37,7 +37,7 @@ from .config import load_config
 from .control.presets import HOME_HW, RETURN, at_goal, check_joint_goal, plan_preset, preset_names, request_hw_home
 from .session import SessionRecorder
 from .types import (Action, ArmPreset, BodyPose, CameraFrame, ClutchMsg, EEGState, GripToggle, Intent, MirrorMsg,
-                    PlaneTune, Query, RealJoints, Utterance)
+                    ObjectPoses, PlaneTune, Query, RealJoints, Utterance)
 
 log = logging.getLogger("rover_intent")
 ROOT = Path(__file__).resolve().parents[2]
@@ -122,6 +122,19 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
         except Exception as e:  # missing calib / torch: do not crash the control loop, fall back to sim
             log.warning("perception: camera source requested but unavailable (%s); falling back to sim", e)
             perc_source = "camera_unavailable"
+    elif perc_source == "external":
+        # A remote device (the laptop's RealSense) detects + locates objects itself and sends ObjectPoses; no camera
+        # or detector here, only the tracker (same confidence gate / staleness / smoothing as camera mode).
+        from types import SimpleNamespace
+        from .perception.projection import Detection
+        from .perception.source import PerceptionTracker
+        pc = cfg.get("perception", {})
+        perception = SimpleNamespace(detect=None, tracker=PerceptionTracker(
+            min_conf=pc.get("min_conf", 0.25), stale_s=pc.get("stale_s", 1.0), alpha=pc.get("smoothing", 0.5)))
+        log.info("perception: EXTERNAL (object_poses from a remote device, e.g. the laptop RealSense)")
+    mirror_to_sim = bool(cfg.get("perception", {}).get("mirror_to_sim", True))
+    mirror_period = 1.0 / max(0.1, float(cfg.get("perception", {}).get("mirror_hz", 2.0)))
+    mirror_t, unknown_logged = 0.0, set()
 
     def unseen_objects(intent):
         """Camera mode: required objects the perception tracker does NOT currently see (fresh). Empty
@@ -751,7 +764,8 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
                     rx.reply(hud_video, msg.model_dump(mode="json"))
                 except OSError:
                     pass  # nothing listening on the video port yet: drop it, never block the loop
-                if perception is not None and (cam_future is None or cam_future.done()) and msg.seq != cam_seq:
+                if (perception is not None and perception.detect is not None
+                        and (cam_future is None or cam_future.done()) and msg.seq != cam_seq):
                     cam_seq = msg.seq
                     try:
                         import base64
@@ -764,6 +778,38 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
                         cam_future = vpool.submit(perception.detect, rgb, msg.objects)
                     except Exception as e:
                         log.warning("camera frame decode failed: %s", e)
+            elif isinstance(msg, ObjectPoses):
+                # remote perception results (external mode): feed the tracker exactly like a camera detection
+                if perc_source != "external":
+                    if "object_poses" not in unknown_logged:
+                        unknown_logged.add("object_poses")
+                        log.warning("object_poses from %s ignored: perception.source is %r, not 'external'",
+                                    msg.source, perc_source)
+                else:
+                    dets = []
+                    for name, op in msg.objects.items():
+                        if name not in scene.objects:
+                            if name not in unknown_logged:
+                                unknown_logged.add(name)
+                                log.warning("object_poses: unknown object %r (scene has %s); ignored", name,
+                                            scene.names())
+                            continue
+                        xyz = np.asarray(op.pos[:3], float)
+                        dets.append(Detection(name=name, xyz=xyz, confidence=float(op.conf), px_err_cm=float(op.err_cm),
+                                              bbox=(0.0, 0.0, 0.0, 0.0), in_workspace=True, source=msg.source))
+                        if op.desc:
+                            descriptions[name] = op.desc
+                    perception.tracker.update(dets, t0)
+                    for name, xyz in perception.tracker.updates(t0).items():
+                        scene.update_from_bottom(name, xyz)
+                    if mirror_to_sim and t0 - mirror_t >= mirror_period:
+                        # the sim reconstructs the real table: move the Isaac objects to the seen positions. Never the
+                        # object the gripper holds (the sim grasp owns it) and only freshly seen ones.
+                        seen = {n: [float(v) for v in xyz] for n, xyz in perception.tracker.updates(t0).items()
+                                if n != arbiter.held and perception.tracker.seen(n, t0)}
+                        if seen:
+                            robot.place_objects(seen)
+                            mirror_t = t0
             elif isinstance(msg, Query):
                 last_query_t, follower_ever = t0, True  # the follower polls here: drives the real_following light
                 rx.reply(addr, {"kind": "state", "mode": arbiter.mode.value, "held": arbiter.held,
