@@ -24,7 +24,14 @@ body:
                         #   plane = image-plane TCP teleop, depth ignored, IK path (body/plane.py) - the default;
                         #   arm_mirror = full-arm joint mirroring, no IK (body/arm_mirror.py) - the fallback.
                         # (The legacy position / calibrated / gesture modes were removed.)
-  clutch: {calib_s: 2.0, still_m: 0.03, palm_s: 1.0, raise_m: 0.05}  # F / open palm held up 1 s / left hand up
+  # clutch: F / open palm held up palm_s / left hand up. Pause knobs (plane mode only; app.py forces them off in
+  # arm_mirror, which keeps its still calibration). pause_on_lost: when following, hold the target if the arm crops
+  # out of frame instead of releasing / gliding to base; resume_s: continuous visibility before it resumes (no
+  # re-calibration, re-anchored at the current TCP = the ratchet re-centre); pause_max_s: a longer absence falls
+  # through to the normal "tracking lost" stow (arm.on_drop); track_s: arm not visible this long -> pause (or the
+  # tracking-lost release). Off here; dev_arm_real.yaml turns pause on with a fast engage. See docs/BODY_TELEOP.md.
+  clutch: {calib_s: 2.0, still_m: 0.03, palm_s: 1.0, raise_m: 0.05,
+           pause_on_lost: false, resume_s: 0.3, pause_max_s: 8.0, track_s: 1.0}
   grip_from_hand: true  # fist closes the gripper; stand-in until EEG is live
   # OPTIONAL wrist-roll follow (plane mode): turning the CONTROL hand about the forearm (pronation/supination)
   # rotates the gripper about its own axis = joint 6 (the wrist roll). Default OFF. Toggle live with the body-client

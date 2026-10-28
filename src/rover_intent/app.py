@@ -164,7 +164,13 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
     pool, pending = ThreadPoolExecutor(max_workers=1), []
     c = cfg["body"].get("clutch", {})
     clutch = Clutch(calib_s=c.get("calib_s", 2.0), still_m=c.get("still_m", 0.03), palm_s=c.get("palm_s", 1.0),
-                    raise_m=c.get("raise_m", 0.05))
+                    raise_m=c.get("raise_m", 0.05),
+                    pause_on_lost=bool(c.get("pause_on_lost", False)), resume_s=float(c.get("resume_s", 0.3)),
+                    pause_max_s=float(c.get("pause_max_s", 8.0)), track_s=float(c.get("track_s", 1.0)))
+    # Pause-on-tracking-loss is plane only (the ratchet re-centre re-anchors the plane mapper at the current TCP).
+    # arm_mirror keeps releasing on a tracking loss so arm.on_drop still stows the arm.
+    if not plane_on:
+        clutch.pause_on_lost = False
     hud = (cfg["net"].get("hud_host", "127.0.0.1"), cfg["net"].get("hud_port", 47130))
     hud_video = (cfg["net"].get("hud_host", "127.0.0.1"), cfg["net"].get("hud_video_port", 47131))
     last_body, last_target, last_body_arrival, last_visible_t = None, None, 0.0, 0.0
@@ -277,6 +283,23 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
             if arbiter.mode == Mode.FOLLOW or arbiter.assist:   # a running grab assist stops too (dead-man)
                 arbiter.abort()
             body_target = body_joint_target = None
+        if ev.kind == "paused":
+            # arm left the camera frame: HOLD the current target (no motion, no on_drop glide). Stay in FOLLOW so
+            # a stale body_target (None) makes arbiter.target return None -> the arm holds at the commanded pose.
+            body_target = body_joint_target = last_target = None
+            say = "Paused, bring your hand back."
+            arbiter.last_say = say
+            rx.reply(bubble, {"state": "reply", "text": say})
+            return
+        if ev.kind == "resumed":
+            # arm is back: re-anchor the plane mapper at the current TCP with the hand's current position as the new
+            # neutral (the ratchet re-centre), so the commanded target is continuous (target == current TCP on the
+            # first frame). Already in FOLLOW, so the arm picks up from exactly where it held.
+            retarget.engage(arm.fk(q_cmd)[:3, 3], None, joint6=q_cmd[5])
+            body_target = last_target = body_joint_target = None
+            arbiter.last_say = "Following again."
+            rx.reply(bubble, {"state": "reply", "text": "Following again."})
+            return
         if ev.kind == "released" and on_drop and clutch.release_reason in drop_reasons:
             if time.time() < hw_busy_until:
                 log.info("on_drop %s skipped: the real arm is homing", on_drop)
