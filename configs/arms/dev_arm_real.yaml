@@ -144,14 +144,16 @@ safety:
   # z floor 0.38 -> -0.122 -> 0.045 (2026-10-28): 0.045 = the plywood WORK board (table.top +0.015) + 3 cm. The
   # -0.122 step assumed the objects stood on the main table, 16.7 cm lower: it let the gripper ~14 cm into the board.
   # Pedestal (tape) and board (depth) heights are estimates (+-1 cm). Joint limits reach z ~ -0.57 over x 0.35-0.70.
-  workspace_min: [0.47, -0.22, 0.045]
+  workspace_min: [0.47, -0.22, 0.136]
   workspace_max: [0.70, 0.18, 0.60]
 
 table:
   # The real arm's base sits on a ~6 in (0.152 m) pedestal on the MAIN table (Pranav, 2026-10-28). The objects stand
   # on a plywood board raised ~16.7 cm on 2x4s (D415 depth; the board is tilted ~4.5 deg, +-2 cm), WORK surface:
   # -0.152 + 0.167 = +0.015 in the arm frame (bottom of the base = z 0). Tape-check it. The sim ground uses this.
-  top: 0.015
+  top: 0.106   # MEASURED 2026-10-28 18:4x: gripper centre 7.5 cm above the board where FK said 16.6 cm, so the
+               # board is 9.1 cm higher in the arm frame than the 0.015 from pedestal + board heights. Cause not
+               # found yet (base frame origin vs base bottom? joint offsets?); this keeps the floor ABOVE the board.
   x: [0.30, 0.75]
   y: [-0.50, 0.50]
 
@@ -159,9 +161,9 @@ table:
 # flat-lying UBC Rover tape roll. pos z = GRASP point (block 6 cm up, roll 3.5 cm up, above table.top). x/y are
 # reachable placeholders until the camera->base calibration / object_poses gives real positions.
 scene:
-  block: {pos: [0.542, 0.037, 0.075], height: 0.103, radius: 0.0285, mass: 0.14, shape: box,
+  block: {pos: [0.542, 0.037, 0.166], height: 0.103, radius: 0.0285, mass: 0.14, shape: box,
           desc: "small upright wooden block, light natural wood, about 10 cm tall"}
-  tape:  {pos: [0.55, 0.15, 0.055], height: 0.06, radius: 0.05, mass: 0.15, shape: cylinder,
+  tape:  {pos: [0.55, 0.15, 0.146], height: 0.06, radius: 0.05, mass: 0.15, shape: cylinder,
           desc: "white roll of UBC Rover sticker tape with a brown cardboard centre, short and round"}
 
 real_arm:
