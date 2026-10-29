@@ -178,6 +178,10 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
     presets = cfg["arm"].get("presets", {}) or {}
     on_drop = cfg["arm"].get("on_drop")  # preset to go to when the body drops out of view (None = freeze)
     engage_dz = float((cfg.get("plane") or {}).get("engage_dz", 0.0))   # plane: start the follow this far below
+    # IK orientation for AUTO skills (pick/place/move): "full" (default) holds the exact tool angle; the real arm
+    # uses "frozen" (wrist held, like body teleop): its elbow is at the end of its travel near the block, where the
+    # full-orientation pick stalled at pre-grasp (2026-10-28) while a wrist-held jog reached the same spot.
+    auto_orient = str(cfg.get("skills", {}).get("auto_orient", "full"))
     if on_drop and on_drop not in presets:
         raise ValueError(f"arm.on_drop {on_drop!r} is not one of the arm's presets {list(presets)}")
     # which clutch releases send the arm to the on_drop preset. arm_mirror adds "disable" (F / left hand lowered),
@@ -953,7 +957,7 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
         # teleop (FOLLOW) can free/freeze the wrist (orient from the profile); AUTO grasps keep full orientation.
         mirror_age = (t0 - real_t) if real_t else None
         mirror_hold = mirror_real and (real_q is None or mirror_age is None or mirror_age > MIRROR_STALE_S)
-        orient = teleop_orient if arbiter.mode == Mode.FOLLOW else "full"
+        orient = teleop_orient if arbiter.mode == Mode.FOLLOW else auto_orient
         arm_mirror_fresh = (arm_mirror_on and arbiter.mode == Mode.FOLLOW and clutch.state == "following"
                             and body_joint_target is not None and t0 - body_t < 0.5)
         if mirror_real and not mirror_hold:

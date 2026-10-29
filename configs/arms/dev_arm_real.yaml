@@ -57,6 +57,7 @@ skills:
   # The real arm moves at its measured joint speeds (max_vel above, ~0.06-0.16 rad/s), so one skill waypoint (e.g.
   # home -> above an object on the table) takes 15-20 s. The default 8 s gave up halfway (sim check 2026-10-28).
   waypoint_timeout_s: 30.0
+  auto_orient: frozen   # picks hold the wrist like body teleop (full orientation stalled at pre-grasp)
 
 confirm:
   skills: false  # no spoken "yes" for pick/place/move either (Pranav 2026-10-28: "it keeps asking for yeses, it
