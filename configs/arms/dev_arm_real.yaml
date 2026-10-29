@@ -95,7 +95,7 @@ body:
 # and near the lower chest to creep back (to x 0.47); mid-chest holds. Flip a sign if a control drives the wrong way
 # (or press M for a mirrored webcam). See docs/PLANE_TELEOP.md.
 plane:
-  engage_dz: -0.025   # start each follow 2.5 cm below the current TCP, to match a resting arm (Pranav 2026-10-28)
+  engage_dz: -0.076   # start each follow 3 in (7.6 cm) below the current TCP, to match a resting arm (Pranav 2026-10-28: 1 in was still too high)
   side: right                 # the operator's CONTROL hand (lateral + vertical); the other hand drives reach
   gain:    {lateral: 0.20, vertical: 0.15, reach: 0.15}   # reach gain is only used in reach_mode: position
   sign:    {lateral: 1.0, vertical: 1.0, reach: 1.0}
