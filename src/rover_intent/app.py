@@ -12,7 +12,9 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import json
 import math
+import re
 import time
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
@@ -41,6 +43,7 @@ from .types import (Action, ArmPreset, BodyPose, CameraFrame, ClutchMsg, EEGStat
                     ObjectPoses, PlaneTune, Query, RealJoints, Utterance)
 
 log = logging.getLogger("rover_intent")
+_LEVEL_RE = re.compile(r"\b(grip(per)? is level|fingers are level|mark (the )?level|level (grip|gripper))\b")
 ROOT = Path(__file__).resolve().parents[2]
 WINDUP = 0.25  # rad: max gap between the commanded and the measured joint positions
 DROP_REASONS = ("tracking lost",)  # clutch releases that count as "the arm dropped" for arm.on_drop
@@ -185,6 +188,13 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
     auto_orient = str(cfg.get("skills", {}).get("auto_orient", "full"))
     level_grip = bool(cfg.get("skills", {}).get("level_grip", False))
     level_offset = math.radians(float(cfg.get("skills", {}).get("level_roll_offset_deg", 0.0)))
+    level_file = ROOT / "configs" / "arms" / f"{cfg.get('arm_profile', 'arm')}_grip_level.json"
+    try:   # a saved "grip is level" measurement wins over the profile value and turns levelling on
+        _lv = json.loads(level_file.read_text())
+        level_offset, level_grip = math.radians(float(_lv["offset_deg"])), True
+        log.info("grip level: offset %.1f deg from %s (picks level the fingers)", _lv["offset_deg"], level_file.name)
+    except (OSError, ValueError, KeyError):
+        pass
     j6_lo, j6_hi = float(arm.lower[5]), float(arm.upper[5])
 
     def level_roll(q, offset=0.0):
@@ -741,6 +751,21 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
                 stop = urgent_stop(msg.text)
                 if stop is not None:  # handled in this tick; never queued behind a cloud call (STOP also leaves
                     finish(msg.text, addr, stop, 0.0)  # mirror; finish clears any armed confirm)
+                elif _LEVEL_RE.search(msg.text.lower()):
+                    # "grip is level": the operator turned the gripper until its fingers close level with the table.
+                    # Store real-minus-model level roll at this pose, switch pick levelling on, and save it.
+                    level_offset = float(q_cmd[5] - level_roll(q_cmd, 0.0))
+                    level_grip = True
+                    try:
+                        level_file.write_text(json.dumps({"offset_deg": round(math.degrees(level_offset), 2),
+                                                          "t": time.time(), "j6_deg": round(math.degrees(q_cmd[5]), 2)}))
+                    except OSError as e:
+                        log.warning("could not save %s: %s", level_file, e)
+                    say = f"Got it: gripper level, offset {math.degrees(level_offset):.0f} degrees. Picks will level the fingers."
+                    log.info("grip level marked: offset %.1f deg (j6 %.1f deg)", math.degrees(level_offset),
+                             math.degrees(q_cmd[5]))
+                    arbiter.last_say = say
+                    rx.reply(addr, {"kind": "reply", "text": msg.text, "ok": True, "say": say, "mode": arbiter.mode.value})
                 elif mirror_real:  # any non-stop command is motion: refuse while mirroring the real arm
                     rx.reply(addr, {"kind": "reply", "text": msg.text, "mode": arbiter.mode.value, "mirror": True,
                                     "say": "Mirroring the real arm; say stop to leave."})

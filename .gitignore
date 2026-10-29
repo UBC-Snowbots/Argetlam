@@ -13,3 +13,6 @@ data/profiles/
 logs/
 .pytest_cache/
 assets/rover2026/usd/
+
+# per-bench "grip is level" measurement (app writes it)
+configs/arms/*_grip_level.json
