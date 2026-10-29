@@ -22,7 +22,8 @@ def test_quick_pose_defers_everything_else_to_nemotron(text):
     assert quick_pose(text, OBJ, PRE) is None
 
 
-def test_dev_arm_real_moves_poses_without_confirm_but_gates_skills():
+def test_dev_arm_real_moves_without_confirm():
+    # skills ungated too since 2026-10-28 (Pranav: no yes/no prompts on the real arm)
     c = load_config(arm="dev_arm_real")["confirm"]
-    assert c["presets"] is False and c["skills"] is True
+    assert c["presets"] is False and c["skills"] is False
     assert load_config(arm="dev_arm")["confirm"].get("presets", True) is True   # sim profile unchanged

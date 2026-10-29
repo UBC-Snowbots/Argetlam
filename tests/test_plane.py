@@ -182,6 +182,8 @@ def test_box_reachability_frozen():
     """The dev_arm_real plane box is mostly reachable by the frozen-wrist IK that holds the base-pose orientation."""
     arm, home, cfg = _arm()
     lo = np.array(cfg["safety"]["workspace_min"], float); hi = np.array(cfg["safety"]["workspace_max"], float)
+    # the z floor was removed (2026-10-28, joint limits only), so sample the useful volume: board + 3 cm and up
+    lo[2] = max(lo[2], cfg["table"]["top"] + 0.03)
     R = arm.fk(home)[:3, :3]
     ok = tot = floor_ok = floor_tot = 0
     for x in np.linspace(lo[0], hi[0], 5):
@@ -199,7 +201,9 @@ def test_box_reachability_frozen():
     # edge (x 0.47, z ~0.08-0.43: the elbow would have to fold; straight-line paths from home miss it too), so the
     # whole box is ~88%. The floor layer (where the table objects are) must be fully reachable.
     # board surface (2026-10-28, floor 0.045): the back-edge pocket reaches the floor at x 0.47 (4/25 points)
-    assert floor_ok / floor_tot >= 0.80, f"only {floor_ok}/{floor_tot} of the floor layer reachable (frozen)"
+    # board + 3 cm (0.136): the pocket is the whole x 0.47 row plus 2 centre points at x 0.53 (18/25); picks there
+    # fall back to the free wrist (skills.auto_orient)
+    assert floor_ok / floor_tot >= 0.70, f"only {floor_ok}/{floor_tot} of the floor layer reachable (frozen)"
     assert ok / tot >= 0.85, f"only {100*ok/tot:.0f}% of the box reachable (frozen)"
 
 
