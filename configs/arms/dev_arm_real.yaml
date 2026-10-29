@@ -60,6 +60,8 @@ skills:
   auto_orient: frozen   # picks hold the wrist like body teleop (full orientation stalled at pre-grasp)
   waypoint_tol: 0.02    # a skill step counts as reached within 2 cm (default 1 cm)
   align_tol: 0.015      # pre-grasp lines up within 1.5 cm sideways (default 3 mm); the fingers open ~8 cm
+  level_grip: false     # picks roll the wrist so the fingers close horizontally; ON once the offset is measured
+  level_roll_offset_deg: 0.0   # real gripper roll minus the model's 'level' roll, measured at the bench
 
 confirm:
   skills: false  # no spoken "yes" for pick/place/move either (Pranav 2026-10-28: "it keeps asking for yeses, it

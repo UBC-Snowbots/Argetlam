@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import math
 import time
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
@@ -182,6 +183,37 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
     # uses "frozen" (wrist held, like body teleop): its elbow is at the end of its travel near the block, where the
     # full-orientation pick stalled at pre-grasp (2026-10-28) while a wrist-held jog reached the same spot.
     auto_orient = str(cfg.get("skills", {}).get("auto_orient", "full"))
+    level_grip = bool(cfg.get("skills", {}).get("level_grip", False))
+    level_offset = math.radians(float(cfg.get("skills", {}).get("level_roll_offset_deg", 0.0)))
+    j6_lo, j6_hi = float(arm.lower[5]), float(arm.upper[5])
+
+    def level_roll(q, offset=0.0):
+        """Joint-6 angle nearest q[5] at which the finger axis (the TCP frame's y axis) is horizontal in the MODEL,
+        plus `offset` (the measured difference between the real gripper and the model). Clamped to joint 6's limits."""
+        def zc(a):
+            qq = np.array(q, float).copy(); qq[5] = a
+            return float(arm.fk(qq)[2, 1])
+        best = None
+        for sgn in (1, -1):
+            prev_a, prev_z = q[5], zc(q[5])
+            for k in range(1, 181):
+                a_ = q[5] + sgn * math.radians(k)
+                z_ = zc(a_)
+                if prev_z == 0.0 or np.sign(z_) != np.sign(prev_z):
+                    lo, hi = prev_a, a_
+                    for _ in range(20):          # bisection on the sign change
+                        mid = 0.5 * (lo + hi)
+                        if np.sign(zc(mid)) == np.sign(zc(lo)):
+                            lo = mid
+                        else:
+                            hi = mid
+                    cand = 0.5 * (lo + hi)
+                    if best is None or abs(cand - q[5]) < abs(best - q[5]):
+                        best = cand
+                    break
+                prev_a, prev_z = a_, z_
+        target = (q[5] if best is None else best) + offset
+        return float(min(max(target, j6_lo), j6_hi))
     # skill reach tolerances (the real arm sets them looser: its model lands 1-1.4 cm off near the block, inside
     # the 5 deg joint-limit margin, and the 3 mm pre-grasp alignment never passed). planner.skills reads ALIGN_TOL
     # at plan time, the arbiter checks waypoint_tol every tick.
@@ -983,6 +1015,12 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
                     and getattr(retarget, "roll_target", None) is not None):
                 q_des = np.array(q_des, float).copy()
                 q_des[5] = float(retarget.roll_target)
+            # AUTO skills on the real arm (skills.level_grip): roll joint 6 so the fingers close HORIZONTALLY (side to
+            # side on the object), whatever roll the wrist was left at (2026-10-28: a pick came in with the gripper
+            # twisted). joint 6 turns about the tool axis through the TCP, so the position is unchanged.
+            elif arbiter.mode == Mode.AUTO and level_grip:
+                q_des = np.array(q_des, float).copy()
+                q_des[5] = level_roll(q_des, level_offset)
         q_cmd = safety.step(q_cmd, q_des, dt, 0.0 if mirror_real else input_age)
         q_cmd = np.clip(q_cmd, q - WINDUP, q + WINDUP)  # anti-windup: never run far ahead of the real joints
         goal_done = joint_goal is not None and at_goal(q_cmd, q, joint_goal)
