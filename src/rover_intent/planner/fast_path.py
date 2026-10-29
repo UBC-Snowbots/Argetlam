@@ -46,7 +46,7 @@ from .nemotron import quick_pose
 from ..control.presets import RETURN
 
 # ---- distance / angle defaults and clamps ----------------------------------------------------------------------
-MAX_DIST_M = 0.15       # per-command Cartesian clamp
+MAX_DIST_M = 0.60       # per-command Cartesian clamp (was 0.15; Pranav 2026-10-28: 'if I say 25 I want 25')
 DEFAULT_DIST_M = 0.05   # a direction with no distance
 SMALL_DIST_M = 0.03     # "a bit" / "a little"
 MAX_ANGLE = radians(45)

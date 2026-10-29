@@ -144,7 +144,10 @@ safety:
   # z floor 0.38 -> -0.122 -> 0.045 (2026-10-28): 0.045 = the plywood WORK board (table.top +0.015) + 3 cm. The
   # -0.122 step assumed the objects stood on the main table, 16.7 cm lower: it let the gripper ~14 cm into the board.
   # Pedestal (tape) and board (depth) heights are estimates (+-1 cm). Joint limits reach z ~ -0.57 over x 0.35-0.70.
-  workspace_min: [0.47, -0.22, 0.136]
+  # z floor REMOVED on Pranav's instruction (2026-10-28: 'remove the safety permissions that prevent me from lowering
+  # to whatever I want'): -0.60 is below anything the joints can reach, so only the joint limits bound the depth.
+  # The gripper CAN hit the board (top 0.106) now; e-stop in reach. Put back 0.136 (board + 3 cm) to restore.
+  workspace_min: [0.47, -0.22, -0.60]
   workspace_max: [0.70, 0.18, 0.60]
 
 table:
