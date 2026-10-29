@@ -378,8 +378,14 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
         axis, sign = CART[direction]
         T_des_jog = arm.fk(q_cmd).copy()
         T_des_jog[axis, 3] += sign * dist_m
-        goal_q = arm.ik(np.array(q_cmd, float), T_des_jog, iters=200, tol=1e-4, orient="full")
-        reached = float(np.linalg.norm(arm.fk(goal_q)[:3, 3] - T_des_jog[:3, 3]))
+        # Hold the exact tool orientation first; if that can't get there (2026-10-28: "drop 10 centimeters" from the
+        # base pose hit the wrist limits and was refused), fall back to the body-teleop wrist hold ("frozen": the
+        # wrist joints keep their angles, the tool tilts a few degrees), which reaches down to the work surface.
+        for orient in ("full", "frozen"):
+            goal_q = arm.ik(np.array(q_cmd, float), T_des_jog, iters=200, tol=1e-4, orient=orient)
+            reached = float(np.linalg.norm(arm.fk(goal_q)[:3, 3] - T_des_jog[:3, 3]))
+            if reached <= 0.01:
+                break
         if reached > 0.01:   # 1 cm: the IK could not get there (near a limit / out of the reachable shell)
             return False, f"Can't reach {dist_m * 100:g} centimetres {direction}; out of reach."
         goal, why = check_joint_goal(goal_q, q_cmd, clutch.state, arm, safety.ws_min, safety.ws_max,
