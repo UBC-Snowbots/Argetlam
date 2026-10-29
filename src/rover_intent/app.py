@@ -229,7 +229,9 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
     # at plan time, the arbiter checks waypoint_tol every tick.
     from .planner import skills as _skills
     _skills.ALIGN_TOL = float(cfg.get("skills", {}).get("align_tol", _skills.ALIGN_TOL))
+    _skills.GRIP_DWELL = float(cfg.get("skills", {}).get("grip_dwell_s", _skills.GRIP_DWELL))   # wait after close
     arbiter.waypoint_tol = float(cfg.get("skills", {}).get("waypoint_tol", arbiter.waypoint_tol))
+    arbiter.stall_tol = float(cfg.get("skills", {}).get("stall_tol", 0.0))
     if on_drop and on_drop not in presets:
         raise ValueError(f"arm.on_drop {on_drop!r} is not one of the arm's presets {list(presets)}")
     # which clutch releases send the arm to the on_drop preset. arm_mirror adds "disable" (F / left hand lowered),

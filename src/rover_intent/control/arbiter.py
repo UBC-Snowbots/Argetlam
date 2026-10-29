@@ -63,6 +63,8 @@ class Arbiter:
         self.eeg_on, self.eeg_off, self.eeg_hold_s = eeg_on, eeg_off, eeg_hold_s
         self.assist_radius, self.assist_gain = assist_radius, assist_gain
         self.waypoint_tol = waypoint_tol
+        self.stall_tol = 0.0        # m: > 0 lets a waypoint that stalls this close count as reached (skills.stall_tol)
+        self._stall_ref = None
         self.waypoint_timeout = waypoint_timeout  # s: give up (HOLD) if a waypoint can't be reached, e.g. blocked
         self._wp_started: float | None = None
         self._plan: list[Waypoint] = []
@@ -303,6 +305,19 @@ class Arbiter:
             d = tcp_now - wp.pos
             reached = (np.linalg.norm(d) < self.waypoint_tol if wp.tol_xy is None
                        else np.linalg.norm(d[:2]) < wp.tol_xy and abs(d[2]) < self.waypoint_tol)
+            # Stalled close enough (stall_tol > 0, the real arm): the sim gripper can rest on the sim object a cm or two
+            # above the grip point while the real one is already around the real object (2026-10-28: the real arm got
+            # to the block, the sim stalled 2 cm up and the pick timed out without closing). If the TCP has not moved
+            # > 2 mm for 1.5 s within stall_tol of the waypoint, count it as reached.
+            if not reached and self.stall_tol > 0 and np.linalg.norm(d) < self.stall_tol:
+                tcp_a = np.asarray(tcp_now, float)
+                if self._stall_ref is None or np.linalg.norm(tcp_a - self._stall_ref[0]) > 0.002:
+                    self._stall_ref = (tcp_a.copy(), now)
+                elif now - self._stall_ref[1] >= 1.5:
+                    reached = True
+                    self.say_log.append(f"{wp.label}: stalled {100 * np.linalg.norm(d):.1f} cm short, continuing")
+            else:
+                self._stall_ref = None
             if reached:
                 if wp.gripper != self.gripper:
                     self.grip_source = "skill"
