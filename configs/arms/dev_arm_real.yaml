@@ -59,7 +59,8 @@ skills:
   waypoint_timeout_s: 30.0
 
 confirm:
-  skills: true   # the physical arm: require a spoken "yes" before any autonomous pick/place/move too
+  skills: false  # no spoken "yes" for pick/place/move either (Pranav 2026-10-28: "it keeps asking for yeses, it
+                 # sucks"). The floor, workspace box, speed caps and instant STOP still apply.
   presets: false # named poses move at once, no spoken yes (Pranav 2026-10-23: the 2-step confirm was too slow
                  # on the real mic); skills stay gated: they aim at SIM object positions
   motion: false  # the no-camera voice jogs (Cartesian jog, joint jog, sequences, speed) also move at once: they are

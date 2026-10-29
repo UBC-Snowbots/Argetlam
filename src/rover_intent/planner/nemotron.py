@@ -31,6 +31,8 @@ wrist_roll (turn the OPTIONAL wrist-roll follow on or off: set "wrist_roll" to "
 stop, follow (mirror the user's arm), reset,
 clarify (you are not sure what the user means: ask them in "say", and nothing moves), unknown (not a robot command).
 Only use jog/joint_jog for a direct nudge with no object; to move an OBJECT use pick/place/move.
+"drop"/"lower"/"descend" + a distance = jog down; "raise"/"lift" + a distance = jog up, UNLESS an object is named
+("drop 20 centimetres" is a jog down, never a place). Ignore trailing chatter or swearing after a command.
 Defaults when a turn is asked in degrees with NO joint named: "rotate"/"turn"/"spin" (or "left"/"right") by N degrees
 means joint_jog the base by N degrees; "up"/"down" by N degrees means joint_jog the shoulder by N degrees.
 Recent commands, oldest to newest (use these if the user refers back): {context}.
