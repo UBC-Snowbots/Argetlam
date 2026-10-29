@@ -164,7 +164,7 @@ table:
 # flat-lying UBC Rover tape roll. pos z = GRASP point (block 6 cm up, roll 3.5 cm up, above table.top). x/y are
 # reachable placeholders until the camera->base calibration / object_poses gives real positions.
 scene:
-  block: {pos: [0.542, 0.037, 0.166], height: 0.103, radius: 0.0285, mass: 0.14, shape: box,
+  block: {pos: [0.521, -0.129, 0.166], height: 0.103, radius: 0.0285, mass: 0.14, shape: box,
           desc: "small upright wooden block, light natural wood, about 10 cm tall"}
   tape:  {pos: [0.55, 0.15, 0.146], height: 0.06, radius: 0.05, mass: 0.15, shape: cylinder,
           desc: "white roll of UBC Rover sticker tape with a brown cardboard centre, short and round"}
