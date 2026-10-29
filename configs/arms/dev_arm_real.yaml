@@ -58,6 +58,8 @@ skills:
   # home -> above an object on the table) takes 15-20 s. The default 8 s gave up halfway (sim check 2026-10-28).
   waypoint_timeout_s: 30.0
   auto_orient: frozen   # picks hold the wrist like body teleop (full orientation stalled at pre-grasp)
+  waypoint_tol: 0.02    # a skill step counts as reached within 2 cm (default 1 cm)
+  align_tol: 0.015      # pre-grasp lines up within 1.5 cm sideways (default 3 mm); the fingers open ~8 cm
 
 confirm:
   skills: false  # no spoken "yes" for pick/place/move either (Pranav 2026-10-28: "it keeps asking for yeses, it

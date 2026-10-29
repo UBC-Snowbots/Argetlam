@@ -182,6 +182,12 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
     # uses "frozen" (wrist held, like body teleop): its elbow is at the end of its travel near the block, where the
     # full-orientation pick stalled at pre-grasp (2026-10-28) while a wrist-held jog reached the same spot.
     auto_orient = str(cfg.get("skills", {}).get("auto_orient", "full"))
+    # skill reach tolerances (the real arm sets them looser: its model lands 1-1.4 cm off near the block, inside
+    # the 5 deg joint-limit margin, and the 3 mm pre-grasp alignment never passed). planner.skills reads ALIGN_TOL
+    # at plan time, the arbiter checks waypoint_tol every tick.
+    from .planner import skills as _skills
+    _skills.ALIGN_TOL = float(cfg.get("skills", {}).get("align_tol", _skills.ALIGN_TOL))
+    arbiter.waypoint_tol = float(cfg.get("skills", {}).get("waypoint_tol", arbiter.waypoint_tol))
     if on_drop and on_drop not in presets:
         raise ValueError(f"arm.on_drop {on_drop!r} is not one of the arm's presets {list(presets)}")
     # which clutch releases send the arm to the on_drop preset. arm_mirror adds "disable" (F / left hand lowered),
