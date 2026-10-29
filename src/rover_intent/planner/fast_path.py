@@ -57,11 +57,17 @@ MAX_STEPS = 5
 
 # ---- Cartesian directions (robot base frame as the operator faces the arm): (axis index, sign) -----------------
 CART = {"left": (1, +1), "right": (1, -1), "up": (2, +1), "down": (2, -1),
+        # vertical verbs (2026-10-28: "drop 20 centimeters" went to the cloud, came back as a PLACE skill and asked
+        # for a yes): drop / lower / descend = down, raise / lift = up
+        "drop": (2, -1), "lower": (2, -1), "descend": (2, -1), "raise": (2, +1), "lift": (2, +1),
         "forward": (0, +1), "forwards": (0, +1), "ahead": (0, +1),
         "back": (0, -1), "backward": (0, -1), "backwards": (0, -1)}
 
+_SAY_DIR = {"drop": "down", "lower": "down", "descend": "down", "raise": "up", "lift": "up"}   # spoken word
+
 # opposite Cartesian direction (for "the other way"), keyed by every CART spelling
-_OPP_CART = {"left": "right", "right": "left", "up": "down", "down": "up",
+_OPP_CART = {"drop": "up", "lower": "up", "descend": "up", "raise": "down", "lift": "down",
+             "left": "right", "right": "left", "up": "down", "down": "up",
              "forward": "back", "forwards": "back", "ahead": "back",
              "back": "forward", "backward": "forward", "backwards": "forward"}
 
@@ -152,7 +158,7 @@ def make_cart_step(direction: str, dist_m: float) -> dict:
     dist_m = min(MAX_DIST_M, max(0.0, float(dist_m)))
     cm = dist_m * 100
     return {"kind": "cartjog", "direction": direction, "dist_m": dist_m,
-            "say": f"Moving {direction} {cm:g} centimetre{'' if cm == 1 else 's'}."}
+            "say": f"Moving {_SAY_DIR.get(direction, direction)} {cm:g} centimetre{'' if cm == 1 else 's'}."}
 
 
 def make_joint_step(joint_idx: int, sign: int, angle_rad: float, dir_word: str | None = None) -> dict:

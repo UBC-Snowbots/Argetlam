@@ -102,7 +102,7 @@ real_arm:        # the button panel's HOME button (control/presets.py); off unle
   busy_s: 120    # presets refused for this long after a home; then the sim resets to arm.home
 
 confirm:          # voice safety: the app asks "say yes to confirm" before a move; stop words always bypass this
-  window_s: 5.0   # seconds to say yes/confirm/ok after the prompt; anything else or a timeout cancels
+  window_s: 12.0  # seconds to say yes/confirm/ok after the prompt (5 s timed out real yeses, 2026-10-28)
   skills: false   # also require confirm for the autonomous pick/place/move voice skills. Off here so the sim gate
                   # (scripts/gate.sh, dev_arm) keeps scripting skills without a yes; dev_arm_real turns it on.
   presets: true   # named poses (stow/ready/return/home) ask "say yes" first. dev_arm_real sets this false ("just
