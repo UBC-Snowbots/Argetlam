@@ -7,8 +7,10 @@ window, and a speech bubble on the VM screen (bubble.py). Uses the VM client's L
 """
 import argparse
 import json
+import os
 import queue
 import socket
+import sys
 import threading
 import time
 
@@ -122,11 +124,26 @@ def main():
 
     # 3) Enter in this window (always works)
     def enter():
+        # This thread used to return on EOFError / KeyboardInterrupt, which silently killed Enter for the rest of
+        # the session (2026-10-28: py-spy showed every thread alive except this one). Keep listening instead:
+        # ignore a stray Ctrl+C, and on EOF reopen the console input.
+        warned = False
         while True:
             try:
                 input()
-            except (EOFError, KeyboardInterrupt):
-                return
+            except KeyboardInterrupt:
+                continue
+            except EOFError:
+                if not warned:
+                    print("  (console input closed; reopening it - Shift+2 also works)", flush=True)
+                    warned = True
+                try:
+                    sys.stdin = open("CONIN$" if os.name == "nt" else "/dev/tty")
+                except OSError:
+                    pass
+                time.sleep(0.5)
+                continue
+            warned = False
             toggle("Enter")
 
     threading.Thread(target=enter, daemon=True).start()

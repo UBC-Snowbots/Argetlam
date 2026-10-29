@@ -344,7 +344,7 @@ def test_real_sequence_runs_and_stop_cancels():
 
 
 def test_real_speed_and_motion_vs_skills_confirm():
-    app, th, s = _app(load_config(arm="dev_arm_real"), 47234, 10.0)
+    app, th, s = _app(_skill_confirm_on(load_config(arm="dev_arm_real")), 47234, 10.0)
     try:
         assert _say(s, 47234, "slower")["say"].lower().startswith("slow")
         assert _say(s, 47234, "faster")["say"].lower().startswith("fast")
@@ -358,3 +358,10 @@ def test_real_speed_and_motion_vs_skills_confirm():
         s.close()
         th.join(timeout=12)
     assert not th.is_alive()
+
+
+def _skill_confirm_on(cfg):
+    """dev_arm_real ships with confirm.skills false since 2026-10-28 (Pranav: no spoken yes); these tests keep
+    exercising the confirm mechanism itself by switching it back on."""
+    cfg["confirm"]["skills"] = True
+    return cfg

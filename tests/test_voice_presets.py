@@ -193,7 +193,7 @@ def test_skills_confirm_flag_off_for_sim_on_for_real():
         th.join(timeout=7)
 
     # dev_arm_real: skills ask first; a yes then runs them
-    app, th, s = _app(load_config(arm="dev_arm_real"), 47214, 6.0)
+    app, th, s = _app(_skill_confirm_on(load_config(arm="dev_arm_real")), 47214, 6.0)
     try:
         r = _say(s, 47214, "pick up the block")
         assert r["confirm"] is True and "confirm" in r["say"].lower() and r["mode"] != "auto"
@@ -203,3 +203,10 @@ def test_skills_confirm_flag_off_for_sim_on_for_real():
         s.close()
         th.join(timeout=8)
     assert not th.is_alive()
+
+
+def _skill_confirm_on(cfg):
+    """dev_arm_real ships with confirm.skills false since 2026-10-28 (Pranav: no spoken yes); these tests keep
+    exercising the confirm mechanism itself by switching it back on."""
+    cfg["confirm"]["skills"] = True
+    return cfg
