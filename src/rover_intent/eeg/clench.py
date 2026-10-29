@@ -3,7 +3,7 @@
 This is a MUSCLE (EMG) signal picked up by the headband, not decoded brain activity: clenching the jaw fires the
 temporalis/masseter muscles, which swamp TP9/TP10 (behind the ears) and AF7/AF8 (forehead) with broadband
 30-100+ Hz noise. The Muse has no motor-cortex electrodes, so imagined-grasp decoding is not realistic on it
-(see docs/LOG.md 2026-10-10); this is the reliable hands-free input it does give us.
+(private research log, 2026-10-10); this is the reliable hands-free input it does give us.
 
 Pipeline (same code for calibration, live and replay):
   per channel: 60 Hz notch -> 30-100 Hz band-pass -> RMS envelope (30 ms)

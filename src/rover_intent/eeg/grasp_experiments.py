@@ -1,4 +1,4 @@
-"""Follow-up experiments on BNCI 001-2020 (gel, 15 subjects). See docs/LOG.md for the questions.
+"""Follow-up experiments on BNCI 001-2020 (gel, 15 subjects). The questions are in the private research log.
 
 E1 baseline   : intent [mo-1, mo] vs in-run idle [mo-3, mo-2]           (repeat of reach_grasp.py)
 E2 eog_only   : same windows, 6 EOG channels only                      (eye-movement confound check)

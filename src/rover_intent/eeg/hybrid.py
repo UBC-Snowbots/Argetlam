@@ -1,6 +1,6 @@
 """Hybrid grasp decoder: stage 1 "grasp coming" (mu/beta, Riemann) x stage 2 "close now" (MRCP, shrinkage LDA).
 
-Evidence (docs/LOG.md, BNCI 001-2020, 8 motor channels): mu/beta separates pre-grasp from idle (86 % calibrated) but
+Evidence (private research log, BNCI 001-2020, 8 motor channels): mu/beta separates pre-grasp from idle (86 % calibrated) but
 cannot tell closing from reach start (67 %); MRCP can (81 %). So:
     p_coming(t) = stage 1 on the last 1 s (8-30 Hz)
     p_close(t)  = stage 2 on the last 1 s (0.3-3 Hz, 8-channel common average, 16 samples/ch)

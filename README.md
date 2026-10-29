@@ -414,8 +414,9 @@ argetlam/
 ├── laptop/                     body_client.py (webcam), voice_client.py (Whisper) - standalone single-file scripts
 ├── scripts/                    sim_to_real.py / real_to_sim.py (real-arm follower + mirror), record_real.sh +
 │                               real_bag_to_csv.py (recorder + CSV), bench/ (characterization), tcp_relay.py, hud.py,
-│                               check_grasps.py, gate.sh, replay_session.py, fake_laptop.py, publish.sh
+│                               check_grasps.py, gate.sh, replay_session.py, fake_laptop.py
 ├── assets/                     dev_arm (team model, see SOURCE.md), rover2026
+├── tools/                      bench launchers: rover-up, rover-stack, arm-link, rover-follow (see tools/README.md)
 ├── tests/                      unit + integration tests (control loop, calibration flow, decoder streaming)
 └── docs/                       PLAN.md, VOICE.md, PLANE_TELEOP.md, ARM_MIRROR.md, REAL_ARM.md, REAL_DATA.md,
                                 BENCH_SESSION.md, VIDEO_HUD.md, EEG.md, GRIPPER.md
