@@ -1,0 +1,546 @@
+#!/bin/bash
+# rover-follow: ONE command to run a real dev_arm follow session on the VM, safely.
+#   The follower (tools/sim_to_real.py) makes the REAL arm follow the Isaac sim arm; the raw recorder
+#   (rover-intent scripts/record_real.sh) bags /arm/feedback /arm/command /joint_states at the same time.
+#   Same house style as arm-link: no magic, no auto-retry, clear refusals, a state file, detached children.
+#
+#   rover-follow on [--label NAME] [--axes 1,2,3,4,5,6] [--speed 0.2] [--ee]   (--ee: also drive the gripper; gated)
+#       Preflight (REFUSES if any check fails), then starts the recorder AND the follower fully detached
+#       (setsid + own process group + nohup, logs under ~/projects/ubc-rover-arm/logs/). Preflight checks:
+#         - arm-link up: Rowan's driver is publishing /arm/feedback at > 50 Hz
+#         - the app is reachable on udp 127.0.0.1:47100
+#         - the app is NOT in mirror mode (real->sim would fight the follower)
+#         - the clutch is idle
+#         - the sim is within 1.0 deg (all joints) of the real arm's converted pose (rover_intent.control.stepper_map)
+#           -> if not, it tells you to run `rover-follow align` first
+#   rover-follow align [POSE]   Move the SIM to a named pose (default 'base') and wait until it is reached. Use this
+#                               when the sim is not where the real arm is. Does NOT move the real arm (follower off).
+#   rover-follow off            SIGTERM the follower (detached procs ignore SIGINT), wait for and print its
+#                               "stopped: zero velocity sent" line (warns loudly if missing), then stop the recorder's
+#                               whole process group (SIGINT->SIGTERM->SIGKILL) so the bag is finalized. Prints the bag.
+#   rover-follow status         follower/recorder alive?, last follower error, max |err| in the last 5 s, arm-link
+#                               state, and the app's mode/clutch/mirror.
+#   rover-follow mirror on|off  Start/stop the real->sim mirror (scripts/real_to_sim.py) detached. Refuses while the
+#                               follower is on; `rover-follow on` refuses while the mirror runs. Mutually exclusive.
+#   rover-follow selftest       Exercise the preflight + cleanup logic against a fake/absent link on ROS_DOMAIN_ID=46
+#                               and a spare app port, touching nothing live.
+#
+# Logs + state: ~/projects/ubc-rover-arm/logs/ (follower_*, record_*, real_to_sim_* logs; rover-follow/*.state).
+# Env overrides (for selftest / a spare app; leave unset for the live arm):
+#   ROVERF_APP_HOST (127.0.0.1)  ROVERF_APP_PORT (47100)  ROVERF_DOMAIN (unset = default ROS domain)
+set -u
+
+WS="$HOME/projects/ubc-rover-arm"
+REPO="${ROVERF_REPO:-$WS/rover-intent}"                 # the MAIN checkout (not a worktree): record_real.sh + src live here
+RF2="$WS/RoverFlake2"
+LOGDIR="$WS/logs"
+STATEDIR="$LOGDIR/rover-follow"
+FOLLOW_STATE="$STATEDIR/follow.state"
+MIRROR_STATE="$STATEDIR/mirror.state"
+FOLLOWER_PY="$WS/tools/sim_to_real.py"   # in this repo: scripts/sim_to_real.py
+REC_SCRIPT="$REPO/scripts/record_real.sh"
+MIRROR_PY="$REPO/scripts/real_to_sim.py"
+ARMLINK="$WS/tools/arm-link"
+
+APP_HOST="${ROVERF_APP_HOST:-127.0.0.1}"
+APP_PORT="${ROVERF_APP_PORT:-47100}"
+FEEDBACK_MIN_HZ=50
+POSE_TOL_DEG=1.0
+[ -n "${ROVERF_DOMAIN:-}" ] && export ROS_DOMAIN_ID="$ROVERF_DOMAIN"
+mkdir -p "$STATEDIR"
+
+ros_env() { set +u; source /opt/ros/jazzy/setup.bash; source "$RF2/install/setup.bash" 2>/dev/null; set -u; }
+
+# ---- small helpers -------------------------------------------------------------------------------
+read_state() { grep -E "^$2=" "$1" 2>/dev/null | head -1 | cut -d= -f2-; }
+
+is_alive() {   # $1 = pid, $2 = substring that MUST be in /proc/<pid>/cmdline (never a pgrep -f on our own cmdline)
+  local pid="$1" pat="$2"
+  [ -n "$pid" ] || return 1
+  [ -d "/proc/$pid" ] || return 1
+  tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null | grep -q -- "$pat"
+}
+
+group_alive() { ps -o stat= -g "$1" 2>/dev/null | awk '$1 !~ /^[Zz]/{n++} END{exit !(n>0)}'; }
+
+stop_group() {  # $1 = leader pid. SIGINT -> SIGTERM -> SIGKILL on the whole process group (benchlib.stop_group style).
+  local pid="$1" pgid
+  pgid=$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ')
+  [ -n "$pgid" ] || return 0
+  local pair sig w end
+  for pair in "INT 5" "TERM 5" "KILL 2"; do
+    sig="${pair% *}"; w="${pair#* }"
+    kill -"$sig" -"$pgid" 2>/dev/null || true
+    end=$((SECONDS + w))
+    while [ "$SECONDS" -lt "$end" ]; do
+      group_alive "$pgid" || return 0
+      sleep 0.2
+    done
+  done
+  group_alive "$pgid" && return 1 || return 0
+}
+
+follower_running() { is_alive "$(read_state "$FOLLOW_STATE" FOLLOWER_PID)" "sim_to_real.py"; }
+recorder_running() { is_alive "$(read_state "$FOLLOW_STATE" REC_PID)" "record_real.sh"; }
+mirror_running()   { is_alive "$(read_state "$MIRROR_STATE" MIRROR_PID)" "real_to_sim.py"; }
+
+# ---- embedded python (kept in this one file; work was scoped to this script) ----------------------
+# preflight: argv = APP_HOST APP_PORT MIN_HZ TOL_DEG. Evaluates ALL checks, prints one line each, exits 0 iff all pass.
+preflight_py() {
+# prepend $REPO/src so stepper_map imports, but KEEP the ROS site-packages that ros_env put on PYTHONPATH (rclpy)
+PYTHONPATH="$REPO/src:${PYTHONPATH:-}" python3 - "$APP_HOST" "$APP_PORT" "$FEEDBACK_MIN_HZ" "$POSE_TOL_DEG" <<'PY'
+import json, math, socket, sys, time
+host, port, min_hz, tol = sys.argv[1], int(sys.argv[2]), float(sys.argv[3]), float(sys.argv[4])
+checks = []   # (name, ok, detail)
+def add(n, ok, d): checks.append((n, ok, d))
+
+# 1 + 5 (feedback rate + real pose) need ROS. Degrade loudly if rclpy / rover_msgs are not importable.
+fw = None; hz = 0.0
+try:
+    import rclpy
+    from rclpy.node import Node
+    from rover_msgs.msg import ArmCommand
+    rclpy.init(args=None)
+    n = Node("rover_follow_preflight")
+    state = {"count": 0, "last": None, "first": None}
+    def on_fb(m):
+        state["count"] += 1
+        if state["first"] is None:
+            state["first"] = time.monotonic()
+        if len(m.positions) >= 6:
+            state["last"] = [float(x) for x in m.positions[:6]]
+    n.create_subscription(ArmCommand, "/arm/feedback", on_fb, 100)
+    # measure from the FIRST message: with Isaac + the app up, DDS discovery can take ~1 s, and timing from node
+    # creation under-read a healthy 100 Hz link as 19-50 Hz (2026-10-25). Wait up to 3 s for discovery first.
+    wait_end = time.monotonic() + 3.0
+    while state["first"] is None and time.monotonic() < wait_end:
+        rclpy.spin_once(n, timeout_sec=0.05)
+    t0 = state["first"] or time.monotonic()
+    state["count"] = 1 if state["first"] else 0
+    while time.monotonic() - t0 < 1.5:
+        rclpy.spin_once(n, timeout_sec=0.01)
+    dt = time.monotonic() - t0
+    hz = (state["count"] - 1) / dt if dt > 0 and state["count"] > 1 else 0.0
+    fw = state["last"]
+    n.destroy_node(); rclpy.shutdown()
+    add("arm-link (driver /arm/feedback > %.0f Hz)" % min_hz, hz > min_hz,
+        "measured %.1f Hz over %.1f s" % (hz, dt) + ("" if hz > min_hz else " -- is `arm-link up`?"))
+except Exception as e:  # noqa: BLE001
+    add("arm-link (driver /arm/feedback > %.0f Hz)" % min_hz, False, "rclpy/rover_msgs not usable: %s" % e)
+
+# app query over UDP (pure sockets)
+st = None
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.settimeout(0.2)
+try:
+    end = time.monotonic() + 1.2
+    while time.monotonic() < end and st is None:
+        s.sendto(json.dumps({"kind": "query", "t": time.time()}).encode(), (host, port))
+        try:
+            data, _ = s.recvfrom(65536)
+        except socket.timeout:
+            continue
+        m = json.loads(data)
+        if m.get("kind") == "state":
+            st = m
+except OSError:
+    st = None
+finally:
+    s.close()
+
+add("app reachable on udp %s:%d" % (host, port), st is not None,
+    "answered a query" if st is not None else "no state reply -- is rover-stack on?")
+
+if st is not None:
+    add("app NOT in mirror mode", not bool(st.get("mirror")),
+        "mirror=%s" % bool(st.get("mirror")) + ("" if not st.get("mirror") else " -- run `rover-follow mirror off`"))
+    add("clutch idle", st.get("clutch") == "idle", "clutch=%s" % st.get("clutch"))
+else:
+    add("app NOT in mirror mode", False, "app unreachable")
+    add("clutch idle", False, "app unreachable")
+
+# pose: sim q_meas (rad) vs real arm fw converted with the single source of truth
+pose_ok = False; pose_detail = "need both the real feedback and the app"
+if fw is not None and st is not None and st.get("q_meas"):
+    try:
+        from rover_intent.control.stepper_map import fw_to_q, DEFAULT_TABLE
+        q_real = fw_to_q(fw, DEFAULT_TABLE)
+        q_sim = [float(x) for x in st["q_meas"][:6]]
+        diffs = [math.degrees(q_sim[i] - q_real[i]) for i in range(6)]
+        worst = max(abs(d) for d in diffs)
+        pose_ok = worst <= tol
+        pose_detail = ("worst |sim-real| = %.2f deg (tol %.1f); per-joint " % (worst, tol)
+                       + " ".join("%+.2f" % d for d in diffs))
+    except Exception as e:  # noqa: BLE001
+        pose_detail = "could not convert: %s" % e
+add("sim within %.1f deg of the real arm" % tol, pose_ok, pose_detail)
+
+print("")
+for name, ok, d in checks:
+    print("  [%s] %-40s %s" % ("PASS" if ok else "FAIL", name, d))
+allok = all(ok for _, ok, _ in checks)
+# if the ONLY failing check is the pose one, the fix is `rover-follow align`
+fails = [name for name, ok, _ in checks if not ok]
+pose_fail = any(name.startswith("sim within") for name, ok, _ in checks if not ok)
+print("")
+print("OVERALL: %s" % ("PASS" if allok else "FAIL"))
+if pose_fail and fails == [f for f in fails if f.startswith("sim within")]:
+    print("ALIGN_NEEDED=1")
+sys.exit(0 if allok else 1)
+PY
+}
+
+# app_query_py: pure-socket query; prints "mode=.. clutch=.. mirror=.. preset=.. hw_busy=.." or "APP_UNREACHABLE".
+app_query_py() {
+python3 - "$APP_HOST" "$APP_PORT" <<'PY'
+import json, socket, sys, time
+host, port = sys.argv[1], int(sys.argv[2])
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.settimeout(0.3)
+st = None; end = time.monotonic() + 1.2
+while time.monotonic() < end and st is None:
+    try:
+        s.sendto(json.dumps({"kind": "query", "t": time.time()}).encode(), (host, port))
+        data, _ = s.recvfrom(65536)
+        m = json.loads(data)
+        if m.get("kind") == "state":
+            st = m
+    except (socket.timeout, OSError):
+        continue
+if st is None:
+    print("APP_UNREACHABLE")
+else:
+    print("mode=%s clutch=%s mirror=%s preset=%s hw_busy=%s" % (
+        st.get("mode"), st.get("clutch"), bool(st.get("mirror")), st.get("preset"), st.get("hw_busy")))
+PY
+}
+
+# align_py: send an ArmPreset by name, wait until the sim reaches it. argv = HOST PORT POSE TIMEOUT.
+align_py() {
+python3 - "$APP_HOST" "$APP_PORT" "$1" "${2:-60}" <<'PY'
+import json, socket, sys, time
+host, port, pose, timeout = sys.argv[1], int(sys.argv[2]), sys.argv[3], float(sys.argv[4])
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.settimeout(1.0)
+def query():
+    end = time.monotonic() + 2.0
+    while time.monotonic() < end:
+        try:
+            s.sendto(json.dumps({"kind": "query", "t": time.time()}).encode(), (host, port))
+            m = json.loads(s.recvfrom(65536)[0])
+            if m.get("kind") == "state":
+                return m
+        except (socket.timeout, OSError):
+            continue
+    return None
+if query() is None:
+    print("app unreachable on %s:%d -- is rover-stack on?" % (host, port)); sys.exit(2)
+s.sendto(json.dumps({"kind": "preset", "t": time.time(), "name": pose, "confirm": False}).encode(), (host, port))
+ok = None; say = ""
+end = time.monotonic() + 3.0
+while time.monotonic() < end:
+    try:
+        m = json.loads(s.recvfrom(65536)[0])
+    except (socket.timeout, OSError):
+        continue
+    if m.get("kind") == "reply" and str(m.get("text", "")).startswith("preset"):
+        ok, say = m.get("ok"), m.get("say"); break
+print("preset '%s': ok=%s %s" % (pose, ok, say))
+if ok is False:
+    sys.exit(3)
+# wait until the move clears (preset None) and q_meas stops changing for ~1.5 s
+t0 = time.monotonic(); prev = None; still_since = None
+while time.monotonic() - t0 < timeout:
+    m = query()
+    if m is None:
+        continue
+    q = m.get("q_meas")
+    moving = m.get("preset") is not None
+    if prev is not None and q is not None:
+        delta = max(abs(a - b) for a, b in zip(q, prev))
+    else:
+        delta = 9.9
+    prev = q
+    if (not moving) and delta < 1e-3:
+        still_since = still_since or time.monotonic()
+        if time.monotonic() - still_since > 1.5:
+            print("reached '%s' (sim settled): q=%s" % (pose, [round(x, 3) for x in q]))
+            sys.exit(0)
+    else:
+        still_since = None
+    time.sleep(0.5)
+print("timed out after %.0f s waiting for '%s' to settle" % (timeout, pose)); sys.exit(4)
+PY
+}
+
+mirror_off_udp() {   # fire-and-forget: make sure the app leaves mirror even if the mirror proc died uncleanly
+python3 - "$APP_HOST" "$APP_PORT" <<'PY' 2>/dev/null || true
+import json, socket, sys, time
+host, port = sys.argv[1], int(sys.argv[2])
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+s.sendto(json.dumps({"kind": "mirror", "t": time.time(), "on": False}).encode(), (host, port))
+PY
+}
+
+# ---- subcommands ---------------------------------------------------------------------------------
+do_on() {
+  local LABEL="session" AXES="1,2,3,4,5,6" SPEED="0.2" EE=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --label) LABEL="$2"; shift 2 ;;
+      --axes)  AXES="$2";  shift 2 ;;
+      --speed) SPEED="$2"; shift 2 ;;
+      --ee)    EE="--ee"; shift ;;   # ALSO drive the gripper (still gated in the follower: needs the EE limits file)
+      *) echo "rover-follow on: unknown arg '$1'"; return 2 ;;
+    esac
+  done
+  if mirror_running; then
+    echo "REFUSED: the real->sim mirror is running (pid $(read_state "$MIRROR_STATE" MIRROR_PID)). It and the follower"
+    echo "         are mutually exclusive (real->sim->real would be a drive loop). Run: rover-follow mirror off"
+    return 1
+  fi
+  if follower_running; then
+    echo "REFUSED: a follower is already running (pid $(read_state "$FOLLOW_STATE" FOLLOWER_PID)). rover-follow off first."
+    return 1
+  fi
+  ros_env
+  echo "Preflight (axes $AXES, speed $SPEED):"
+  local out rc
+  out="$(preflight_py)"; rc=$?
+  echo "$out"
+  if [ "$rc" -ne 0 ]; then
+    echo ""
+    if echo "$out" | grep -q "ALIGN_NEEDED=1"; then
+      echo "REFUSED: the sim is not on the real arm. Run:  rover-follow align   then try again."
+    else
+      echo "REFUSED: preflight failed (see the FAIL lines above). Nothing was started."
+    fi
+    return 1
+  fi
+
+  local ts; ts="$(date +%Y%m%d_%H%M%S)"
+  local REC_LOG="$LOGDIR/record_${LABEL}_${ts}.log"
+  local FOLL_LOG="$LOGDIR/follower_${LABEL}_${ts}.log"
+  local REC_PIDFILE="$STATEDIR/rec.pid" FOLL_PIDFILE="$STATEDIR/foll.pid"
+  rm -f "$REC_PIDFILE" "$FOLL_PIDFILE"
+
+  # recorder FIRST (so the follower's opening commands land in the bag), fully detached.
+  setsid bash -c 'echo $$ > "$1"; exec nohup bash "$2" "$3" >> "$4" 2>&1 < /dev/null' \
+         _ "$REC_PIDFILE" "$REC_SCRIPT" "$LABEL" "$REC_LOG" &
+  # wait for the recorder to announce its bag dir (record_real.sh prints "recording <label> -> <dir>/bag")
+  local BAG="" i
+  for i in $(seq 100); do
+    [ -s "$REC_PIDFILE" ] && grep -q -- "-> .*/bag" "$REC_LOG" 2>/dev/null && break
+    sleep 0.1
+  done
+  BAG="$(sed -n 's/.*-> \(.*\/bag\) .*/\1/p' "$REC_LOG" 2>/dev/null | head -1)"
+  local REC_PID; REC_PID="$(cat "$REC_PIDFILE" 2>/dev/null)"
+
+  # follower, fully detached.
+  setsid bash -c 'echo $$ > "$1"; exec nohup python3 "$2" --axes "$3" --speed "$4" $6 >> "$5" 2>&1 < /dev/null' \
+         _ "$FOLL_PIDFILE" "$FOLLOWER_PY" "$AXES" "$SPEED" "$FOLL_LOG" "$EE" &
+  for i in $(seq 50); do [ -s "$FOLL_PIDFILE" ] && break; sleep 0.1; done
+  local FOLL_PID; FOLL_PID="$(cat "$FOLL_PIDFILE" 2>/dev/null)"
+
+  {
+    echo "LABEL=$LABEL"; echo "AXES=$AXES"; echo "SPEED=$SPEED"; echo "EE=${EE:-off}"; echo "STARTED=$ts"
+    echo "FOLLOWER_PID=$FOLL_PID"; echo "FOLLOWER_LOG=$FOLL_LOG"
+    echo "REC_PID=$REC_PID"; echo "REC_LOG=$REC_LOG"; echo "BAG=$BAG"
+  } > "$FOLLOW_STATE"
+  rm -f "$REC_PIDFILE" "$FOLL_PIDFILE"
+
+  echo ""
+  echo "STARTED follow '$LABEL': follower pid $FOLL_PID (axes $AXES @ ${SPEED}), recorder pid $REC_PID -> ${BAG:-<pending>}"
+  echo "         logs: $FOLL_LOG | $REC_LOG   (stop with: rover-follow off)"
+}
+
+do_align() {
+  local POSE="${1:-base}"
+  echo "align: moving the SIM to '$POSE'. This does NOT move the real arm (the follower is off)."
+  align_py "$POSE" 60
+}
+
+do_off() {
+  if [ ! -s "$FOLLOW_STATE" ]; then echo "no follow session recorded (nothing to stop)"; return 0; fi
+  local FOLL_PID FOLL_LOG REC_PID BAG
+  FOLL_PID="$(read_state "$FOLLOW_STATE" FOLLOWER_PID)"
+  FOLL_LOG="$(read_state "$FOLLOW_STATE" FOLLOWER_LOG)"
+  REC_PID="$(read_state "$FOLLOW_STATE" REC_PID)"
+  BAG="$(read_state "$FOLLOW_STATE" BAG)"
+
+  # 1) follower: SIGTERM (detached procs ignore SIGINT); wait for the zero-velocity confirmation in its log.
+  if is_alive "$FOLL_PID" "sim_to_real.py"; then
+    echo "stopping follower (pid $FOLL_PID) with SIGTERM ..."
+    kill -TERM "$FOLL_PID" 2>/dev/null || true
+  else
+    echo "follower (pid $FOLL_PID) was not running"
+  fi
+  local line="" i
+  for i in $(seq 100); do
+    line="$(grep -a "stopped: zero velocity sent" "$FOLL_LOG" 2>/dev/null | tail -1)"
+    [ -n "$line" ] && break
+    is_alive "$FOLL_PID" "sim_to_real.py" || { sleep 0.3; line="$(grep -a "stopped: zero velocity sent" "$FOLL_LOG" 2>/dev/null | tail -1)"; break; }
+    sleep 0.1
+  done
+  if [ -n "$line" ]; then
+    echo "  follower: $line"
+  else
+    echo "  *** WARNING: did NOT see 'stopped: zero velocity sent' in $FOLL_LOG ***"
+    echo "  *** The arm may NOT have been commanded to zero velocity. CHECK THE ARM / E-STOP. ***"
+  fi
+
+  # 2) recorder: stop the WHOLE process group so rosbag2 flushes and the bag is finalized.
+  if [ -n "$REC_PID" ] && { [ -d "/proc/$REC_PID" ] || group_alive "$(ps -o pgid= -p "$REC_PID" 2>/dev/null | tr -d ' ')"; }; then
+    echo "stopping recorder group (leader pid $REC_PID) SIGINT->SIGTERM->SIGKILL ..."
+    # the bag recorder + type pin leave the leader's process group, so the group kill missed them and 4 sessions of
+    # recorders piled up as stale /arm/command subscribers (2026-10-28; broke `arm-link home`). Stop them by parent pid.
+    pkill -INT -P "$REC_PID" 2>/dev/null || true; sleep 2; pkill -TERM -P "$REC_PID" 2>/dev/null || true
+    if stop_group "$REC_PID"; then echo "  recorder stopped"; else echo "  *** WARNING: recorder group still alive after SIGKILL ***"; fi
+  else
+    echo "recorder (pid $REC_PID) was not running"
+  fi
+  echo "bag: ${BAG:-<unknown>}"
+  rm -f "$FOLLOW_STATE"
+}
+
+do_status() {
+  echo "== rover-follow status =="
+  if follower_running; then echo "follower: RUNNING (pid $(read_state "$FOLLOW_STATE" FOLLOWER_PID), axes $(read_state "$FOLLOW_STATE" AXES) @ $(read_state "$FOLLOW_STATE" SPEED))"
+  else echo "follower: not running"; fi
+  if recorder_running; then echo "recorder: RUNNING (pid $(read_state "$FOLLOW_STATE" REC_PID)) -> $(read_state "$FOLLOW_STATE" BAG)"
+  else echo "recorder: not running"; fi
+  if mirror_running; then echo "mirror:   RUNNING (pid $(read_state "$MIRROR_STATE" MIRROR_PID))"
+  else echo "mirror:   not running"; fi
+
+  local FOLL_LOG; FOLL_LOG="$(read_state "$FOLLOW_STATE" FOLLOWER_LOG)"
+  if [ -n "$FOLL_LOG" ] && [ -f "$FOLL_LOG" ]; then
+    local err; err="$(grep -aiE "error|stale|refus|not starting|could not" "$FOLL_LOG" | tail -1)"
+    echo "last follower error: ${err:-none}"
+    # max |err| over the last ~5 logged 'err ...' lines (the follower logs once per second)
+    local maxerr; maxerr="$(grep -a "err " "$FOLL_LOG" | tail -5 | awk -F'err|[|]' '
+      {split($2,a," "); for(i in a){v=a[i]; if(v<0)v=-v; if(v>m)m=v}} END{if(m=="")print "n/a"; else printf "%.2f", m}')"
+    echo "max |err| last ~5 s: ${maxerr} deg"
+  else
+    echo "last follower error: (no follower log)"
+    echo "max |err| last ~5 s: n/a"
+  fi
+
+  echo "-- arm-link --"
+  "$ARMLINK" status 2>/dev/null | grep -E "supervisor:|uptime:|last drop:" | sed 's/^/  /'
+  echo "-- app --"
+  echo "  $(app_query_py)"
+}
+
+do_mirror() {
+  local sub="${1:-}"
+  case "$sub" in
+    on)
+      if follower_running; then
+        echo "REFUSED: the follower is running (pid $(read_state "$FOLLOW_STATE" FOLLOWER_PID)). Mirror and follower are"
+        echo "         mutually exclusive. Run: rover-follow off"
+        return 1
+      fi
+      if mirror_running; then echo "mirror already running (pid $(read_state "$MIRROR_STATE" MIRROR_PID))"; return 0; fi
+      ros_env
+      local ts; ts="$(date +%Y%m%d_%H%M%S)"
+      local MLOG="$LOGDIR/real_to_sim_${ts}.log" MPID PIDFILE="$STATEDIR/mirror.pid"
+      rm -f "$PIDFILE"
+      setsid bash -c 'echo $$ > "$1"; exec nohup python3 "$2" --host "$3" --port "$4" >> "$5" 2>&1 < /dev/null' \
+             _ "$PIDFILE" "$MIRROR_PY" "$APP_HOST" "$APP_PORT" "$MLOG" &
+      local i; for i in $(seq 50); do [ -s "$PIDFILE" ] && break; sleep 0.1; done
+      MPID="$(cat "$PIDFILE" 2>/dev/null)"; rm -f "$PIDFILE"
+      { echo "MIRROR_PID=$MPID"; echo "MIRROR_LOG=$MLOG"; echo "STARTED=$ts"; } > "$MIRROR_STATE"
+      echo "mirror ON: real->sim (pid $MPID, re-asserts 'mirror on' every ~2 s). log: $MLOG"
+      ;;
+    off)
+      local MPID; MPID="$(read_state "$MIRROR_STATE" MIRROR_PID)"
+      if is_alive "$MPID" "real_to_sim.py"; then
+        echo "stopping mirror (pid $MPID) with SIGTERM ..."
+        kill -TERM "$MPID" 2>/dev/null || true
+        local i; for i in $(seq 50); do is_alive "$MPID" "real_to_sim.py" || break; sleep 0.1; done
+      else
+        echo "mirror was not running"
+      fi
+      mirror_off_udp     # belt-and-suspenders: tell the app to leave mirror even if the proc died uncleanly
+      echo "mirror OFF (sent the app a final 'mirror off')"
+      rm -f "$MIRROR_STATE"
+      ;;
+    *) echo "usage: rover-follow mirror on|off"; return 2 ;;
+  esac
+}
+
+do_selftest() {
+  echo "=== rover-follow selftest (ROS_DOMAIN_ID=46, spare app port; touches nothing live) ==="
+  export ROS_DOMAIN_ID=46
+  local SPARE=47346
+  APP_HOST="127.0.0.1"; APP_PORT="$SPARE"
+  ros_env
+
+  echo ""
+  echo "--- A) absent link + absent app: preflight must REFUSE ---"
+  local out rc
+  out="$(preflight_py)"; rc=$?
+  echo "$out"
+  echo "exit=$rc (expected non-zero)"
+  echo "$out" | grep -q "OVERALL: FAIL" && echo "A: PASS (refused as expected)" || echo "A: UNEXPECTED (did not refuse)"
+
+  echo ""
+  echo "--- B) fake healthy app (mirror off, clutch idle) but still no ROS feedback ---"
+  local fake="/tmp/rover_follow_fakeapp_$$.py"
+  cat > "$fake" <<'FAKE'
+import json, socket, sys
+port = int(sys.argv[1])
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.bind(("127.0.0.1", port))
+while True:
+    try:
+        data, addr = s.recvfrom(65536)
+    except OSError:
+        break
+    try:
+        m = json.loads(data)
+    except Exception:
+        continue
+    if m.get("kind") == "query":
+        s.sendto(json.dumps({"kind": "state", "mode": "hold", "clutch": "idle", "mirror": False,
+                             "preset": None, "hw_busy": 0.0,
+                             "q_meas": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]}).encode(), addr)
+FAKE
+  python3 "$fake" "$SPARE" & local fakepid=$!
+  sleep 0.5
+  out="$(preflight_py)"; rc=$?
+  echo "$out"
+  echo "exit=$rc (expected non-zero: arm-link + pose still FAIL with no live feedback)"
+  echo "$out" | grep -q "app reachable" && echo "$out" | grep "app reachable" | grep -q PASS && echo "B: app-side checks reachable" || true
+  kill "$fakepid" 2>/dev/null; wait "$fakepid" 2>/dev/null; rm -f "$fake"
+
+  echo ""
+  echo "--- C) stop_group escalation on a fake recorder that ignores SIGINT ---"
+  setsid bash -c "trap '' INT; sleep 60 & wait" & local gpid=$!
+  sleep 0.3
+  local pgid; pgid=$(ps -o pgid= -p "$gpid" 2>/dev/null | tr -d ' ')
+  local t0=$SECONDS
+  if stop_group "$gpid"; then
+    echo "C: PASS (group $pgid stopped in $((SECONDS-t0)) s via SIGINT->SIGTERM->SIGKILL)"
+  else
+    echo "C: FAIL (group still alive)"
+  fi
+
+  echo ""
+  echo "--- D) is_alive uses /proc/<pid>/cmdline, never a pgrep on our own command line ---"
+  sleep 30 & local sp=$!
+  if is_alive "$sp" "sleep" && ! is_alive "$sp" "rover-follow"; then
+    echo "D: PASS (matches the child's cmdline, not the caller's)"
+  else
+    echo "D: FAIL"
+  fi
+  kill "$sp" 2>/dev/null
+  echo ""
+  echo "=== selftest done (nothing live was touched) ==="
+}
+
+case "${1:-status}" in
+  on)      shift; do_on "$@" ;;
+  align)   shift; do_align "$@" ;;
+  off)     do_off ;;
+  status)  do_status ;;
+  mirror)  shift; do_mirror "$@" ;;
+  selftest) do_selftest ;;
+  *) sed -n '2,32p' "$0"; exit 1 ;;
+esac

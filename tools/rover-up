@@ -1,0 +1,119 @@
+#!/bin/bash
+# rover-up: bring up everything the VM needs for a body-teleop session on the REAL arm. Idempotent: each step is
+# skipped if it is already up. The laptop's rover-body runs this over ssh right after its arm bridge + tunnel are up.
+#
+#   1. sim stack (~/bin/rover-stack on --arm dev_arm_real): with Isaac if the shared GPU is idle (lock free and no
+#      tsp GPU job running or queued), otherwise --no-isaac. --isaac / --no-isaac force it. Never restarts a running
+#      stack (a restart would cut the laptop clients and a running follower).
+#   2. arm link (~/bin/arm-link up) if the laptop bridge is listening on 127.0.0.1:47140; then waits for feedback.
+#   3. follower (~/bin/rover-follow align + on): only if the link is up. NEVER homes the arm (homing needs a person
+#      with the e-stop): if the real arm is not at base, rover-follow's preflight refuses and this says so.
+#
+#   rover-up [--isaac | --no-isaac] [--no-follow] [--no-arm] [--no-ee] [--label NAME]   (--no-arm = stack only; gripper ON by default, --no-ee = joints only)
+# Exit 0 = stack + link + follower all up. Exit 2 = something needs a person (message says what). Logs: ../logs/rover-up.log
+set -u
+B=~/bin
+LOG=~/projects/ubc-rover-arm/logs/rover-up.log
+mkdir -p "$(dirname "$LOG")"
+say() { echo "rover-up: $*" | tee -a "$LOG"; }
+echo "=== $(date '+%F %T') rover-up $*" >> "$LOG"
+
+ISAAC=auto; FOLLOW=1; ARM=1; EE="--ee"; LABEL="body_$(date +%H%M%S)"
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --isaac) ISAAC=1 ;; --no-isaac) ISAAC=0 ;; --no-follow) FOLLOW=0 ;; --no-arm) ARM=0 ;; --no-ee) EE="" ;;
+    --label) LABEL="$2"; shift ;; --label=*) LABEL="${1#--label=}" ;;
+    -h|--help) sed -n '2,15p' "$0"; exit 0 ;;
+  esac
+  shift
+done
+
+gpu_idle() {
+  flock -n /var/lock/gpu.lock true 2>/dev/null || return 1
+  ! tsp 2>/dev/null | awk '($2=="running"||$2=="queued") && /gpu-run/ {f=1} END{exit !f}'
+}
+# rover-stack prints one "name  on|off" line per part; the app line decides whether the stack is up
+stack_part() { $B/rover-stack status 2>/dev/null | awk -v n="$1" 'index($0,n){print ($0 ~ / on /) ? "on" : "off"; exit}'; }
+
+# 1. stack
+if [ "$(stack_part 'robot app')" = on ]; then
+  say "stack: already up (isaac $(stack_part 'isaac bridge')); leaving it as is"
+else
+  if [ "$ISAAC" = auto ]; then gpu_idle && ISAAC=1 || ISAAC=0; fi
+  if [ "$ISAAC" = 1 ]; then
+    say "stack: starting WITH Isaac on dev_arm_real (holds the shared GPU lock until 'rover-stack off')"
+    timeout 60 $B/rover-stack on --arm dev_arm_real >> "$LOG" 2>&1 < /dev/null
+  else
+    say "stack: starting --no-isaac on dev_arm_real (GPU busy or --no-isaac); the real arm still follows the app"
+    timeout 60 $B/rover-stack on --no-isaac --arm dev_arm_real >> "$LOG" 2>&1 < /dev/null
+  fi
+  [ "$(stack_part 'robot app')" = on ] || { say "FAILED: the app did not start (see $LOG)"; exit 1; }
+  if [ "$(stack_part 'isaac bridge')" = on ]; then   # wait for Isaac to simulate before the follower needs the sim
+    for _ in $(seq 1 24); do
+      L=$(ls -t ~/projects/ubc-rover-arm/rover-intent/logs/bridge_*.log 2>/dev/null | head -1)
+      grep -q 'rtf=' "$L" 2>/dev/null && break; sleep 5
+    done
+    grep -q 'rtf=' "$L" 2>/dev/null && say "stack: Isaac is simulating" || say "WARN: Isaac not simulating after 2 min (GPU lock wait?)"
+  fi
+fi
+
+# 1b. EEG hub (Muse raw stream from the laptop's stream_tx / muse_ready): part of rover-stack, but make sure it is up
+#     even when the stack was already running from before it existed
+if pgrep -f "rover_intent.eeg.stream_hub" >/dev/null; then
+  say "eeg hub: already up (laptop sends to 47150)"
+else
+  (cd ~/projects/ubc-rover-arm/rover-intent && setsid nohup .venv/bin/python -m rover_intent.eeg.stream_hub \
+      > logs/eeg_hub.log 2>&1 < /dev/null &)
+  sleep 1
+  say "eeg hub: started (laptop sends to 47150)"
+fi
+
+# 2. arm link
+[ "$ARM" = 1 ] || { say "arm: skipped (--no-arm)"; exit 0; }
+if $B/arm-link status 2>/dev/null | grep -q '^supervisor: running'; then
+  say "arm-link: already up"
+elif ss -ltn 'sport = :47140' 2>/dev/null | grep -q LISTEN; then
+  say "arm-link: laptop bridge is listening; bringing the link up"
+  $B/arm-link up >> "$LOG" 2>&1 < /dev/null; sleep 5
+  $B/arm-link status 2>/dev/null | grep -q '^supervisor: running' || { say "FAILED: arm-link did not come up (arm-link status)"; exit 1; }
+else
+  say "NEEDS YOU: no laptop bridge on 127.0.0.1:47140 (start the serial bridge + ssh -R tunnel on the laptop). Stack is up; arm skipped."
+  exit 2
+fi
+
+# 3. follower
+[ "$FOLLOW" = 1 ] || { say "follower: skipped (--no-follow)"; exit 0; }
+if $B/rover-follow status 2>/dev/null | grep -q '^follower: RUNNING'; then
+  say "follower: already running"; exit 0
+fi
+# Sync the SIM to wherever the REAL arm is (2026-10-28, Pranav: "when I run rover-body I want the follower
+# automatically"): the old `rover-follow align` moved the sim to base, so a real arm left anywhere else made the
+# preflight refuse and there was no follower. Copy real -> sim (mirror) instead; the real arm does not move.
+# Guard: an UNHOMED arm reports ~0 deg on every axis; syncing to that would let the follower drive from garbage.
+fw=$(bash -c 'source /opt/ros/jazzy/setup.bash && timeout 8 ros2 topic echo --once /joint_states' 2>/dev/null \
+     | awk '/^position:/{p=1;next} p&&/^- /{print $2; n++} n==6{exit}')
+if [ -z "$fw" ]; then
+  say "NEEDS YOU: no /joint_states from the real arm (is the arm powered and the link up?)."; exit 2
+fi
+if echo "$fw" | awk '{d=$1*57.29578; if (d<0) d=-d; if (d>3) big=1} END{exit big?1:0}'; then
+  say "NEEDS YOU: the real arm reads ~0 deg on every axis = NOT HOMED. Home it with the e-stop in hand: arm-link home, then run rover-up again."
+  exit 2
+fi
+$B/rover-follow mirror on >> "$LOG" 2>&1 < /dev/null
+sleep 5
+$B/rover-follow mirror off >> "$LOG" 2>&1 < /dev/null
+say "sim synced to the real arm (mirror 5 s)"
+if $B/rover-follow on $EE --label "$LABEL" > /tmp/rover-up.$$ 2>&1 < /dev/null; then
+  cat /tmp/rover-up.$$ >> "$LOG"; rm -f /tmp/rover-up.$$
+  say "follower: STARTED ('$LABEL', gripper $([ -n "$EE" ] && echo ON || echo OFF)). The real arm follows once you press F and the clutch engages."
+  exit 0
+fi
+cat /tmp/rover-up.$$ >> "$LOG"
+grep -E 'FAIL' /tmp/rover-up.$$ | sed 's/^ */rover-up:   /' | tee -a "$LOG"
+if grep -q 'sim within' /tmp/rover-up.$$ && grep 'sim within' /tmp/rover-up.$$ | grep -q FAIL; then
+  say "NEEDS YOU: the real arm is not at base (unhomed or moved). Home it with the e-stop in hand: arm-link home, then run rover-up again."
+else
+  say "NEEDS YOU: follower preflight refused (see above / $LOG)."
+fi
+rm -f /tmp/rover-up.$$
+exit 2

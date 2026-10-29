@@ -1,0 +1,70 @@
+#!/bin/bash
+# rover-stack on|off|status|restart — the whole rover sim stack on rover-vm.
+#   Isaac bridge (GPU, via gpu-run lock, NOT the tsp queue), robot app, tcp relay, HUD, speech bubble, Shift+2 relay.
+#   `rover-stack on --arm <profile>` runs the bridge AND the app on that arm profile (default: config/ROVER_ARM).
+set -u
+R=~/projects/ubc-rover-arm/rover-intent
+B=~/rover-bubble
+PATS=("sim/isaac_bridge.py" "rover_intent.app" "scripts/tcp_relay.py" "scripts/hud.py" "rover-bubble/bubble.py" "rover-bubble/hotkey_relay.py" "rover_intent.eeg.stream_hub")
+NAMES=("isaac bridge" "robot app" "tcp relay" "hud" "speech bubble" "shift+2 relay" "eeg hub")
+
+running() { pgrep -f "$1" >/dev/null; }
+
+status() {
+  for i in "${!PATS[@]}"; do
+    if running "${PATS[$i]}"; then printf "  %-14s on   (pid %s)\n" "${NAMES[$i]}" "$(pgrep -f "${PATS[$i]}" | head -1)"
+    else printf "  %-14s off\n" "${NAMES[$i]}"; fi
+  done
+  nvidia-smi --query-gpu=memory.used,utilization.gpu --format=csv,noheader 2>/dev/null | sed 's/^/  gpu: /'
+}
+
+off() {
+  for p in "${PATS[@]}"; do pkill -f "$p" 2>/dev/null; done
+  sleep 3
+  for p in "${PATS[@]}"; do pkill -9 -f "$p" 2>/dev/null; done
+  # drop any queued/running bridge jobs from task-spooler
+  tsp 2>/dev/null | awk '/isaac_bridge/ && ($2=="running" || $2=="queued") {print $1}' | xargs -r -n1 tsp -k 2>/dev/null
+  echo "rover stack: off"
+}
+
+on() {
+  # optional: rover-stack on --arm <profile>  (threaded into BOTH the bridge and the app; both honour --arm)
+  ARM=""; NOISAAC=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --no-isaac) NOISAAC=1; shift ;;   # GPU-free: app on the mock backend, no Isaac (real-arm sessions don't need it)
+      --arm) ARM="$2"; shift 2 ;;
+      --arm=*) ARM="${1#--arm=}"; shift ;;
+      *) shift ;;
+    esac
+  done
+  ARMFLAG=""; [ -n "$ARM" ] && ARMFLAG="--arm $ARM"
+  mkdir -p "$R/logs"
+  cd "$R" || { echo "missing $R"; exit 1; }
+  ts=$(date +%Y%m%d_%H%M%S)
+  [ -n "$ARM" ] && echo "rover stack: arm profile $ARM"
+  # Isaac runs OUTSIDE the tsp queue (it's a long-lived interactive process; inside tsp it held the only slot for as
+  # long as the stack was up and blocked every other queued job). It still takes the shared GPU lock via gpu-run.
+  BACKEND=isaac
+  if [ "$NOISAAC" = 1 ]; then
+    BACKEND=mock; echo "rover stack: --no-isaac (mock backend, no GPU; the real arm still follows the app)"
+  else
+  running "sim/isaac_bridge.py" || (cd $R && DISPLAY=:0 OMNI_KIT_ACCEPT_EULA=YES setsid nohup gpu-run ../isaac/isaacenv6/bin/python sim/isaac_bridge.py --viz kit $ARMFLAG > logs/bridge_$ts.log 2>&1 < /dev/null &)
+  fi
+  running "scripts/tcp_relay.py"  || setsid nohup .venv/bin/python scripts/tcp_relay.py > logs/tcp_relay.log 2>&1 < /dev/null &
+  running "rover_intent.app"      || setsid nohup .venv/bin/python -m rover_intent.app --backend $BACKEND $ARMFLAG > logs/app_$ts.log 2>&1 < /dev/null &
+  running "scripts/hud.py"        || DISPLAY=:0 setsid nohup python3 scripts/hud.py > logs/hud.log 2>&1 < /dev/null &
+  running "rover-bubble/bubble.py"        || setsid nohup "$B/run_bubble.sh" >/dev/null 2>&1 < /dev/null &
+  running "rover-bubble/hotkey_relay.py"  || setsid nohup "$B/run_relay.sh"  >/dev/null 2>&1 < /dev/null &
+  running "rover_intent.eeg.stream_hub"   || setsid nohup .venv/bin/python -m rover_intent.eeg.stream_hub > logs/eeg_hub.log 2>&1 < /dev/null &   # Muse raw EEG hub (laptop stream_tx -> 47150, fan-out 127.0.0.1:47152)
+  [ "$NOISAAC" = 1 ] || echo "rover stack: starting (Isaac takes ~30-60 s to appear on the Moonlight screen)"
+  sleep 5; status
+}
+
+case "${1:-status}" in
+  on|start) shift; on "$@" ;;
+  off|stop) off ;;
+  restart) shift; off; sleep 2; on "$@" ;;
+  status) status ;;
+  *) echo "usage: rover-stack on|off|status|restart  [--arm <profile>] [--no-isaac]"; exit 1 ;;
+esac

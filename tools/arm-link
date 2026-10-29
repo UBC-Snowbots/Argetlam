@@ -1,0 +1,211 @@
+#!/bin/bash
+# arm-link: bring the dev_arm link up on the VM, ONCE (no automatic retry).
+#   laptop bridge (serial_bridge.py on bench-laptop, reverse-SSH-tunnelled to 127.0.0.1:47140)
+#     -> socat (virtual serial port /tmp/rover_arm_pty, which /dev/serial/by-id/usb-ZEPHYR_UBC_ROVER_Arm_... links to)
+#     -> Rowan's stepper_arm_driver (RoverFlake2, unmodified): /joint_states, /arm/feedback, /arm/command
+# A supervisor runs both in tmux session "armlink". If EITHER dies it stops the other, writes a clear diagnosis to
+# events.log, and EXITS (it does not silently restart - a flapping link hid real faults). Re-run `arm-link up` to retry.
+#
+#   arm-link up              start (no-op if already running); prints the last diagnosis. Started in its OWN session
+#                            (setsid) so a Ctrl+C / tool interrupt in the launching shell cannot reach socat/driver.
+#   arm-link down            stop both
+#   arm-link status [--live] last diagnosis, how long the link has been up, time of the last drop, processes, port,
+#                            last log lines; --live also checks /joint_states is flowing
+#   arm-link watch           foreground: poll the link and print a clear line + terminal bell the moment it drops,
+#                            with the command to bring it back. Does NOT auto-restart anything. Ctrl+C to stop.
+#   arm-link logs            follow events + driver log (Ctrl+C to stop following; the link keeps running)
+#   arm-link attach          open the tmux session (detach: Ctrl+b then d)
+#   arm-link home            send the home-all command through the driver (asks you to confirm the e-stop first)
+#
+# Logs (fixed paths, readable any time): ~/projects/ubc-rover-arm/logs/armlink/{events,socat,driver}.log
+# Last diagnosis: ~/projects/ubc-rover-arm/logs/armlink/last_diagnosis.txt
+set -u
+WS="$HOME/projects/ubc-rover-arm"
+RF2="$WS/RoverFlake2"
+LOGDIR="${ARMLINK_LOGDIR:-$WS/logs/armlink}"
+DIAG="$LOGDIR/last_diagnosis.txt"
+SESSION=armlink
+BRIDGE="${ARMLINK_BRIDGE:-127.0.0.1:47140}"
+PTY="${ARMLINK_PTY:-/tmp/rover_arm_pty}"
+PORT_LINK=/dev/serial/by-id/usb-ZEPHYR_UBC_ROVER_Arm_500100542B2831AA-if00
+DRIVER="${ARMLINK_DRIVER:-$RF2/install/arm_hardware_interface/lib/arm_hardware_interface/stepper_arm_driver}"
+ROS_LOG="${ROS_LOG_DIR:-$HOME/.ros/log}"
+# ARMLINK_* overrides exist only for the offline test (fake Teensy + local bridge); leave them unset for the arm.
+mkdir -p "$LOGDIR"
+
+ev() { echo "$(date '+%F %T') $*" | tee -a "$LOGDIR/events.log"; }
+ros_env() {
+  # ROS setup scripts reference unset variables; relax -u while sourcing
+  set +u; source /opt/ros/jazzy/setup.bash; source "$RF2/install/setup.bash"; set -u
+}
+
+diagnose() {
+  # $1 = short cause. Writes a clear block to events.log and to last_diagnosis.txt (overwritten each time).
+  local cause="$1"
+  local last_drv empties
+  last_drv=$(grep -v "Serial read failed" "$LOGDIR/driver.log" 2>/dev/null | tail -n 1)
+  [ -z "$last_drv" ] && last_drv="(no non-'Serial read failed' line in driver.log)"
+  empties=$(find "$ROS_LOG" -name 'stepper_arm_driver_*.log' -size 0 2>/dev/null | wc -l)
+  {
+    echo "$(date '+%F %T') DIAGNOSIS: $cause"
+    echo "    last driver line (excl. 'Serial read failed'): $last_drv"
+    echo "    empty stepper_arm_driver_*.log files in $ROS_LOG: $empties (not deleted)"
+    echo "    the link is STOPPED and will NOT auto-retry; run 'arm-link up' to try again."
+  } | tee -a "$LOGDIR/events.log" > "$DIAG".tmp
+  # events.log gets the block (via tee above, appended); last_diagnosis.txt gets just this block
+  mv "$DIAG".tmp "$DIAG"
+}
+
+supervise() {
+  local sp="" dp=""
+  cleanup() {
+    [ -n "$dp" ] && kill -INT "$dp" 2>/dev/null
+    [ -n "$sp" ] && kill "$sp" 2>/dev/null
+    sleep 0.5
+    [ -n "$dp" ] && kill -9 "$dp" 2>/dev/null
+    ev "supervisor stopped (by signal)"
+    exit 0
+  }
+  trap cleanup INT TERM HUP
+  ros_env
+  ev "supervisor started (bridge $BRIDGE, pty $PTY); NO auto-retry"
+  [ -L "$PORT_LINK" ] || ev "WARNING: $PORT_LINK missing. Run once: sudo mkdir -p /dev/serial/by-id && sudo ln -sfn $PTY $PORT_LINK"
+  # connect only if something is LISTENING on the bridge port: with no listener, a connect to a local port can
+  # land on its own source port (TCP self-connect) and then holds the port, so the laptop tunnel cannot bind.
+  if ! ss -Hltn "sport = :${BRIDGE##*:}" 2>/dev/null | grep -q .; then
+    diagnose "bridge not listening: nothing on $BRIDGE yet (start the laptop bridge + SSH tunnel first, then arm-link up)"
+    exit 1
+  fi
+  socat -d -d "pty,raw,echo=0,link=$PTY" "tcp:$BRIDGE" >> "$LOGDIR/socat.log" 2>&1 &
+  sp=$!
+  for _ in $(seq 50); do [ -e "$PTY" ] && break; kill -0 "$sp" 2>/dev/null || break; sleep 0.1; done
+  if ! kill -0 "$sp" 2>/dev/null || [ ! -e "$PTY" ]; then
+    diagnose "bridge refused / tunnel down: socat never connected to $BRIDGE (laptop bridge not running, the SSH tunnel is down, or another client holds the port)"
+    kill "$sp" 2>/dev/null
+    exit 1
+  fi
+  ev "socat up (pid $sp) -> $PTY -> $(readlink "$PTY")"
+  "$DRIVER" >> "$LOGDIR/driver.log" 2>&1 &
+  dp=$!
+  ev "driver up (pid $dp)"
+  wait -n "$sp" "$dp"
+  # one of them exited: diagnose which, stop the other, and EXIT (no restart loop).
+  if ! kill -0 "$sp" 2>/dev/null; then
+    diagnose "bridge closed mid-run: socat exited after it was up (the laptop bridge restarted or the SSH tunnel dropped)"
+  else
+    diagnose "driver crashed: stepper_arm_driver exited while socat was still up"
+  fi
+  kill -INT "$dp" 2>/dev/null; kill "$sp" 2>/dev/null
+  sleep 1; kill -9 "$dp" 2>/dev/null
+  wait "$dp" "$sp" 2>/dev/null
+  ev "link stopped (see the diagnosis above); not retrying"
+  exit 1
+}
+
+show_diagnosis() {
+  if [ -s "$DIAG" ]; then
+    echo "================ LAST DIAGNOSIS ================"
+    cat "$DIAG"
+    echo "================================================"
+  else
+    echo "last diagnosis: none recorded"
+  fi
+}
+
+status_times() {
+  # "link up for ..." (since the last socat-up/supervisor-start, only while the session is running) and the time of
+  # the last drop. Parsed from events.log; timestamps are "%F %T" (first 19 chars of a line).
+  local ev="$LOGDIR/events.log"
+  if tmux has-session -t "$SESSION" 2>/dev/null && [ -s "$ev" ]; then
+    local up_line up_ts up_s now_s d
+    up_line=$(grep -E "socat up|supervisor started" "$ev" | tail -n 1)
+    up_ts=$(printf '%s' "$up_line" | cut -c1-19)
+    up_s=$(date -d "$up_ts" +%s 2>/dev/null || echo "")
+    now_s=$(date +%s)
+    if [ -n "$up_s" ]; then
+      d=$((now_s - up_s))
+      printf "uptime: %dh%02dm%02ds (link up since %s)\n" $((d/3600)) $(((d%3600)/60)) $((d%60)) "$up_ts"
+    else
+      echo "uptime: running (could not parse start time)"
+    fi
+  else
+    echo "uptime: (not running)"
+  fi
+  local drop
+  drop=$(grep -E "link stopped|supervisor stopped|DIAGNOSIS|could not connect" "$ev" 2>/dev/null | tail -n 1)
+  if [ -n "$drop" ]; then
+    echo "last drop: $(printf '%s' "$drop" | cut -c1-19)  ($(printf '%s' "$drop" | cut -c21-))"
+  else
+    echo "last drop: none recorded"
+  fi
+}
+
+case "${1:-status}" in
+  up)
+    if tmux has-session -t "$SESSION" 2>/dev/null; then echo "already running (arm-link status / arm-link logs)"; exit 0; fi
+    show_diagnosis
+    # setsid: start the tmux server (and therefore socat + the driver) in a brand-new session, so a Ctrl+C or a tool
+    # interrupt in the launching shell cannot propagate a SIGINT to the link (2026-10-23: that killed the supervisor).
+    setsid tmux new-session -d -s "$SESSION" "$0 _supervise"
+    sleep 2; "$0" status ;;
+  down)
+    if tmux has-session -t "$SESSION" 2>/dev/null; then
+      tmux send-keys -t "$SESSION" C-c; sleep 2; tmux kill-session -t "$SESSION" 2>/dev/null
+    fi
+    echo "stopped" ;;
+  status)
+    show_diagnosis
+    if tmux has-session -t "$SESSION" 2>/dev/null; then echo "supervisor: running (tmux $SESSION)"; else echo "supervisor: NOT running"; fi
+    status_times
+    echo "socat:  $(pgrep -f "socat .*link=$PTY" | tr '\n' ' ')"
+    echo "driver: $(pgrep -f "$DRIVER" | tr '\n' ' ')"
+    echo "port:   $PTY -> $(readlink "$PTY" 2>/dev/null || echo missing);  $( [ -L "$PORT_LINK" ] && echo 'by-id link ok' || echo 'by-id link MISSING')"
+    echo "--- events";  tail -n 5 "$LOGDIR/events.log" 2>/dev/null
+    echo "--- driver";  grep -v "Serial read failed" "$LOGDIR/driver.log" 2>/dev/null | tail -n 8
+    if [ "${2:-}" = "--live" ]; then
+      ros_env
+      if timeout 4 ros2 topic echo --once /joint_states --field position >/dev/null 2>&1; then
+        echo "--- /joint_states: LIVE"; else echo "--- /joint_states: no message in 4 s"; fi
+    fi ;;
+  watch)
+    # Foreground watcher: NO auto-restart (by design). Prints a clear line + a terminal bell the instant the link
+    # drops, and the exact command to bring it back. The hourly laptop-tunnel reset leaves the link stopped; this
+    # just tells you, loudly. Ctrl+C stops watching (the link itself is untouched).
+    echo "arm-link watch: polling the tmux session every 3 s. NO auto-restart. Ctrl+C to stop watching."
+    prev=""
+    while true; do
+      if tmux has-session -t "$SESSION" 2>/dev/null; then cur=up; else cur=down; fi
+      if [ "$cur" = down ] && [ "$prev" != down ]; then
+        printf '\a'                                   # terminal bell
+        echo ""
+        echo "$(date '+%F %T') !!! arm-link is DOWN (supervisor not running) !!!"
+        show_diagnosis
+        echo "Bring it back (ONLY after the laptop bridge + SSH tunnel are up again):"
+        echo "    arm-link up"
+      elif [ "$cur" = up ] && [ "$prev" = down ]; then
+        echo "$(date '+%F %T') arm-link is back up."
+      fi
+      prev=$cur
+      sleep 3
+    done ;;
+  logs)
+    tail -n 20 -F "$LOGDIR/events.log" "$LOGDIR/driver.log" ;;
+  attach)
+    tmux attach -t "$SESSION" ;;
+  home)
+    read -r -p "Home ALL axes (except gripper) through the driver. E-stop in hand and arm watched? [y/N] " ok
+    [ "$ok" = y ] || [ "$ok" = Y ] || { echo "cancelled"; exit 1; }
+    ros_env
+    ev "home-all requested by $(whoami) via arm-link"
+    # Wait until the publish has matched EVERY current /arm/command subscriber (the driver included) before the
+    # one-shot publish. `-w 1` was not enough (2026-10-28): leftover rosbag recorders were also subscribed, matched
+    # first, and the home went out before discovery reached the driver: silently dropped, "it is not homing".
+    nsub=$(ros2 topic info /arm/command 2>/dev/null | awk '/Subscription count/ {print $3}')
+    ros2 topic info -v /arm/command 2>/dev/null | grep -q "Node name: ArmSerialDriver" \
+      || { echo "the arm driver is not subscribed to /arm/command: is the link up (arm-link status)?"; exit 1; }
+    ros2 topic pub --once -w "${nsub:-1}" /arm/command rover_msgs/msg/ArmCommand "{cmd_type: 72, cmd_value: 170}" ;;
+  _supervise)
+    supervise ;;
+  *)
+    sed -n '2,24p' "$0"; exit 1 ;;
+esac
