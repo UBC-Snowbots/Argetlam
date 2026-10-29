@@ -209,4 +209,5 @@ def _skill_confirm_on(cfg):
     """dev_arm_real ships with confirm.skills false since 2026-10-28 (Pranav: no spoken yes); these tests keep
     exercising the confirm mechanism itself by switching it back on."""
     cfg["confirm"]["skills"] = True
+    cfg["perception"]["source"] = "sim"   # dev_arm_real reads the camera now; these tests use config positions
     return cfg

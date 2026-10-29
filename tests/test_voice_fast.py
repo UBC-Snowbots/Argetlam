@@ -32,7 +32,7 @@ OBJ, PRE = ["cup", "bottle", "block"], ["ready", "base"]
     ("move left 5 cm", "cartjog", {"direction": "left", "dist_m": 0.05}),
     ("nudge up 3 centimetres", "cartjog", {"direction": "up", "dist_m": 0.03}),
     ("move forward ten cm", "cartjog", {"direction": "forward", "dist_m": 0.10}),
-    ("go down 200 mm", "cartjog", {"direction": "down", "dist_m": 0.15}),      # clamped to 15 cm
+    ("go down 200 mm", "cartjog", {"direction": "down", "dist_m": 0.20}),      # under the 60 cm cap
     ("move left", "cartjog", {"direction": "left", "dist_m": 0.05}),           # unspecified = 5 cm
     ("left a bit", "cartjog", {"direction": "left", "dist_m": 0.03}),          # "a bit" = 3 cm
     ("turn the base left 30 degrees", "jointjog", {"joint": 1}),
@@ -76,7 +76,7 @@ def test_default_joint_when_none_named(text, joint, sign_pos):
     ("Move left 5 centimeters.", "cartjog", {"direction": "left", "dist_m": 0.05}),
     ("Move down 10 centimeters.", "cartjog", {"direction": "down", "dist_m": 0.10}),
     ("Move up 15 centimeters.", "cartjog", {"direction": "up", "dist_m": 0.15}),
-    ("go forward 1 meter", "cartjog", {"direction": "forward", "dist_m": 0.15}),      # 1 m clamps to 15 cm
+    ("go forward 1 meter", "cartjog", {"direction": "forward", "dist_m": 0.60}),      # 1 m clamps to 60 cm
     ("nudge up half a centimeter", "cartjog", {"direction": "up", "dist_m": 0.005}),
     ("move left one and a half cm", "cartjog", {"direction": "left", "dist_m": 0.015}),
     ("turn the base left forty five degrees", "jointjog", {"joint": 1}),
@@ -155,7 +155,7 @@ def test_motion_word_mishearings(text, direction):
 
 # --- clamps + speed bounds ---------------------------------------------------------------------------------------
 def test_distance_and_angle_clamps():
-    assert make_cart_step("up", 0.50)["dist_m"] == MAX_DIST_M           # 50 cm -> 15 cm
+    assert make_cart_step("up", 0.90)["dist_m"] == MAX_DIST_M           # 90 cm -> 60 cm
     assert make_cart_step("up", 0.03)["dist_m"] == pytest.approx(0.03)
     assert make_joint_step(3, +1, np.radians(90))["angle_rad"] == pytest.approx(MAX_ANGLE)   # 90 deg -> 45
     assert make_joint_step(3, -1, np.radians(20))["angle_rad"] == pytest.approx(-np.radians(20))
@@ -364,4 +364,5 @@ def _skill_confirm_on(cfg):
     """dev_arm_real ships with confirm.skills false since 2026-10-28 (Pranav: no spoken yes); these tests keep
     exercising the confirm mechanism itself by switching it back on."""
     cfg["confirm"]["skills"] = True
+    cfg["perception"]["source"] = "sim"   # dev_arm_real reads the camera now; these tests use config positions
     return cfg

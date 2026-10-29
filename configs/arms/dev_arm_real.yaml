@@ -178,6 +178,13 @@ real_arm:
 # Rover camera DIGITAL TWIN mounts for the real dev_arm. SAME mounts as dev_arm.yaml; measure the REAL
 # mount pose and replace the chosen one, and set camera.calib (a ChArUco calibration, docs/PERCEPTION.md)
 # or camera.model to the real camera's intrinsics. Only used when perception.source: camera.
+perception:
+  # the real arm's object positions come from the laptop's RealSense D415 (calibrated 2026-10-28, NL + plus marks,
+  # +-1 cm): `rover poses` sends object_poses; Isaac's objects are moved to match. No poses arriving = objects unseen,
+  # so a pick/move is refused with "I don't see ...". Set source: sim to go back to the config positions.
+  source: external
+  mirror_to_sim: true
+  stale_s: 2.0          # the arm can hide the block from the camera for a moment during a grasp
 camera:
   z_table: 0.0
   mounts:
