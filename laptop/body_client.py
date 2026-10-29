@@ -484,6 +484,67 @@ class ButtonPanel:
             cv2.putText(frame, self.note[:60], (10, 260), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 200, 255), 2)
 
 
+class MuseFeed:
+    """Latest local Muse status (eeg.stream_tx StatusPub -> UDP 127.0.0.1:47155, ~5 Hz) for the MUSE info lines.
+    Silent if no Muse program runs on this laptop; disabled if the port is taken."""
+    PORT = 47155
+
+    def __init__(self):
+        self.msg, self.t = None, 0.0
+        try:
+            self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self.sock.bind(("127.0.0.1", self.PORT))
+            self.sock.setblocking(False)
+        except OSError:
+            self.sock = None
+
+    def poll(self):
+        while self.sock is not None:
+            try:
+                m = json.loads(self.sock.recv(65536))
+            except (BlockingIOError, OSError, ValueError):
+                return
+            if m.get("kind") == "muse_status":
+                self.msg, self.t = m, time.time()
+
+    def draw(self, frame, robot: dict, now: float, x=10, y=185):
+        """Two compact lines: stream + contact + last toggle; jaw level vs threshold + app gripper state/source."""
+        if self.msg is None:
+            return
+        m, stale = self.msg, now - self.t > 3.0
+        col_ok, col_bad, col_dim = (0, 220, 0), (0, 90, 255), (170, 170, 170)
+        if stale:
+            cv2.putText(frame, f"MUSE: no status for {now - self.t:.0f}s (stream stopped?)", (x, y),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, col_bad, 2)
+            return
+        ch = m.get("ch") or {}
+        bad = [c for c, s in ch.items() if s != "good"]
+        contact = ("contact OK" if ch and not bad else
+                   "contact ?" if not ch else "BAD " + " ".join(f"{c}:{ch[c]}" for c in bad))
+        lt = m.get("last_toggle_t")
+        last = f"last clench {now - lt:.0f}s ago" if lt else "no clench yet"
+        live = m.get("data_age", 0) < 1.0 and m.get("hub")
+        line1 = (f"MUSE {m.get('fs', 0):.0f}Hz hub {'OK' if m.get('hub') else 'DOWN'}  {contact}  {last}"
+                 + (f"  rec {m['reconnects']}" if m.get("reconnects") else ""))
+        cv2.putText(frame, line1, (x, y), cv2.FONT_HERSHEY_SIMPLEX, 0.55,
+                    col_ok if live and not bad else col_bad, 2)
+        c = m.get("clench")
+        g = robot.get("grip")
+        grip = "?" if g is None else ("CLOSED" if g >= 0.5 else "OPEN")
+        src = robot.get("grip_source") or "-"
+        clash = f"  clashes {robot['grip_clashes']}" if robot.get("grip_clashes") else ""
+        if c:
+            rel, on = c.get("rel", 0.0), c.get("on", 1.0)
+            n = 12
+            fill = min(n, int(n * rel / max(on * 1.5, 1e-6)))
+            bar = "#" * fill + "-" * (n - fill)
+            jaw = f"JAW [{bar}] {rel:4.1f}x/{on:.1f}x base {c.get('base', 1):.1f} {c.get('state', '')}"
+            jcol = col_ok if rel >= on else col_dim
+        else:
+            jaw, jcol = "JAW: no clench profile", col_dim
+        cv2.putText(frame, f"{jaw}   GRIP {grip} ({src}){clash}", (x, y + 23), cv2.FONT_HERSHEY_SIMPLEX, 0.55, jcol, 2)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--host", default=DEFAULT_HOST)
@@ -533,6 +594,7 @@ def main():
         raise SystemExit(f"camera {args.camera} did not open (try --camera 1)")
     track = Tracker(video=True)
     panel = ButtonPanel(margin=args.panel_margin)
+    muse = MuseFeed()   # local Muse status (if a Muse stream runs on this laptop) for the MUSE info lines
     cv2.namedWindow("rover body client")
     cv2.setMouseCallback("rover body client", panel.on_mouse)
     last_send, fps_t, frames, fps = 0.0, time.time(), 0, 0.0
@@ -622,6 +684,8 @@ def main():
                         0.75, (0, 255, 255), 2)
             if tune.get("progress") is not None:
                 cv2.rectangle(frame, (10, 160), (10 + int(300 * tune["progress"]), 170), (0, 255, 255), -1)
+        muse.poll()
+        muse.draw(frame, robot, now)
         if robot.get("assist"):
             cv2.putText(frame, "ASSIST: grabbing / releasing...", (10, 230), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 80, 220), 2)
         elif robot.get("grab_ready"):

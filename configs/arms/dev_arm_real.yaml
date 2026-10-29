@@ -95,6 +95,7 @@ body:
 # and near the lower chest to creep back (to x 0.47); mid-chest holds. Flip a sign if a control drives the wrong way
 # (or press M for a mirrored webcam). See docs/PLANE_TELEOP.md.
 plane:
+  engage_dz: -0.025   # start each follow 2.5 cm below the current TCP, to match a resting arm (Pranav 2026-10-28)
   side: right                 # the operator's CONTROL hand (lateral + vertical); the other hand drives reach
   gain:    {lateral: 0.20, vertical: 0.15, reach: 0.15}   # reach gain is only used in reach_mode: position
   sign:    {lateral: 1.0, vertical: 1.0, reach: 1.0}
@@ -139,16 +140,17 @@ safety:
   # IK reaches x to ~0.75 across the whole y,z face (sweep 2026-10-24); 0.70 keeps 5 cm margin and the box stays
   # 95.2% reachable on a 5^3 grid / 96.5% on 7^3 (worst miss 72 mm, unchanged, at a y/z corner, not the x extreme).
   # x min kept at 0.47 (the back edge is already near the reachable limit). Forward room from home: 0.095 -> 0.155 m.
-  # z floor lowered 0.38 -> -0.122 (2026-10-28): the old floor kept the gripper ~53 cm above the real table (the base
-  # is on a 0.152 m pedestal, table.top -0.152). -0.122 = table + 3 cm, just under the tape roll's grasp point (+3.5 cm).
-  # The pedestal height is a tape estimate (+-1 cm). Joint limits reach z ~ -0.57 over x 0.35-0.70.
-  workspace_min: [0.47, -0.22, -0.122]
+  # z floor 0.38 -> -0.122 -> 0.045 (2026-10-28): 0.045 = the plywood WORK board (table.top +0.015) + 3 cm. The
+  # -0.122 step assumed the objects stood on the main table, 16.7 cm lower: it let the gripper ~14 cm into the board.
+  # Pedestal (tape) and board (depth) heights are estimates (+-1 cm). Joint limits reach z ~ -0.57 over x 0.35-0.70.
+  workspace_min: [0.47, -0.22, 0.045]
   workspace_max: [0.70, 0.18, 0.60]
 
 table:
-  # The real arm's base sits on a ~6 in (0.152 m) pedestal on the table (Pranav, 2026-10-28), so the tabletop is
-  # BELOW the arm frame's z = 0 (bottom of the base). The sim puts its ground at this height and draws the pedestal.
-  top: -0.152
+  # The real arm's base sits on a ~6 in (0.152 m) pedestal on the MAIN table (Pranav, 2026-10-28). The objects stand
+  # on a plywood board raised ~16.7 cm on 2x4s (D415 depth; the board is tilted ~4.5 deg, +-2 cm), WORK surface:
+  # -0.152 + 0.167 = +0.015 in the arm frame (bottom of the base = z 0). Tape-check it. The sim ground uses this.
+  top: 0.015
   x: [0.30, 0.75]
   y: [-0.50, 0.50]
 
@@ -156,9 +158,9 @@ table:
 # flat-lying UBC Rover tape roll. pos z = GRASP point (block 6 cm up, roll 3.5 cm up, above table.top). x/y are
 # reachable placeholders until the camera->base calibration / object_poses gives real positions.
 scene:
-  block: {pos: [0.56, 0.00, -0.092], height: 0.103, radius: 0.0285, mass: 0.14, shape: box,
+  block: {pos: [0.542, 0.037, 0.075], height: 0.103, radius: 0.0285, mass: 0.14, shape: box,
           desc: "small upright wooden block, light natural wood, about 10 cm tall"}
-  tape:  {pos: [0.55, 0.15, -0.112], height: 0.06, radius: 0.05, mass: 0.15, shape: cylinder,
+  tape:  {pos: [0.55, 0.15, 0.055], height: 0.06, radius: 0.05, mass: 0.15, shape: cylinder,
           desc: "white roll of UBC Rover sticker tape with a brown cardboard centre, short and round"}
 
 real_arm:

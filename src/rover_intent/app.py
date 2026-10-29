@@ -177,6 +177,7 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
     set_mirror = None
     presets = cfg["arm"].get("presets", {}) or {}
     on_drop = cfg["arm"].get("on_drop")  # preset to go to when the body drops out of view (None = freeze)
+    engage_dz = float((cfg.get("plane") or {}).get("engage_dz", 0.0))   # plane: start the follow this far below
     if on_drop and on_drop not in presets:
         raise ValueError(f"arm.on_drop {on_drop!r} is not one of the arm's presets {list(presets)}")
     # which clutch releases send the arm to the on_drop preset. arm_mirror adds "disable" (F / left hand lowered),
@@ -313,7 +314,11 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
             if arm_mirror_on:
                 retarget.engage(q_cmd.copy())   # anchor the 2 s ramp at the current joints (no jump)
             else:
-                retarget.engage(arm.fk(q_cmd)[:3, 3], ev.neutral, joint6=q_cmd[5])  # joint6 anchors wrist roll
+                # plane.engage_dz: start the follow this far below the current TCP (dev_arm_real: -0.025, Pranav
+                # 2026-10-28: "base is too high ... go lower by maybe an inch to go with my resting arm"); only on a
+                # fresh engage, never on a pause/resume re-anchor. The rate/vel limits make it a short glide.
+                anchor = arm.fk(q_cmd)[:3, 3] + np.array([0.0, 0.0, engage_dz])
+                retarget.engage(anchor, ev.neutral, joint6=q_cmd[5])  # joint6 anchors wrist roll
             arbiter.on_intent(Intent(action=Action.follow))
             body_target = last_target = body_joint_target = None
 

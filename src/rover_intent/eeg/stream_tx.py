@@ -26,6 +26,8 @@ import time
 from collections import deque
 from pathlib import Path
 
+import numpy as np
+
 from rover_intent.eeg.clench import ClenchDetector, _read, open_board, toggle_packet
 from rover_intent.eeg.clench import (
     MUSE_CHANNELS,
@@ -110,6 +112,55 @@ class HubSender:
         self._thread.join(timeout=2.0)
 
 
+STATUS_PORT = 47155   # local-only Muse status for the laptop UIs (rover-body's info panel); never leaves the laptop
+
+
+class StatusPub:
+    """~5 Hz local UDP JSON snapshot of the Muse stream for other laptop processes (body_client's MUSE panel):
+    stream health, per-channel contact (sunday.channel_quality on the last 2 s, recomputed once a second) and the
+    clench detector. Fire-and-forget to 127.0.0.1:STATUS_PORT; nobody listening is fine."""
+
+    def __init__(self, fs, channels, port=STATUS_PORT, hz=5.0):
+        self.fs, self.channels, self.addr, self.dt = fs, list(channels), ("127.0.0.1", port), 1.0 / hz
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.buf = deque(maxlen=int(2 * fs))
+        self.ch, self.ch_t, self.last = {}, 0.0, 0.0
+        self.last_toggle_t: float | None = None
+        try:
+            from rover_intent.eeg.sunday import SundayConfig, channel_quality
+            self._q, self._qcfg = channel_quality, SundayConfig()
+        except Exception:  # noqa: BLE001  (contact check is optional; the panel just shows "?")
+            self._q = None
+
+    def push(self, x):
+        for col in x.T:
+            self.buf.append(col)
+
+    def maybe(self, *, sender, reconnects, last_data, detector=None):
+        now = time.time()
+        if now - self.last < self.dt:
+            return
+        self.last = now
+        if self._q is not None and now - self.ch_t > 1.0 and len(self.buf) >= self.fs:
+            try:
+                q = self._q(np.asarray(self.buf).T, self.fs, self._qcfg)
+                self.ch = {c: v["status"] for c, v in q["channels"].items()}
+            except Exception:  # noqa: BLE001
+                self.ch = {}
+            self.ch_t = now
+        msg = {"kind": "muse_status", "t": now, "fs": self.fs, "hub": bool(sender.connected), "sent": sender.sent,
+               "dropped": sender.dropped, "reconnects": reconnects, "data_age": round(now - last_data, 2),
+               "ch": self.ch, "last_toggle_t": self.last_toggle_t}
+        if detector is not None:
+            s = detector.status()
+            msg["clench"] = {"rel": round(s.rel, 2), "on": s.on_ratio, "base": round(s.baseline, 2),
+                             "state": s.state, "toggles": s.n_toggles, "moving": s.moving}
+        try:
+            self.sock.sendto(json.dumps(msg).encode(), self.addr)
+        except OSError:
+            pass
+
+
 def stream_loop(board, fs, chans, sender: HubSender, *, detector: ClenchDetector | None = None,
                 udp=None, app_addr=None, period=0.05, quiet=False, stop: threading.Event | None = None,
                 reopen=None, stall_s: float = 3.0, color: bool = False, logger: "ScoreLogger | None" = None):
@@ -123,6 +174,7 @@ def stream_loop(board, fs, chans, sender: HubSender, *, detector: ClenchDetector
     last_print = 0.0
     last_data = time.time()
     reconnects = 0
+    pub = StatusPub(fs, MUSE_CHANNELS[:len(chans)] if len(chans) <= 4 else list(chans))
     try:
         while not stop.is_set():
             if reopen is not None and time.time() - last_data > stall_s:
@@ -143,15 +195,18 @@ def stream_loop(board, fs, chans, sender: HubSender, *, detector: ClenchDetector
                 now = time.time()  # ~ time of the LAST sample in this chunk
                 sender.submit(make_frame(seq, now, x))
                 seq += 1
+                pub.push(x)
                 if detector is not None:
                     for _t in detector.push(x):
                         n_toggles += 1
+                        pub.last_toggle_t = time.time()
                         if udp is not None:
                             udp.sendto(toggle_packet(time.time()), app_addr)
                         # big, unmissable, on its OWN line (never overwritten)
                         print("\n" + toggle_banner(detector.status(), dry=udp is None, color=color), flush=True)
                     if logger is not None:
                         logger.maybe_log(detector.status())
+            pub.maybe(sender=sender, reconnects=reconnects, last_data=last_data, detector=detector)
             # refresh fast when a detector is live (clench feedback), slowly otherwise
             refresh = 0.1 if detector is not None else 1.0
             if not quiet and time.time() - last_print > refresh:
