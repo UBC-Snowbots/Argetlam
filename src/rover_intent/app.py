@@ -192,6 +192,7 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
     # times a second, so a Query within the last second means the follower is live (it can't be known directly).
     last_query_t, follower_ever = 0.0, False
     BUSY_MSG = lambda: f"busy: {goal_name} still moving, press STOP first"   # the one-move-at-a-time refusal text
+    settle_goal, settle_q, settle_t = None, None, 0.0   # 'settled short of the goal' tracker (see the goal check)
     is_busy = lambda why: isinstance(why, str) and why.startswith("busy:")   # tag a refusal reply as busy for the UI
     # "mirror real" state: the sim arm's joint targets come straight from the PHYSICAL arm (real_to_sim -> real_joints),
     # no IK and no body/voice motion. Entered/left by a MirrorMsg (or STOP leaves it). real_t is the VM receive time of
@@ -974,8 +975,20 @@ def run(cfg: dict, backend: str, seconds: float | None = None, record: bool = Tr
                 q_des[5] = float(retarget.roll_target)
         q_cmd = safety.step(q_cmd, q_des, dt, 0.0 if mirror_real else input_age)
         q_cmd = np.clip(q_cmd, q - WINDUP, q + WINDUP)  # anti-windup: never run far ahead of the real joints
-        if joint_goal is not None and at_goal(q_cmd, q, joint_goal):
-            log.info("preset %s reached", goal_name)
+        goal_done = joint_goal is not None and at_goal(q_cmd, q, joint_goal)
+        if joint_goal is not None and not goal_done:
+            # Settled short of the goal (2026-10-28: at a stretched pose the sim arm sagged ~0.6 deg under gravity,
+            # never met at_goal's 0.01 rad, and every later voice command was refused as "busy" while the real
+            # arm had long stopped): if no measured joint moved > 3 mrad for 1 s, call the move done.
+            if settle_goal is not joint_goal or np.max(np.abs(q - settle_q)) > 0.003:
+                settle_goal, settle_q, settle_t = joint_goal, np.array(q, float).copy(), t0
+            elif t0 - settle_t >= 1.0:
+                goal_done = True
+                log.info("preset %s settled %.1f mrad from the goal", goal_name,
+                         1000 * float(np.max(np.abs(np.asarray(q) - joint_goal))))
+        if goal_done:
+            if at_goal(q_cmd, q, joint_goal):
+                log.info("preset %s reached", goal_name)
             joint_goal = None
             if voice_seq:   # a sequence step just finished: start the next one in the same tick
                 ok, step_say = _advance_sequence(time.time())
