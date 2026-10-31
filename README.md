@@ -1,577 +1,592 @@
+<p align="center">
+  <a href="https://youtu.be/N1-LpOunrV4"><img alt="video: 3 min" src="https://img.shields.io/badge/video-3%20min-B31B1B?style=flat-square&labelColor=24292F&logo=youtube&logoColor=white"></a>
+  <img alt="Isaac Sim: 6.0.1" src="https://img.shields.io/badge/Isaac%20Sim-6.0.1-3D7A00?style=flat-square&labelColor=24292F&logo=nvidia&logoColor=white">
+  <img alt="Nemotron 3 Nano: Nebius Token Factory" src="https://img.shields.io/badge/Nemotron%203%20Nano-Nebius%20Token%20Factory-3D7A00?style=flat-square&labelColor=24292F&logo=nvidia&logoColor=white">
+  <img alt="Nebius x NVIDIA: Physical AI track" src="https://img.shields.io/badge/Nebius%20%C3%97%20NVIDIA-Physical%20AI%20track-3D7A00?style=flat-square&labelColor=24292F">
+  <br>
+  <img alt="real arm: voice + body pick" src="https://img.shields.io/badge/real%20arm-voice%20%2B%20body%20pick-1F6FEB?style=flat-square&labelColor=24292F">
+  <img alt="ROS 2: Jazzy" src="https://img.shields.io/badge/ROS%202-Jazzy-1F6FEB?style=flat-square&labelColor=24292F&logo=ros&logoColor=white">
+  <img alt="Muse 2: jaw clench grip" src="https://img.shields.io/badge/Muse%202-jaw%20clench%20grip-1F6FEB?style=flat-square&labelColor=24292F">
+  <img alt="tests: 567 passing" src="https://img.shields.io/badge/tests-567%20passing-1F6FEB?style=flat-square&labelColor=24292F">
+  <a href="LICENSE"><img alt="license: Apache 2.0" src="https://img.shields.io/badge/license-Apache%202.0-1F6FEB?style=flat-square&labelColor=24292F"></a>
+</p>
+
+<p align="center">
+  <a href="https://youtu.be/N1-LpOunrV4"><img src="docs/assets/video_thumbnail.jpg" alt="Argetlam video, 3 minutes: the UBC Rover development arm" width="720"></a>
+</p>
+<p align="center"><sub>Video, 3 minutes. Click the image to open it.</sub></p>
+
 # Argetlam
 
-*Silver Hand. In Irish myth, King Nuada lost his arm in battle and ruled again with one made of silver.*
+Argetlam is a control system for a real 6-axis robot arm.
+The operator controls the arm with three inputs:
 
-**Drive a 6-axis rover arm with your body, your voice and (experimentally) your brain.**
-A webcam tracks your arm and drives the gripper in the plane you see on screen, NVIDIA Nemotron on Nebius Token
-Factory (with an instant local fast path) turns speech into structured robot commands, a Muse 2 jaw-clench toggles
-the grip, and an EEG decoder estimates grasp intent. Everything is developed against a physics simulation of the
-team's real arm in NVIDIA Isaac Sim / Isaac Lab, and the same joint stream, through the same safety layer, now drives
-the physical arm.
+- **Body.** A webcam tracks the right hand. The arm moves with the hand.
+- **Voice.** NVIDIA Nemotron on Nebius Token Factory changes speech into robot commands.
+- **Muse 2 headband.** Two quick jaw clenches open or close the gripper.
 
-Built by UBC Rover for the **Nebius × NVIDIA Global AI Hackathon** (Physical AI track).
+All inputs go through one control loop and one safety layer.
+The control loop moves a digital twin of the arm in NVIDIA Isaac Sim.
+The real arm follows the joints of the twin.
 
-> Status (2026-10): the simulation stack, teleop, calibration, voice and the EEG research are working and tested in
-> sim, and the **physical dev arm is now driven**: the sim streams joint targets to a follower
-> (`scripts/sim_to_real.py`) that feeds Rowan's ROS 2 Jazzy `stepper_arm_driver`, which drives the real arm through
-> the same safety layer under the `dev_arm_real` profile. Voice presets and jogs have been run on the real arm; it
-> tracks the sim to within about 0.5 deg after settling. Numbers below are from simulation or offline datasets unless
-> they say "real arm".
+UBC Rover made Argetlam for the Nebius × NVIDIA Global AI Hackathon, Physical AI track.
+The license is [Apache 2.0](LICENSE).
+The Python package name is `rover_intent`.
+
+**Video (3 minutes):** https://youtu.be/N1-LpOunrV4
+
+## Purpose
+
+Approximately 1 in 6 people have a significant disability
+([WHO](https://www.who.int/news-room/fact-sheets/detail/disability-and-health)).
+More than 2.5 billion people need one or more assistive products
+([WHO/UNICEF](https://www.who.int/publications/i/item/9789240049451)).
+Different people need different ways to control a robot.
+Argetlam gives one arm three different inputs:
+
+- An operator who cannot use a controller can move the arm with one hand.
+- An operator who cannot use their hands can use voice.
+- An operator who cannot speak can use a jaw clench to operate the gripper.
+
+The name comes from Irish myth. King Nuada lost his arm in battle and got a new arm made of silver.
+
+## Results on the real arm
+
+- **Voice pick.** The command "pick up the block" makes the arm pick up the block without help.
+  The D415 depth camera finds the block and sends its position to the twin.
+  Nemotron changes the command into a pick intent, and the arm plans and does the pick.
+  The first success was on 2026-10-28.
+  Before that success, many attempts failed. We found the cause of each failure and corrected it
+  ([Problems and corrections](#problems-and-corrections-on-the-real-arm)).
+- **Body pick.** The operator picked up the same block two times with hand movement only.
+- **Voice speed.** Nemotron returned each command in 0.9 to 2.6 seconds.
+  Short commands, for example "move left 10 cm" and "stop", do not use the cloud.
+  A local parser runs them in less than 50 ms.
 
 ---
 
 ## Contents
-- [What it does](#what-it-does)
+- [Main functions](#main-functions)
+- [Try the system without hardware](#try-the-system-without-hardware)
+- [Results](#results)
+- [Problems and corrections on the real arm](#problems-and-corrections-on-the-real-arm)
+- [NVIDIA and Nebius components](#nvidia-and-nebius-components)
 - [System architecture](#system-architecture)
-- [How the body tracking works](#how-the-body-tracking-works)
-- [Calibration: syncing you with the robot](#calibration-syncing-you-with-the-robot)
+- [Inputs](#inputs)
 - [Clutch and safety](#clutch-and-safety)
-- [Voice: Nemotron on Nebius Token Factory](#voice-nemotron-on-nebius-token-factory)
 - [Autonomous skills](#autonomous-skills)
-- [The arm and the simulation](#the-arm-and-the-simulation)
-- [EEG grasp-intent research](#eeg-grasp-intent-research)
+- [Hardware](#hardware)
+- [Installation and operation](#installation-and-operation)
+- [Tests](#tests)
 - [Repository layout](#repository-layout)
-- [Setup](#setup)
-- [Running it](#running-it)
-- [Testing and the regression gate](#testing-and-the-regression-gate)
-- [Configuration](#configuration)
-- [Network ports](#network-ports)
-- [Results so far](#results-so-far)
-- [Known limitations](#known-limitations)
-- [Roadmap](#roadmap)
+- [Users](#users)
+- [Limitations](#limitations)
+- [Next steps](#next-steps)
 - [Credits](#credits)
-- [License](#license)
 
 ---
 
-## What it does
+## Main functions
 
-| Input | What you do | What the arm does |
+| Input | Operator action | Arm action |
 |---|---|---|
-| **Body** (webcam) | move your right hand (default **plane** mode: image-plane only) | the gripper follows left/right and up/down in the frame you see; the left hand's thumb drives reach (thumb up = forward, down = back) |
-| **Hand** | make a fist / open your hand | the gripper closes / opens |
-| **Voice** | "move left 10 centimetres", "go to ready", "stow then home" | the instant local fast path runs it in the same tick, no cloud round trip |
-| **Voice** | "put the red cup next to the tall bottle" | Nemotron parses it; the arm plans and executes the pick-and-place |
-| **Voice** | "stop", "hold on", "reset" | handled locally and instantly (never waits on the cloud) |
-| **Muse 2** (EMG) | double jaw-clench | toggles the gripper open/closed (`eeg/clench.py`) |
-| **EEG** (research) | imagine / prepare a grasp | a decoder estimates grasp intent (offline and pseudo-online results below) |
+| Body (webcam) | Hold the right palm up for 0.6 s | The arm starts to follow the right hand |
+| Body (webcam) | Move the right hand left, right, up or down | The gripper moves in the same direction |
+| Body (webcam) | Point the left thumb up or down | The gripper moves forward or back |
+| Body (webcam) | Close or open the right hand | The gripper closes or opens |
+| Voice | "move left 10 centimetres", "go to ready", "stow then home" | The local parser runs the command immediately |
+| Voice | "pick up the block", "put the cup next to the bottle" | Nemotron makes an intent. The arm plans and does the task |
+| Voice | "stop", "hold on", "reset" | The arm stops immediately. These words never go to the cloud |
+| Muse 2 | Clench the jaw two times quickly | The gripper opens or closes |
 
-Visual feedback is built for one screen (streamed to the operator over Moonlight): the Isaac view shows a **ghost
-target** with a line from the gripper, the **reachable box**, a **neutral cross** and **calibration targets**; a HUD
-overlay shows a mirror-view skeleton, clutch state, prompts and link latency.
+These rules apply to all inputs:
+
+1. Only decisions go to the cloud. Motion, inverse kinematics (IK) and safety stay local.
+2. All commands go through the same safety layer.
+3. The same code runs with a mock arm, in Isaac Sim and on the real arm.
+4. Workspace, home pose, heights and gripper times come from measurements on the real arm.
+
+---
+
+## Try the system without hardware
+
+You do not need a robot, a GPU or an API key for this procedure.
+A mock arm replaces the robot.
+A script replaces the webcam, the microphone and the headband.
+Without `NEBIUS_API_KEY`, an offline parser replaces Nemotron.
+
+1. Install the package:
+   ```bash
+   uv venv .venv && uv pip install -p .venv/bin/python -e ".[dev]"
+   ```
+2. Run the tests. This takes approximately 8 minutes with 4 threads:
+   ```bash
+   .venv/bin/python -m pytest -q
+   ```
+3. Start the control loop with the mock arm:
+   ```bash
+   .venv/bin/python -m rover_intent.app --backend mock &
+   ```
+4. Send a hand circle and two double jaw clenches:
+   ```bash
+   .venv/bin/python scripts/fake_laptop.py --say "follow me" --circle 6 --toggle-at 2 --toggle-at 4
+   ```
+   Result: the clutch engages, the arm follows the circle, and the gripper closes and then opens.
+5. Send a voice command:
+   ```bash
+   .venv/bin/python scripts/fake_laptop.py --say "move the cup beside the bottle"
+   ```
+   Result: the parser makes the intent `move cup beside bottle`. The arm plans a pick and a place.
+
+The app log shows each step, for example `heard ... ->`, `clutch: ...` and `grip toggle ...`.
+To use Nemotron, put `NEBIUS_API_KEY` in `.env`.
+To replay a recorded session into a running app, use `scripts/replay_session.py`.
+
+---
+
+## Results
+
+All numbers come from logs, test files or bench sessions.
+"Real arm" is the physical arm. Other rows show the source: Isaac Sim, synthetic data or offline data.
+
+| Item | Source | Result |
+|---|---|---|
+| Voice "pick up the block" | Real arm | The arm found the block with the depth camera, went to it and picked it up. First success on 2026-10-28. Each failure before it has a known cause and correction |
+| Body pick (webcam) | Real arm | The operator picked up the block 2 times with hand movement only (2026-10-28, recorded session) |
+| Tracking of the twin | Real arm | Real joints stay within approximately 0.5° of the twin after they stop. The firmware runs at approximately half the commanded speed, with a command delay of 0.17 to 0.31 s |
+| Muse 2 jaw clench | Real headband | 10 of 10 double clenches in a recorded session got to the app. In a replay, 6 of 6 changed the gripper state, with 0 errors |
+| Voice delay | Real arm session | Nemotron 3 Nano: 0.9 to 2.6 s for each command. Local parser: less than 50 ms |
+| Voice parsing | Test phrases | Nemotron Nano: 7 of 7 correct. Nemotron Super: 5 of 7 correct |
+| Gripper with hand and Muse together | Isaac Sim | 530 of 530 commands correct, including 54 conflicts between the two inputs. 0 app errors |
+| Autonomous grasp test | Isaac Sim | 9 of 9 correct. All six "move X beside Y" tasks put the object within 1.2 cm |
+| Safety layer | Stress test | 20 000 random steps. The velocity and acceleration limits were never exceeded |
+| Camera object detection | Synthetic images | ArUco detector: median error 0.05 cm, 90th percentile 0.10 cm, 0 false detections |
+| Simulation speed | Isaac Sim | 1.00 × real time with full load |
+
+---
+
+## Problems and corrections on the real arm
+
+The voice pick worked in Isaac Sim before it worked on the real arm.
+On 2026-10-28, the voice pick failed many times on the real arm.
+The app logs record each attempt.
+This table shows each cause in the sequence that we found it:
+
+| Problem | Correction |
+|---|---|
+| The arm could not get to the pre-grasp pose with the full wrist orientation | Picks keep the wrist orientation, as in body control (`skills.auto_orient: frozen`) |
+| The 3 mm alignment tolerance was too small for the stepper motors | Tolerances of 2 cm (waypoint) and 1.5 cm (alignment) on the real arm profile |
+| The descent stopped 2.6 cm above the target because the simulated fingers touched the simulated block | A step that stops within 4 cm of its target for 1.5 s counts as complete (`stall_tol`) |
+| The arm lifted before the gripper was fully closed | The arm waits 3.2 s after the close command. The gripper needs 2.8 s to close |
+| The gripper was rotated, so the fingers touched the edge of the block | The command "grip is level" records the level wrist angle once. Picks then turn the wrist to that angle |
+
+A separate measurement found a height error of 9 cm in the arm model.
+The model showed the gripper 16.6 cm above the board. The real gripper was 7.5 cm above the board.
+The board height in the configuration now comes from this measurement.
+We did not find the cause in the model yet (see [Limitations](#limitations)).
+
+---
+
+## NVIDIA and Nebius components
+
+| Component | Function |
+|---|---|
+| **NVIDIA Nemotron 3 Nano** (`nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B`) on **Nebius Token Factory** | Changes the speech text into a structured `Intent` with a JSON schema: action, object, spatial relation and reference object. If the request is not clear, it asks a question, for example "which one?" |
+| **NVIDIA Isaac Sim 6.0.1 and Isaac Lab 3.0** | The physics twin of the arm. Grasps use friction and finger force, with no attach shortcuts. The scene has the real table heights and a simulated camera. The real arm follows the joints of this twin |
+| Nemotron Super (tested) | 5 of 7 correct on the test phrases. Nano was 7 of 7, so Nano is the default |
+
+The system prompt gives the objects in the scene, with a short description of each object.
+It also gives one line for each action.
+There are no hand-written language rules and no object lists in code.
+The model identifies colours, synonyms and unclear requests.
+The skill layer refuses objects that the camera or the scene does not show.
+The cloud call runs outside the control loop. A "stop" command cancels a cloud call that is not complete.
 
 ---
 
 ## System architecture
 
-```
- OPERATOR LAPTOP                                        SIMULATION / CONTROL HOST (GPU)
- ───────────────                                        ───────────────────────────────
- ┌──────────── laptop/body_client.py ──────────────┐
- │ webcam → MediaPipe Pose (33 pts, 3-D, metres)   │
- │        → MediaPipe Hands (fist / open)          │
- │  right-arm lock · glitch gate · stand-here guide│
- │  keys: C calibrate · X redo axis · F clutch     │
- └──────────────┬──────────────────────────────────┘
-                │ 30 Hz JSON: shoulders, elbow, wrists, hips, hand state, seq
- ┌──────────────┴───────────┐
- │ laptop/voice_client.py   │ push-to-talk → local Whisper → transcript
- └──────────────┬───────────┘
-                │ UDP (tailnet) ─── or ─── SSH tunnel → scripts/tcp_relay.py
-                ▼
- ┌──────────────────────── rover_intent.app (50 Hz control loop) ─────────────────────────┐
- │  pose ─► Clutch ─► CalibratedMapper (profile) ─► gripper target ─┐                     │
- │  speech ─► local stop/reset ─┐                                   │                     │
- │         └► Nemotron (Nebius Token Factory, JSON-schema output) ─► Intent ─► Skills     │
- │                                                                  ▼                     │
- │                        Arbiter (follow / auto / hold, shared autonomy, grip)           │
- │                                     │ straight-line "carrot" target                    │
- │                        DLS inverse kinematics (URDF)                                   │
- │                                     │ joint targets                                    │
- │                        SafetyLayer: joint limits · vel/acc caps · reach box ·          │
- │                                     watchdog · e-stop · anti-windup                    │
- └─────────────────────────────────────┼──────────────────────────────────────────────────┘
-                                       │ UDP: joints, gripper, ghost, targets
-                                       ▼            ▲ joints, object poses, camera pose
- ┌──────────────── sim/isaac_bridge.py (Isaac Lab, 120 Hz physics, CPU PhysX) ────────────┐
- │  arm + gripper + cup / block / bottle · ghost + line · reach wireframe · neutral cross │
- └────────────────────────────────────────────────────────────────────────────────────────┘
-   scripts/sim_to_real.py follower ─► Rowan's ROS 2 Jazzy stepper_arm_driver ─► Teensy 4.1 stepper firmware ─► real dev_arm
+```mermaid
+flowchart TB
+  subgraph LAPTOP["Operator laptop"]
+    CAM["Webcam<br/>MediaPipe Pose + Hands<br/>laptop/body_client.py"]
+    MIC["Microphone<br/>Whisper speech to text<br/>laptop/voice_plus.py"]
+    MUSE["Muse 2 headband<br/>double jaw clench<br/>eeg/stream_tx.py"]
+  end
+  subgraph CLOUD["Nebius Token Factory"]
+    NEM["NVIDIA Nemotron 3 Nano<br/>text to Intent, JSON schema"]
+  end
+  subgraph HOST["Control host: rover_intent.app, 50 Hz loop"]
+    CLUTCH["Clutch"]
+    TELEOP["plane or arm_mirror control"]
+    FAST["Local parser<br/>stop, jogs, named poses"]
+    SKILLS["Skills<br/>pick, place, move"]
+    ARB["Arbiter<br/>follow, auto, hold"]
+    IK["DLS inverse kinematics"]
+    SAFE["Safety layer<br/>joint limits, velocity and acceleration limits,<br/>reach box, watchdog, emergency stop"]
+  end
+  subgraph SIM["NVIDIA Isaac Sim 6.0.1 + Isaac Lab 3.0"]
+    TWIN["Digital twin of the arm<br/>120 Hz physics"]
+  end
+  subgraph REAL["Real arm"]
+    FOL["Follower<br/>scripts/sim_to_real.py"]
+    DRV["ROS 2 Jazzy<br/>stepper_arm_driver"]
+    ARM["Teensy 4.1 and stepper motors<br/>UBC Rover development arm"]
+  end
+  CAM -- "body pose, 30 Hz" --> CLUTCH
+  CLUTCH --> TELEOP --> ARB
+  MIC -- "speech text" --> FAST
+  FAST -- "command not understood" --> NEM
+  NEM -- "Intent" --> SKILLS
+  FAST --> ARB
+  SKILLS --> ARB
+  MUSE -- "grip toggle" --> ARB
+  ARB --> IK --> SAFE
+  SAFE -- "joint targets" --> TWIN
+  TWIN -- "joint states, object positions" --> ARB
+  TWIN -- "twin joints" --> FOL
+  FOL --> DRV --> ARM
 ```
 
-The real arm is driven by mirroring the simulated joint targets: `scripts/sim_to_real.py` reads the app's joint
-stream and republishes it (at a conservative speed fraction) to Rowan's `stepper_arm_driver` over ROS 2 Jazzy, so
-the sim and the hardware run the same trajectory through the same safety layer. `scripts/real_to_sim.py` mirrors the
-other way (the real arm's measured joints drive the sim view). See [The arm and the simulation](#the-arm-and-the-simulation).
-
-Design rules that shaped the code:
-- **Only decisions go to the cloud.** Nemotron decides *what* to do; motion, IK, safety and the control loop stay
-  local and deterministic.
-- **Everything the arm executes goes through one safety layer**, whatever the source (body, voice, EEG).
-- **Same code path in sim and on hardware**: the app talks to an `ArmBackend` (mock / Isaac / real).
-- **Measured, not assumed**: workspace, home pose, grasp heights and camera views were chosen from IK reach maps
-  and live checks; every claim in this README has a test or a logged run behind it.
+No component sends commands directly to the motors.
+Each command moves the twin in Isaac Sim first.
+The follower (`scripts/sim_to_real.py`) then sends the joints of the twin to the ROS 2 driver of the real arm.
 
 ---
 
-## How the body tracking works
+## Inputs
+
+### Body: webcam hand control
+
+The real arm uses `plane` mode ([`docs/PLANE_TELEOP.md`](docs/PLANE_TELEOP.md)).
+This mode uses only the image plane of the camera:
+
+- The right hand moves the gripper left, right, up and down.
+- The left thumb controls reach. Thumb up moves the gripper forward. Thumb down moves it back.
+- A closed hand closes the gripper. An open hand opens the gripper.
+
+Depth is the least accurate MediaPipe axis, so `plane` mode does not use depth.
+For this reason, `plane` mode needs no calibration.
+Hold the right palm up for 0.6 s. The arm then starts to follow from its current position.
 
 ```
- webcam frame
-   │
-   ▼
- MediaPipe Pose ──► world landmarks: 3-D points in metres, centred on the hips
-   │                (x image-right, y down, z depth; depth is the noisiest axis)
-   ├─ arm:   right shoulder (12) · elbow (14) · wrist (16)
-   ├─ hand:  MediaPipe Hands finds up to 2 hands; keep the one whose wrist sits on the
-   │         tracked arm (handedness labels are not trusted: they flip on mirrored webcams)
-   ├─ grip:  fingertip spread / palm size → 0 (fist) … 1 (open); "not found" never means "open"
-   ├─ gate:  wrist jumps faster than 6 m/s are tracking glitches → skipped (≤ 6 frames)
-   └─ guide: shoulder width in pixels (distance) + torso centre (left/right, height)
-             → the stand-here outline turns green → in_position
+ webcam frame → MediaPipe Pose (3-D landmarks in metres) + MediaPipe Hands
+   ├─ hand:  the hand whose wrist is on the tracked arm (handedness labels change on mirrored webcams)
+   ├─ grip:  fingertip spread / palm size → 0 (closed) … 1 (open); "not found" is never "open"
+   └─ gate:  a wrist movement faster than 6 m/s is a tracking error and is ignored
 ```
 
-The client sends 30 packets/s with a sequence number; the app echoes the latest one so the client can show the real
-round-trip time (excluding the app's own hold time) and packet loss.
+`arm_mirror` mode ([`docs/ARM_MIRROR.md`](docs/ARM_MIRROR.md)) sends the operator's shoulder, elbow and wrist
+angles directly to the joints of the arm.
+An older mode with a calibrated body frame is in [`docs/BODY_TELEOP.md`](docs/BODY_TELEOP.md).
+The webcam image can show in a panel on the simulation screen ([`docs/VIDEO_HUD.md`](docs/VIDEO_HUD.md)).
 
-### Teleop modes
-
-- **`plane`** (default on the real arm, [`docs/PLANE_TELEOP.md`](docs/PLANE_TELEOP.md)): the camera sits in front of
-  you and only the image plane is used. The right hand moves the gripper left/right and up/down; the left hand's
-  THUMB is a joystick-rate reach (thumb up = creep forward, thumb down = pull back, anything else = hold). Depth, the noisiest
-  MediaPipe axis, is ignored, so there is no calibration capture. This is the mode behind the real-arm sessions.
-- **`arm_mirror`** ([`docs/ARM_MIRROR.md`](docs/ARM_MIRROR.md)): full-arm joint mirroring, no IK. Your shoulder,
-  elbow and wrist angles map straight to the arm's joints. Also has no calibration capture.
-
-The calibrated-mapper path below (a measured body-to-robot frame fit) is used by the older mapping mode and is kept
-for reference; `plane` and `arm_mirror` do not load a calibration profile.
-
----
-
-## Calibration: syncing you with the robot
-
-Instead of assuming axes, the operator's frame of reference is measured and fitted to the camera they are looking at.
+### Voice: Nemotron and the local parser
 
 ```
- 1. BODY FRAME (independent of where the webcam is)
-        up (z) = hips → shoulders
-          ▲    forward (y) = z × x  (toward the webcam)
-          │   ╱
-   L ─────●────► right (x) = left shoulder → right shoulder      hand = wrist − right shoulder
-          R shoulder (origin)
-
- 2. GUIDED CAPTURE (~15 s; prompts in the HUD, webcam window and a speech bubble)
-    NEUTRAL 2 s → RIGHT → UP → "REACH TOWARD THE CAMERA" → LEFT → DOWN   (1.5 s each)
-    a hold is rejected if it jitters > 2 cm or moved < 8 cm from neutral;
-    capture only runs while the stand-here guide is green
-
- 3. FIT
-    rotation R (body → command frame) by Kabsch on the measured unit directions
-    command frame = the CURRENT camera's heading, gravity kept vertical:
-        your right → screen-right (level) · your up → up · your forward → into the scene (level)
-    per-direction scale: your comfortable reach → the wall of the reachable box (ray from the centre)
-    neutral hand → the box centre (white cross)
-    camera changes later? the command frame is recomputed; no re-capture
-
- 4. VERIFY: touch 4 magenta targets with the gripper (within 3 cm, held 1 s)
-    accepted → profile saved (data/profiles/<arm>_<name>.json) and reused next session
-    not accepted → the worst axis is reported; X re-captures only that axis
+ "could you set the little yellow one down next to the red cup"
+     │ laptop: Whisper (local)              stop / hold on / reset → local, immediate
+     ▼
+ app → Nebius Token Factory → Nemotron 3 Nano, response_format = JSON schema of Intent
+     ▼
+ {"action": "move", "object": "block", "relation": "beside", "reference": "cup", "say": "..."}
 ```
 
-Every clutch-in afterwards is a **quick re-centre** (your pose at that moment becomes neutral) followed by a slow
-**glide** (12 cm/s) to the mapped point, so the arm never jumps.
+- **Local parser** (`planner/fast_path.py`). This parser runs in the control loop before the cloud call. It does:
+  - named poses (stow, ready, home)
+  - Cartesian jogs ("move left 10 cm", "drop 5 cm", "lift a bit")
+  - joint jogs ("turn the base 20 degrees")
+  - speed changes, short sequences ("stow then home") and context ("again", "the other way").
 
-Implementation: [`body/calibration.py`](src/rover_intent/body/calibration.py) (maths),
-[`body/calib_session.py`](src/rover_intent/body/calib_session.py) (session + mapper).
+  If the parser does not fully understand a command, Nemotron gets the command.
+  Thus a sentence like "put the cup left of the bottle" does not cause a wrong jog.
+- **No confirmation on the real arm.** A spoken "yes" step was too slow with a real microphone.
+  Poses, jogs and skills start immediately. "Stop" is always local.
+- **IK fallback.** If a jog fails with the full wrist orientation, the jog tries again with the wrist held.
+- **Offline.** Without `NEBIUS_API_KEY`, an offline keyword parser replaces Nemotron.
+  For more data, see [`docs/VOICE.md`](docs/VOICE.md).
+
+### Muse 2: double jaw clench operates the gripper
+
+The Muse 2 has four dry sensors: TP9, AF7, AF8 and TP10.
+These sensors are behind the ears and on the forehead. No sensor is above the motor cortex.
+The sensors record jaw muscle (EMG) signals well.
+Thus the headband operates the gripper:
+
+- Clench the jaw two times quickly to close the gripper.
+- Clench two times again to open it.
+
+The detector (`eeg/clench.py`) works as follows:
+
+1. Each channel gets a 60 Hz notch filter and a 30 to 100 Hz band-pass filter.
+2. The detector compares the signal level with a moving relaxed baseline.
+3. The score is the median of all channels. Thus one loose sensor cannot cause a toggle.
+4. A toggle needs exactly two short clenches within 0.8 s, then 0.5 s of quiet.
+5. Three or more clenches count as chewing. The detector ignores them.
+
+The toggle is a single message. It does not conflict with voice "release" or with the hand.
+The toggle also operates when the arm holds its position.
+Thus the operator can operate the gripper when the camera does not see the hand.
+
+To start the headband, use one command: `python -m rover_intent.eeg.muse_ready`.
+This command checks the fit, calibrates the clench in approximately 1 minute and starts the stream
+([`docs/MUSE_READY.md`](docs/MUSE_READY.md)).
+The raw EEG goes from the laptop to the host over TCP ([`docs/EEG_STREAM.md`](docs/EEG_STREAM.md)).
+EEG data stays on the local disk. We do not commit or upload EEG data.
+
+### EEG research (offline)
+
+These studies use public datasets and 8 channels above the motor cortex.
+An 8-channel OpenBCI board can record these channels. Chance is 50 %.
+
+**PhysioNet EEG Motor Movement/Imagery** (109 subjects, imagined fist clench against rest):
+
+| Model | Calibrated (within-subject CV) | New person (leave-subjects-out) |
+|---|---|---|
+| CSP + LDA | 68.5 % | 58.5 % |
+| Riemannian tangent space + LR | **69.5 %** | **60.2 %** |
+
+**BNCI Horizon 001-2020** (15 subjects, real reach-and-grasp, causal filters):
+
+| Contrast | Features | Calibrated | New person |
+|---|---|---|---|
+| 1 s before the reach, against idle | mu/beta | 74.4 % | 66.1 % |
+| 1 s before the grasp, against idle | mu/beta | **86.2 %** | **75.3 %** |
+| Hand closing against reach start (the arm moves in both) | MRCP | **82.1 %** | 72.8 % |
+
+Checks:
+
+- Eye-movement channels alone give weak results for intent (60 %).
+- Removal of the EOG signal does not change the results much.
+- Rest blocks at the end of a session give accuracy that is too high (96 %). Thus we show only in-run comparisons.
+
+A **hybrid decoder** combines mu/beta ("grasp soon") and MRCP ("close now").
+It ran pseudo-online through the real arbiter, with a maximum of 1 false close for each idle minute.
+At that rate, it found approximately 19 % of grasps (calibrated) and 5 % (new person).
+This is not sufficient for continuous use. Thus EEG does not operate the arm.
+On the Muse 2 sensor positions, the usable brain signal is eyes-closed alpha.
+Offline, it gave a balanced accuracy of approximately 0.84 to 0.86 (calibrated).
+Imagined movement on a Muse 2 alone is at chance level.
+For more data, see [`docs/EEG.md`](docs/EEG.md) and [`docs/muse_readiness.md`](docs/muse_readiness.md).
 
 ---
 
 ## Clutch and safety
 
-```
-              F  /  open palm held UP 1 s  /  LEFT hand raised (0.3 s, debounced)
- ┌──────────┐ ───────────────────────────────────────────────► ┌──────────────┐
- │  FROZEN  │                                                  │  RE-CENTRE   │
- │ arm holds│ ◄─── moved > 3 cm: countdown restarts            │  hold still  │
- └──────────┘                                                  └──────┬───────┘
-     ▲   ▲   F again / left hand down 0.5 s                           │ 2 s
-     │   └──────────────────────────────────────┐                     ▼
-     │   no packets 0.5 s  ("link lost")        └────────────── ┌──────────────┐
-     └── arm not visible 1 s ("tracking lost") ──────────────── │  FOLLOWING   │
-                                                                └──────────────┘
- During calibration capture the gesture triggers are ignored (the "UP" pose must not move the arm).
+```mermaid
+stateDiagram-v2
+  [*] --> HOLD
+  HOLD --> FOLLOWING: palm up 0.6 s, F key or left hand up
+  FOLLOWING --> HOLD: F key again, left hand down or link lost 0.5 s
+  FOLLOWING --> PAUSED: hand leaves the image
+  PAUSED --> FOLLOWING: hand back for 0.3 s, continue from the current pose
+  PAUSED --> HOLD: hand not seen for 8 s or link lost
 ```
 
-The `SafetyLayer` sits between every command source and the arm:
-- joint position limits from the URDF; per-joint velocity and acceleration caps (discrete braking curve,
-  stress-tested over 20 000 random steps: never exceeded);
-- a Cartesian reach box measured from IK (targets outside are clamped, and the ghost turns amber);
-- an input watchdog that brakes to a stop when a source goes stale; a latching e-stop;
-- anti-windup: the commanded trajectory never runs more than 0.25 rad ahead of the measured joints.
+In HOLD and PAUSED the arm stays in its position. In FOLLOWING the arm starts from its current position, with no jump.
 
----
+When the operator reaches down to the table, the hand often leaves the camera image.
+In the first real-arm sessions, each session stopped for this reason.
+Thus the clutch now pauses and holds the arm. It does not release the arm.
 
-## Voice: Nemotron on Nebius Token Factory
+The `SafetyLayer` is between all command sources and the arm. It has these functions:
 
-```
- "could you set the little yellow one down next to the red cup"
-     │ laptop: Whisper (local)                       stop / hold on / reset → handled locally, instantly
-     ▼
- app → Nebius Token Factory (OpenAI-compatible) → nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B
-       system prompt: the scene's objects with descriptions + one line per action + "clarify"
-       response_format: JSON schema of Intent
-     ▼
- {"action": "move", "object": "block", "relation": "beside", "reference": "cup", "say": "..."}
-```
-
-- **Instant local fast path** (`src/rover_intent/planner/fast_path.py`): a strict local parser runs in the control
-  loop *before* the cloud call and handles the short commands with no round trip (< 50 ms): named poses
-  (stow / ready / go back / home ...), Cartesian jogs ("move left 10 cm", "forward a bit"), joint jogs ("turn the
-  base 20 degrees"), speed ("slower" / "normal speed"), short sequences ("stow then home"), and context ("again",
-  "the other way"). Anything it does not fully understand returns `None` and falls through to Nemotron, so it can
-  never misfire on a sentence like "put the cup left of the bottle".
-- The cloud call runs **off the control loop** (worker thread); a later "stop" cancels pending cloud results.
-- No hand-written language rules or object whitelists: the model resolves colours, synonyms and ambiguity itself
-  and may answer `clarify` ("which one?"); the skill layer still refuses objects it cannot see.
-- On 7 test phrases Nano parsed 7/7 and Super 5/7 (Super heard "whoa whoa hold on" as *grasp*), so Nano is the
-  default. Typical latency 1.5-4 s.
-- **On the real-arm profile** (`dev_arm_real`) named poses and the no-camera jogs/sequences/speed move at once, with
-  no spoken "yes" (the two-step confirm was too slow on the real mic); the pick/place **skills stay confirm-gated**.
-- Without `NEBIUS_API_KEY` an offline keyword parser keeps the loop usable. Full latency/accuracy table in
-  [`docs/VOICE.md`](docs/VOICE.md).
+- Joint position limits from the URDF.
+- Velocity and acceleration limits for each joint. A stress test of 20 000 random steps did not exceed them.
+- A reach box. A target outside the box moves to the box edge, and the target marker changes to amber.
+- An input watchdog. If an input stops, the arm decelerates to a stop.
+- A latching emergency stop.
+- Anti-windup. The command is never more than 0.25 rad in front of the measured joints.
 
 ---
 
 ## Autonomous skills
 
-`pick`, `place`, `move` (pick + place), `grasp`, `release`, `home`, `stop`, `follow`, `reset`.
+The skills are `pick`, `place`, `move` (pick and place), `grasp`, `release`, `home`, `stop`, `follow` and `reset`.
 
 ```
- pick X:   above X at travel height → pre-grasp (settle sideways ≤ 3 mm, 0.3 s) → straight down at 5 cm/s
-           → close (0.8 s dwell) → up to travel height
- place:    above goal → pre-place (settle) → straight down → open → up
- travel height = tallest object top + 8 cm;  tall objects are grasped near the top (palm clearance rule)
+ pick X:   above X at transit height → pre-grasp (align) → straight down
+           → close (wait) → up to transit height
+ place:    above goal → pre-place (align) → straight down → open → up
 ```
 
-The arbiter feeds the IK a **straight-line "carrot"** that slides toward each waypoint (0.3 m/s travel, 5 cm/s final
-approach). This fixed a real bug: jumping the IK target 10 cm down produced a curved joint path that swung the gripper
-13 mm sideways into the rim of a 70 mm bottle (7.5 mm clearance per side).
+The arbiter gives the IK a target that moves in a straight line to each waypoint.
+This corrected a problem in the simulation.
+Before, a 10 cm target change gave a curved joint path.
+That path moved the gripper 13 mm to the side, into the edge of a 70 mm bottle.
+The clearance was 7.5 mm on each side.
+The real-arm settings are in `configs/arms/dev_arm_real.yaml`.
 
 ---
 
-## The arm and the simulation
+## Hardware
 
-Three arm profiles are supported (`configs/arms/*.yaml`): **dev_arm** (sim), **dev_arm_real** (the same arm tuned for
-the physical hardware), and **rover2026**.
+| Part | Description |
+|---|---|
+| Arm | The UBC Rover 2023 development arm: 6 revolute joints, stepper motors, Teensy 4.1 firmware, USB serial |
+| Driver | The team ROS 2 Jazzy `stepper_arm_driver` (UBC-Snowbots RoverFlake2). An SSH tunnel connects the laptop serial port to the host |
+| Gripper | The end effector of the arm (axis 7). It closes in 2.8 s and opens in 2.0 s, by time, with no position feedback. A small force stays on while it is closed |
+| Operator equipment | A laptop webcam (body), a laptop microphone (voice) and a Muse 2 headband (jaw clench) |
+| Table camera | Intel RealSense D415 depth camera. It finds the objects on the table and measures their positions and heights |
+| Host | Linux, NVIDIA RTX GPU (Isaac Sim), ROS 2 Jazzy |
 
-| | **dev_arm** (the team's 2023 / development arm) | rover2026 |
-|---|---|---|
-| source | team description `dev_arm_description` | 2025-26 SolidWorks export |
-| joints | 6 revolute, base yaw ±86° | 6 revolute, base yaw ~327° |
-| tool | +z of `link_6`, TCP 0.20 m | +x of `a6_EE_holder`, TCP 0.145 m |
-| actuation (real) | steppers + Teensy 4.1, USB serial | Maxon motors, moteus over CAN |
-| reach box (top-down, from home) | x 0.40-0.62, y ±0.40, z 0.03-0.32 m | x 0.35-0.80, y ±0.40, z 0.15-0.45 m |
-| objects | on the arm's own surface | on a 12 cm table |
+The `dev_arm_real` profile has these settings from bench measurements:
 
-### Driving the real arm (`dev_arm_real`)
+- The home pose is the team's return-to-base pose.
+- The velocity limits match the measured firmware speed (approximately half the commanded speed).
+- The acceleration ramp is slow because of the command delay of 0.17 to 0.31 s.
+- The table, pedestal and board heights come from measurements at the arm.
 
-The `dev_arm_real` profile is the sim dev arm retuned from bench measurements (2026-10-23) so the hardware can follow
-the sim safely:
-- home is Rowan's return-to-base rest pose, and the workspace box is moved up and in to contain it and sit inside the
-  real reachable shell;
-- the firmware runs a velocity command at **about half** the commanded speed (bench sweep), so the per-joint velocity
-  caps are dropped to a conservative fraction of the firmware max and the follower defaults to the matching speed, so
-  the sim never outruns the arm;
-- there is a measured **0.17-0.31 s command lag** before the near-instant ramp, so a gentler sim ramp is used.
-
-`scripts/record_real.sh` records a raw session, `scripts/real_bag_to_csv.py` converts it to CSV, and the
-`scripts/bench/` sweeps (axis, drift, end-stop) produced the numbers above. See
-[`docs/REAL_DATA.md`](docs/REAL_DATA.md) and [`docs/BENCH_SESSION.md`](docs/BENCH_SESSION.md).
-
-Simulation details:
-- Isaac Sim 6.0.1 + Isaac Lab 3.0, standalone script, CPU PhysX for a single arm (≈5× faster per step than the GPU
-  pipeline at this scale), rendering gated to every 4th step, global-clock pacing → **1.00× real time** under load.
-- Grasps are physical (friction, finger force limits); no attach/detach shortcuts.
-- Arm links ignore gravity (perfect gravity compensation); stiff PD position drives stand in for the steppers.
-- The bridge reports object poses (sim ground truth stands in for perception) and its camera pose (used by the
-  calibration).
-- The upstream gripper geometry of the dev arm was unusable in sim (raw CAD offsets); a placeholder parallel gripper
-  (85 mm opening) sits at the upstream tool frame until the real end effector is measured.
+For more data, see [`docs/REAL_ARM.md`](docs/REAL_ARM.md), [`docs/REAL_DATA.md`](docs/REAL_DATA.md),
+[`docs/BENCH_SESSION.md`](docs/BENCH_SESSION.md) and [`docs/GRIPPER.md`](docs/GRIPPER.md).
 
 ---
 
-## EEG grasp-intent research
+## Installation and operation
 
-Offline and pseudo-online studies on public datasets, using 8 motor-strip channels (what an 8-channel OpenBCI board
-can cover). Chance is 50 %.
+### Install the control host (Linux, NVIDIA GPU)
 
-**PhysioNet EEG Motor Movement/Imagery** (109 subjects, imagined fist clench vs rest):
+1. Install the package:
+   ```bash
+   uv venv .venv && uv pip install -p .venv/bin/python -e ".[dev]"
+   ```
+2. Optional: install the EEG study packages:
+   ```bash
+   uv pip install -p .venv/bin/python mne pyriemann scikit-learn joblib scipy
+   ```
+3. Install Isaac Sim 6.0.1 and Isaac Lab 3.0 in a separate virtual environment.
+   The commands below use the path `../isaac/isaacenv6`.
+4. Make the arm USD file one time:
+   ```bash
+   .venv/bin/python sim/make_dev_arm_urdf.py
+   OMNI_KIT_ACCEPT_EULA=YES ../isaac/isaacenv6/bin/python sim/import_gripper.py \
+       --urdf assets/dev_arm/dev_arm_gripper.urdf --out assets/dev_arm/usd
+   ```
+5. Optional: add the Nebius key for Nemotron. Without the key, the offline parser operates:
+   ```bash
+   echo "NEBIUS_API_KEY=..." > .env && chmod 600 .env
+   ```
 
-| model | calibrated (within-subject CV) | new person (leave-subjects-out) |
-|---|---|---|
-| CSP + LDA | 68.5 % | 58.5 % |
-| Riemannian tangent space + LR | **69.5 %** | **60.2 %** |
-
-**BNCI Horizon 001-2020** (15 subjects, real self-paced reach-and-grasp, causal filters):
-
-| contrast | features | calibrated | new person |
-|---|---|---|---|
-| 1 s before the reach vs in-run idle | mu/beta | 74.4 % | 66.1 % |
-| 1 s before the grasp vs idle | mu/beta | **86.2 %** | **75.3 %** |
-| hand closing vs reach start (arm moving in both) | MRCP | **82.1 %** | 72.8 % |
-
-Checks: eye-movement channels alone are weak for intent (60 %); regressing out EOG barely changes the results;
-rest blocks recorded at the end of a session inflate accuracy (96 %), so only in-run comparisons are quoted.
-
-**Hybrid decoder** (mu/beta "grasp coming" × MRCP "close now", streaming causal filters, pseudo-online through the
-real arbiter): at ≤ 1 false close per idle minute it catches only ~19 % of grasps (calibrated) and ~5 % (new person).
-Window accuracy does not survive continuous use yet; context gating (only listen near an object) is the next step.
-EEG therefore *assists* grasping in this project; it is not the primary trigger.
-
-### Muse 2: double jaw clench toggles the gripper
-
-We have a Muse 2 headband. Its 4 dry sensors (TP9, AF7, AF8, TP10) sit behind the ears and on the forehead, with
-nothing over the motor strip, so the imagined-grasp decoders above can't run on it. What it picks up very well is
-**jaw-muscle (EMG) activity**, so the Muse drives a hands-free **grip toggle**: clench twice quickly to close the
-gripper, twice again to open it. It is a muscle signal from the headband, not decoded brain activity, and we label it
-that way.
-
-How it works (`src/rover_intent/eeg/clench.py`): each channel is notch-filtered (60 Hz), band-passed 30-100 Hz and
-turned into a loudness envelope. The score is the median over channels of loudness / that channel's relaxed level, so
-one loose electrode can't trigger it. A toggle needs **exactly two** short clenches with the second starting within
-0.8 s of the first, then 0.5 s of quiet. Three or more in a row count as chewing and are ignored; a clench held over
-1.5 s is ignored. The detector sends a one-shot `GripToggle` message (not a level), so it never fights voice
-"release", resets or grab assists. In FOLLOW mode a toggle behaves like a held fist / open hand: near an object it
-starts the grab assist, while holding it starts the release.
+### Install the operator laptop (Windows, macOS or Linux)
 
 ```bash
-# laptop with the Muse (Bluetooth on); clench.py also works as a single copied file
-pip install numpy scipy brainflow
-python -m rover_intent.eeg.clench calibrate --out data/profiles/clench_pranav.json   # ~1.5 min, guided:
-#   relax 20 s -> 8 x "CLENCH" -> talk + chew 20 s; prints GOOD / MARGINAL / POOR
-python -m rover_intent.eeg.clench run --profile data/profiles/clench_pranav.json --host <vm>   # --dry to just print
-python -m rover_intent.eeg.clench replay --profile ... --file data/eeg_recordings/clench_*.npz  # offline re-check
+pip install mediapipe opencv-python numpy            # laptop/body_client.py
+pip install faster-whisper sounddevice numpy         # laptop/voice_plus.py
+pip install numpy scipy brainflow                    # Muse 2 (eeg/stream_tx.py, eeg/muse_ready.py)
 ```
-Set `body.grip_from_hand: false` while using it (otherwise an open hand re-opens the gripper). `--board muse2-bled
---serial COM3` uses a BLED112 dongle instead of native Bluetooth.
 
-### Muse 2: genuine-EEG controls (research, offline)
+### Operate the system
 
-Jaw clench is EMG, not brain activity. For a real brain-signal control we characterised two options offline on public
-datasets, restricted to the electrode sites nearest the Muse's, before the headband arrives. Full tables, caveats and
-a day-one checklist are in [`docs/muse_readiness.md`](docs/muse_readiness.md).
+1. On the host, start the Isaac twin:
+   ```bash
+   OMNI_KIT_ACCEPT_EULA=YES ../isaac/isaacenv6/bin/python sim/isaac_bridge.py --viz kit --arm dev_arm_real
+   ```
+2. On the host, start the control loop:
+   ```bash
+   .venv/bin/python -m rover_intent.app --backend isaac --arm dev_arm_real
+   ```
+3. On the laptop, start the webcam control and the voice control:
+   ```bash
+   python body_client.py --host <host>
+   python voice_plus.py --host <host>
+   ```
+4. Make sure that the team `stepper_arm_driver` runs. Then start the follower:
+   ```bash
+   source /opt/ros/jazzy/setup.bash && python3 scripts/sim_to_real.py --ee    # --dry prints only
+   ```
 
-- **Alpha / eyes-closed** ("close your eyes to confirm") works on the Muse's own electrodes: on EEGMMIDB (109
-  subjects, chance 50 %) the Muse-proxy sites reach ~0.84-0.86 balanced accuracy calibrated and ~0.73-0.76 cold at a
-  2-3 s window. This is the recommended day-one control.
-- **SSVEP** ("look at a flickering box") is near chance on the Muse's temporal electrodes (Wang2016, 9 subjects:
-  2-class <= 0.68), but a single occipital electrode takes it to ~0.94 (2-class) / ~0.90 (4-class). It is the stretch
-  goal, only if the Muse AUX port can drive an occipital electrode (unverified).
+On the bench host, `tools/rover-up` does steps 1, 2 and 4 with one command.
+It starts the simulation, the arm link and the follower.
+It never homes the arm. A person at the arm must do the homing.
+See [`tools/README.md`](tools/README.md).
 
-Tools (standalone on the laptop, `pip install -e '.[muse]'`): `eeg/muse_session.py` records a guided ~10 min session
-(alpha blocks + frame-locked SSVEP flicker, `--check-display` to test the screen), `eeg/muse_report.py` turns it into
-a readiness report, and `eeg/muse_detect.py` runs the live SSVEP/alpha detector and emits a confirm/grab over UDP.
+Network ports:
 
-Results so far are on **synthetic** Muse-like signals only (assumed levels: a clench is tens to hundreds of uV of
-EMG vs a few uV of background above 30 Hz): 60/60 random double clenches caught (relax gaps down to 0.15 s), 0 false
-toggles in 10 min of talking + blinking + chewing, toggle fires ~1.6 s after the first clench starts. Not yet run on
-the real headband.
+| Port | Function |
+|---|---|
+| 47100 | App (UDP in: poses, speech text, queries) |
+| 47110 / 47111 | Isaac bridge command / state |
+| 47120 | TCP relay for SSH tunnels |
+| 47130 / 47131 | HUD and webcam panel |
+| 47150 | EEG hub (TCP) |
 
-**Day one, one command** (`eeg/sunday.py`, see [`docs/SUNDAY.md`](docs/SUNDAY.md)): `python -m rover_intent.eeg.sunday
---board muse2 --name pranav` records a short labelled session (signal-quality gate, rest, single/double clenches,
-negatives, eyes-open/closed), fits YOUR clench + eyes-closed-alpha calibration on a held-out split, writes the
-profiles where the tools load them (old ones backed up), and runs a live double-clench -> gripper toggle into the SIM
-(spare port, never the real arm). It is resumable and re-runs a single block with `--only <stage>`. Saturday dry run
-with no headband: `python -m rover_intent.eeg.sunday --preflight` (synthetic board, end to end, < 3 min). Your EEG
-stays on local disk and is never committed or uploaded.
+---
+
+## Tests
+
+```bash
+.venv/bin/python -m pytest -q   # 567 tests
+scripts/gate.sh                 # the tests, plus a live grasp test in Isaac Sim
+```
+
+The 567 tests include kinematics, safety, the local parser, Nemotron parsing, skills, the arbiter, the clutch,
+`plane` and `arm_mirror` control, the full control loop over UDP with a mock arm, the gripper with two inputs,
+Muse clench detection, the EEG decoder, the follower and the IK reach of each skill waypoint.
+
+Run `scripts/gate.sh` after each change to the scene, home pose, gripper, skills, IK or configuration.
+One time, a change to the home pose broke the bottle grasp. Only the gate found this problem.
 
 ---
 
 ## Repository layout
 
 ```
-argetlam/
-├── configs/
-│   ├── default.yaml            shared settings (loop, network, body mapping, Nemotron, EEG, clutch)
-│   └── arms/{dev_arm,dev_arm_real,rover2026}.yaml   arm-specific: URDF, joints, home, limits, reach box, scene, modes
+Argetlam/
+├── configs/            default.yaml (shared) + arms/{dev_arm, dev_arm_real, rover2026}.yaml
 ├── src/rover_intent/
-│   ├── app.py                  the 50 Hz control loop wiring everything together
-│   ├── config.py               profile-aware config loader (ROVER_ARM / --arm)
-│   ├── types.py                message types (also the laptop <-> host JSON)
-│   ├── body/                   plane (image-plane teleop), arm_mirror (full-arm joint mirror), clutch,
-│   │                           calibration (frame, capture, Kabsch fit, profile), calib_session (session + mapper)
-│   ├── control/                kinematics (URDF FK, Jacobian, DLS IK), safety, arbiter, stepper_map
-│   ├── planner/                fast_path (instant local parser), nemotron (intent parser), scene, skills
-│   ├── robot/backends.py       MockArm · IsaacArm (UDP) · RealArm (unused; real arm driven via scripts/sim_to_real.py)
-│   ├── transport/udp.py        JSON-over-UDP link
-│   └── eeg/                    datasets, motor-imagery training, reach-and-grasp studies, hybrid decoder, clench, live
-├── sim/
-│   ├── isaac_bridge.py         Isaac Lab scene + UDP bridge, markers, camera views
-│   ├── make_dev_arm_urdf.py    dev arm + placeholder gripper -> URDF
-│   ├── make_gripper_urdf.py    rover2026 + gripper -> URDF
-│   └── import_gripper.py       URDF -> USD (Isaac Sim importer)
-├── ros/servo/                  MoveIt Servo on the simulated arm (experimental; sim / mock only)
-├── laptop/                     body_client.py (webcam), voice_client.py (Whisper) - standalone single-file scripts
-├── scripts/                    sim_to_real.py / real_to_sim.py (real-arm follower + mirror), record_real.sh +
-│                               real_bag_to_csv.py (recorder + CSV), bench/ (characterization), tcp_relay.py, hud.py,
-│                               check_grasps.py, gate.sh, replay_session.py, fake_laptop.py
-├── assets/                     dev_arm (team model, see SOURCE.md), rover2026
-├── tools/                      bench launchers: rover-up, rover-stack, arm-link, rover-follow (see tools/README.md)
-├── tests/                      unit + integration tests (control loop, calibration flow, decoder streaming)
-└── docs/                       PLAN.md, VOICE.md, PLANE_TELEOP.md, ARM_MIRROR.md, REAL_ARM.md, REAL_DATA.md,
-                                BENCH_SESSION.md, VIDEO_HUD.md, EEG.md, GRIPPER.md
+│   ├── app.py          the 50 Hz control loop
+│   ├── body/           plane and arm_mirror control, clutch (with pause), calibration
+│   ├── control/        kinematics (URDF FK, Jacobian, DLS IK), safety, arbiter, stepper_map
+│   ├── planner/        fast_path (local parser), nemotron (intent), scene, skills
+│   ├── perception/     camera model, ArUco and open-vocabulary detectors, tracker, camera sender
+│   ├── robot/          MockArm, IsaacArm
+│   └── eeg/            Muse clench, stream hub, muse_ready, EEG studies and decoders
+├── sim/                Isaac Lab bridge, URDF builders, USD importer
+├── laptop/             body_client.py, voice_plus.py, table_cam.py, send_object_poses.py
+├── scripts/            sim_to_real.py / real_to_sim.py, recorders, bench tests, gate.sh, replay_session.py,
+│                       fake_laptop.py, check_grasps.py
+├── tools/              bench launchers: rover-up, rover-stack, arm-link, rover-follow
+├── ros/servo/          MoveIt Servo on the simulated arm (experimental)
+├── assets/             dev_arm (team model, see SOURCE.md), rover2026
+├── tests/              567 tests
+└── docs/               one page for each subsystem (PLANE_TELEOP, VOICE, REAL_ARM, GRIPPER, PERCEPTION, EEG, ...)
 ```
 
 ---
 
-## Setup
+## Users
 
-### Simulation / control host (Linux, NVIDIA GPU)
-```bash
-# Python environment for the app (CPU only)
-uv venv .venv && uv pip install -p .venv/bin/python -e ".[dev]"
-uv pip install -p .venv/bin/python mne pyriemann scikit-learn joblib scipy   # EEG studies (optional)
-
-# Isaac Sim 6.0.1 + Isaac Lab 3.0 in a separate venv (path used below: ../isaac/isaacenv6)
-
-# build the arm USD once
-.venv/bin/python sim/make_dev_arm_urdf.py
-OMNI_KIT_ACCEPT_EULA=YES ../isaac/isaacenv6/bin/python sim/import_gripper.py \
-    --urdf assets/dev_arm/dev_arm_gripper.urdf --out assets/dev_arm/usd
-
-# Nemotron (optional; offline parser without it)
-echo "NEBIUS_API_KEY=..." > .env && chmod 600 .env
-```
-
-### Operator laptop (Windows / macOS / Linux)
-The laptop scripts are standalone (copy the single file):
-```bash
-python -m venv rover-body && rover-body/Scripts/activate      # or: source rover-body/bin/activate
-pip install mediapipe opencv-python numpy                      # body_client.py (MediaPipe Tasks API)
-pip install faster-whisper sounddevice numpy                   # voice_client.py
-pip install numpy scipy brainflow                              # eeg/clench.py (Muse 2 jaw-clench toggle)
-```
+- **People who cannot easily use a joystick or a controller.** Body, voice and jaw clench are three
+  separate inputs. Each input alone can operate the gripper.
+- **Rover and field-robot teams.** An operator can control the arm by hand, give a pick to voice and then take
+  control again. All inputs use one safety layer. This arm is the UBC Rover development arm.
+- **Robotics developers.** The same control loop runs with a mock arm, in Isaac Sim and on the real arm.
+  The repository has a test suite and a replay tool for recorded sessions.
 
 ---
 
-## Running it
+## Limitations
 
-```bash
-# host: Isaac bridge (GPU) + app + relay + HUD
-OMNI_KIT_ACCEPT_EULA=YES ../isaac/isaacenv6/bin/python sim/isaac_bridge.py --viz kit   # GUI on :0
-.venv/bin/python -m rover_intent.app --backend isaac          # control loop (ROVER_ARM=rover2026 to switch arms)
-.venv/bin/python scripts/tcp_relay.py                         # only needed for the SSH-tunnel path
-DISPLAY=:0 python3 scripts/hud.py                             # HUD overlay
-
-# laptop (direct UDP)
-python body_client.py --host <host-tailnet-ip>
-python voice_client.py --host <host-tailnet-ip>
-
-# laptop (when UDP can't reach the host)
-ssh -N -L 47120:127.0.0.1:47120 <host>
-python body_client.py --tunnel 127.0.0.1:47120
-
-# real arm: run the app on the dev_arm_real profile, then the follower (needs Rowan's stepper_arm_driver up)
-.venv/bin/python -m rover_intent.app --backend isaac --arm dev_arm_real
-source /opt/ros/jazzy/setup.bash && python3 scripts/sim_to_real.py --speed 0.2   # --dry to print only
-```
-
-First session: stand so the guide turns green → **C** (calibrate, ~35 s) → **F** or raise your left hand to follow →
-fist to grab, or just say what you want done.
-
-Camera views can be switched live: send `{"view": "behind"|"operator"|"high"|"top"|"side"}` to the bridge's command port.
-
-The body client also streams its annotated webcam to a panel **under** the HUD, so the operator can glance at one VM
-screen instead of the laptop window. It is **on by default**; `python body_client.py --no-video` turns it off. The HUD
-needs Pillow for the decode (`pip install pillow`); without it the panel shows a hint and the rest of the HUD still
-works. See `docs/VIDEO_HUD.md` for the flags, sizing and the UDP-vs-tunnel size note.
+- **The arm model has a height error of 9 cm** at the measured position. The board height in the configuration
+  corrects for this. We did not find the cause in the kinematic model yet.
+- **The gripper has no position feedback.** It operates by time. Thus the system cannot detect a jam.
+- **The real-arm results come from a small number of bench sessions.** They are not a controlled test series.
+  The numbers show what occurred. They are not success rates.
+- **Near the base, the elbow is at its travel limit.** Some points in the work box need the free-wrist fallback.
+- **The Muse 2 gripper input is a muscle (EMG) signal, not EEG.** Imagined-grasp decoding is offline only.
+  It does not operate the arm.
+- **The webcam has one lens.** For this reason, `plane` mode does not use depth. The left thumb controls reach.
+- **The simulation has two simplifications.** It has perfect gravity compensation. It has no model of missed motor steps.
 
 ---
 
-## Testing and the regression gate
+## Next steps
 
-```bash
-.venv/bin/python -m pytest -q        # 314 tests: kinematics, safety, parser, fast path, skills, arbiter, clutch,
-                                     # calibration, plane / arm_mirror teleop, the full control loop and calibration
-                                     # flow over UDP (mock arm), streaming EEG decoder == batch path, sim_to_real
-                                     # follower, per-arm IK reach of every skill waypoint
-scripts/gate.sh                      # tests + live grasp check in Isaac (every pick and every "move X beside Y")
-```
-
-The gate must pass after any change to the scene, home pose, gripper, skills, IK or config. It exists because a
-home-pose change once broke the bottle grasp and only a re-run caught it.
-
----
-
-## Configuration
-
-`configs/default.yaml` (shared) is deep-merged with `configs/arms/<profile>.yaml`; select the profile with
-`arm_profile`, the `ROVER_ARM` environment variable or `--arm`. Values marked `PLACEHOLDER` are not real hardware
-data yet (accelerations, the real gripper, rover2026 home).
-
-Key settings: `body.mode` (`plane` | `arm_mirror`; `plane` is the real-arm default), `body.clutch`,
-`body.grip_from_hand` (set `false` when the Muse clench toggle drives the gripper), `safety.workspace_min/max`,
-`arm.max_vel/max_acc`, `nemotron.model`, `confirm.presets/motion` (off on `dev_arm_real` so voice poses and jogs
-move at once).
-
----
-
-## Network ports
-
-| port | protocol | who | what |
-|---|---|---|---|
-| 47100 | UDP | app | body poses, transcripts, clutch keys, queries in; replies + 10 Hz status out |
-| 47110 | UDP | bridge | joint / gripper / marker commands, camera view changes |
-| 47111 | UDP | app | joint states, object poses, camera pose from the bridge |
-| 47120 | TCP | tcp_relay | newline-JSON ↔ UDP 47100 (for SSH tunnels) |
-| 47130 | UDP | HUD | status for the on-screen overlay |
-| 47131 | UDP | HUD video | live webcam JPEG stream, forwarded by the app to the video panel under the HUD |
-| 47101 | UDP | speech bubble | prompts / replies shown on screen |
-
----
-
-## Results so far
-
-| what | result |
-|---|---|
-| grasp gate in Isaac (dev arm) | 9/9: picks lift 23 / 11 / 26 cm, all six "move X beside Y" land within 1.2 cm |
-| sim speed | 1.00× real time under load (was 0.82×) |
-| **real arm** (dev_arm_real, voice presets + jogs) | tracks the sim to within about 0.5 deg after settling; firmware runs ~half the commanded speed, 0.17-0.31 s command lag (bench sweep) |
-| calibration (scripted operator standing 15° off-axis) | fit residual 0.1°, targets 2.0 / 2.1 / 2.2 / 1.8 cm, ~36 s |
-| voice parsing (Nemotron Nano) | 7/7 test phrases, 1.5-4 s |
-| safety layer | 20 000-step stress test: velocity/acceleration limits never exceeded |
-| EEG | see [EEG grasp-intent research](#eeg-grasp-intent-research) |
-
-The real arm has been driven by voice presets and jogs under the `dev_arm_real` profile. The laptop camera HUD panel
-and the `plane` left-hand joystick reach are implemented but not yet verified in a live session; everything else above
-is simulation, scripted input or offline data.
-
----
-
-## Known limitations
-
-- **Real arm driven, not yet fully commissioned**: the sim drives the hardware through the `sim_to_real.py` follower
-  and Rowan's `stepper_arm_driver` (the `RealArm` serial backend is unused), and voice presets and jogs have run on
-  it; broader live operator sessions, per-axis sign/offset refinement and the live camera HUD are still to come.
-- **Gripper**: the real end effector's geometry is unknown; a placeholder parallel gripper is used in sim.
-- **Monocular depth**: forward/back is the noisiest axis; the calibration's per-axis scales and filtering compensate
-  but don't remove it.
-- **Mirrored webcams**: the fit absorbs the rotation, but the tracked hand would be the left one; the client's M key
-  flips it.
-- **Stand-here guide thresholds** are tuned for a laptop webcam at about 1.5 m.
-- **EEG** is not reliable enough to trigger grasps alone (see above).
-- **Sim shortcuts**: perfect gravity compensation, no stepper missed-step model, object poses from ground truth.
-
----
-
-## Roadmap
-
-1. Finish commissioning the real arm: per-axis sign/offset refinement, wider workspace, and verifying the camera HUD
-   and the `plane` joystick reach in a live session.
-2. Live operator sessions with the body teleop; tune the stand-here guide.
-3. Context-gated EEG (listen only near an object) and per-user calibration.
-4. Perception for the real scene (ArUco / detection) to replace sim ground truth.
-5. Demo video and submission.
+1. Calibrate the kinematic model of the arm with 6 to 8 poses.
+2. Do a repeated, counted test series on the real arm (voice pick, body pick, Muse gripper).
+   Then the results can show success rates.
+3. Test context-gated EEG (EEG input only near an object) with per-user calibration.
+   Use a headband with sensors above the motor cortex.
 
 ---
 
@@ -580,8 +595,6 @@ is simulation, scripted input or offline data.
 Made by **Pranav Rajesh Krishnan**, with love from **UBC Rover**.
 
 Special thanks to **Rowan** and the incredible **arm and extended hardware team at UBC Rover**.
-
----
 
 ## License
 
